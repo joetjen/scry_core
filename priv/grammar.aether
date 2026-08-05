@@ -73,7 +73,7 @@ DOT    := "."
 
 ; ---- grammar ----
 
-select := KW_SELECT source:path select_ep1a? where:where_clause? LBRACE body:body_list RBRACE
+select := KW_SELECT source:path select_ep1a? where_clause? LBRACE body:body_list RBRACE
 
 ; Deliberately undefined -- core's EP1(a) header-modifier extension
 ; point (lang_spec §2, §5.2). A kind fragment supplies this rule; core
@@ -82,14 +82,22 @@ select := KW_SELECT source:path select_ep1a? where:where_clause? LBRACE body:bod
 ; suite for both halves of that claim (core alone fails
 ; Grammar.Analysis; core + a fragment that defines this rule succeeds).
 ;
-; Deliberately left unrenamed (`select_ep1a?`, not `modifier:select_ep1a?`)
-; -- explicitly naming an Opt-wrapped bare rule reference was found,
-; empirically, to produce a second, separate raw-text capture alongside
-; the properly dispatched one under the rule's own implicit
-; self-capture name, not a single renamed capture as the rest of
-; Aether's naming rules would suggest. The bare form doesn't have this
-; problem and is simpler besides -- Actions-level code reads the
-; extension point's own rule name directly, no alias needed.
+; Every optional (`?`-suffixed) *rule* reference below is deliberately
+; left unrenamed (`select_ep1a?`, `where_clause?`, `literal_list?` --
+; never e.g. `where:where_clause?`), for the same empirically-found
+; reason: explicitly naming an Opt-wrapped bare rule reference produces
+; a *second*, separate raw-text capture under the explicit name
+; alongside the properly dispatched one under the rule's own implicit
+; self-capture name -- not a single renamed capture the way the rest of
+; Aether's naming rules would suggest. Worse, the two also differ in
+; whether "absent" is even detectable the same way: a *renamed* optional
+; always produces a capture (raw text `""` when absent); the *bare*
+; form produces no capture key at all when absent, only ever appearing
+; when it actually matched. ScryCore.Actions relies on exactly that
+; distinction (`Map.has_key?/2`, not an `== ""` check) -- see its own
+; moduledoc. Does not apply to optional *token* references (`KW_NOT?`
+; below keeps its name fine) -- empirically, only rule references have
+; this problem.
 
 ; select_ep1a := <supplied by a kind fragment>
 
@@ -101,7 +109,7 @@ conjunction := left:negation (KW_AND right:negation)*
 negation    := neg:KW_NOT? expr:comparison
 
 comparison := left:path op:comp_op right:literal
-            | left:path in:KW_IN LBRACK items:literal_list? RBRACK
+            | left:path in:KW_IN LBRACK literal_list? RBRACK
 
 comp_op := LE | GE | NOT_EQ | EQ | LT | GT
 
