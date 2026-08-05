@@ -138,4 +138,82 @@ defmodule ScryCore.ActionsTest do
     assert {:ok, %Query{} = q4} = run(g, ~s(SELECT flags WHERE mask = 0b101 { name }))
     assert q4.wheres == [{:cmp, :eq, ["mask"], 5}]
   end
+
+  test "group by a single field", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders GROUP BY status { status }))
+    assert q.group_bys == [["status"]]
+  end
+
+  test "group by multiple, dotted fields", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT orders GROUP BY customer.region, status { status }))
+
+    assert q.group_bys == [["customer", "region"], ["status"]]
+  end
+
+  test "having, independent of group by", %{grammar: g} do
+    # `having` doesn't require an aggregate expression to *parse* yet --
+    # there's no such thing as an aggregate expression in the grammar at
+    # all yet (priv/grammar.aether's own header), so this only proves
+    # the clause itself parses and reaches Query.havings, not the
+    # "having requires an aggregate" compile-time check lang_spec.md §5.2
+    # describes (also not implemented yet, same reason).
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders HAVING total > 100 { id }))
+    assert q.havings == [{:cmp, :gt, ["total"], 100}]
+  end
+
+  test "distinct is absent by default and present when written", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name }))
+    refute q.distinct
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT users DISTINCT { name }))
+    assert q2.distinct
+  end
+
+  test "order by, default direction is ascending", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users ORDER BY age { name }))
+    assert q.order_bys == [{["age"], :asc}]
+  end
+
+  test "order by, explicit desc/asc, multiple fields, case-insensitive", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users ORDER BY age desc, name ASC { name }))
+
+    assert q.order_bys == [{["age"], :desc}, {["name"], :asc}]
+  end
+
+  test "limit alone", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users LIMIT 10 { name }))
+    assert q.limit == 10
+    assert q.offset == nil
+  end
+
+  test "limit with offset", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users LIMIT 10 OFFSET 20 { name }))
+    assert q.limit == 10
+    assert q.offset == 20
+  end
+
+  test "the full header-modifier chain together, in its required fixed order", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(SELECT orders WHERE total > 50 GROUP BY status DISTINCT
+                  ORDER BY status LIMIT 5 OFFSET 1 { status })
+             )
+
+    assert q.wheres == [{:cmp, :gt, ["total"], 50}]
+    assert q.group_bys == [["status"]]
+    assert q.distinct
+    assert q.order_bys == [{["status"], :asc}]
+    assert q.limit == 5
+    assert q.offset == 1
+  end
+
+  test "the fixed modifier order is enforced -- writing modifiers out of order fails to parse", %{
+    grammar: g
+  } do
+    assert {:error, _} = run(g, ~s(SELECT users LIMIT 5 WHERE age > 30 { name }))
+    assert {:error, _} = run(g, ~s(SELECT users ORDER BY age DISTINCT { name }))
+  end
 end

@@ -21,6 +21,22 @@ defmodule ScryCore.Executor do
   every outer row gets the identical nested result. A real, honest
   limitation of what the grammar can express today, not something this
   module works around.
+
+  **`run/3` only ever applies `where`/`select`.** `%Query{}` can now
+  carry `group_bys`/`havings`/`distinct`/`order_bys`/`limit`/`offset`
+  too (the grammar produces them, `ScryCore.Actions`), but this module
+  silently ignores all of them for now -- a real gap, not an oversight.
+  `distinct`/`order_by`/`limit`/`offset` are conceptually
+  straightforward as a post-projection pass; `group_by`/`having` are
+  not (they need real aggregate-*expression* evaluation, which doesn't
+  exist anywhere in this codebase yet, grammar included -- there's no
+  syntax to even write `sum(total)` as a body item today). Left as a
+  deliberately separate, later increment rather than rushed in here,
+  since how `distinct`/`order_by` compose exactly (whether `order_by`
+  sorts pre- or post-projection data, in particular) is a genuine
+  design question lang_spec.md §5.2/§6 states from a user's perspective
+  ("what's allowed to reference what"), not as an implementer-ready
+  algorithm.
   """
 
   alias ScryCore.{EngineBehaviour, Query, Rational}

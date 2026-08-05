@@ -78,10 +78,30 @@ defmodule ScryCore.Actions do
     with {:ok, source, ctx} <- captures.source.eval.(ctx),
          {:ok, ep1a, ctx} <- maybe_eval(captures, :select_ep1a, ctx),
          {:ok, where_pred, ctx} <- maybe_eval(captures, :where_clause, ctx),
+         {:ok, group_bys, ctx} <- maybe_eval(captures, :group_by_clause, ctx),
+         {:ok, having_pred, ctx} <- maybe_eval(captures, :having_clause, ctx),
+         {:ok, distinct, ctx} <- maybe_eval(captures, :distinct_clause, ctx),
+         {:ok, order_bys, ctx} <- maybe_eval(captures, :order_by_clause, ctx),
+         {:ok, limit_and_offset, ctx} <- maybe_eval(captures, :limit_clause, ctx),
          {:ok, select, ctx} <- captures.body.eval.(ctx) do
       variant = if ep1a == :absent, do: %{}, else: %{select_ep1a: ep1a}
       wheres = if where_pred == :absent, do: [], else: [where_pred]
-      {:ok, %Query{source: source, wheres: wheres, select: select, variant: variant}, ctx}
+      havings = if having_pred == :absent, do: [], else: [having_pred]
+      {limit, offset} = if limit_and_offset == :absent, do: {nil, nil}, else: limit_and_offset
+
+      {:ok,
+       %Query{
+         source: source,
+         wheres: wheres,
+         group_bys: absent_to([], group_bys),
+         havings: havings,
+         distinct: distinct != :absent,
+         order_bys: absent_to([], order_bys),
+         limit: limit,
+         offset: offset,
+         select: select,
+         variant: variant
+       }, ctx}
     end
   end
 
@@ -112,6 +132,54 @@ defmodule ScryCore.Actions do
   end
 
   def handle_rule(:where_clause, %{cond: cond_cap}, ctx), do: cond_cap.eval.(ctx)
+
+  def handle_rule(:group_by_clause, %{fields: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:having_clause, %{cond: cond_cap}, ctx), do: cond_cap.eval.(ctx)
+
+  # distinct_clause := KW_DISTINCT has no named capture -- `select`'s
+  # own handling only ever checks *presence* (maybe_eval/:absent), so
+  # the default single-capture passthrough already returning whatever
+  # handle_token/3's own default gives KW_DISTINCT's raw text is fine as
+  # is; no clause needed here, same reasoning as STRING/DECIMAL/RADIX/
+  # INTEGER above.
+
+  def handle_rule(:order_by_clause, %{items: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:order_item_list, %{head: head_cap, tail: tail_caps}, ctx) do
+    with {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
+      {:ok, [head | tail], ctx}
+    end
+  end
+
+  # `dir` is always a string ("" when absent, "desc"/"ASC"/... when
+  # present, any case per @case_insensitive) -- see priv/grammar.aether's
+  # own comment on `order_item` for why this is a value check, not
+  # Map.has_key?/2, unlike every *rule*-shaped optional in this file.
+  def handle_rule(:order_item, %{field: field_cap, dir: dir_cap}, ctx) do
+    with {:ok, field, ctx} <- field_cap.eval.(ctx),
+         {:ok, dir_text, ctx} <- dir_cap.eval.(ctx) do
+      direction = if String.downcase(dir_text) == "desc", do: :desc, else: :asc
+      {:ok, {field, direction}, ctx}
+    end
+  end
+
+  def handle_rule(:limit_clause, %{n: n_cap} = captures, ctx) do
+    with {:ok, limit, ctx} <- n_cap.eval.(ctx),
+         {:ok, offset, ctx} <- maybe_eval(captures, :offset_clause, ctx) do
+      {:ok, {limit, absent_to(nil, offset)}, ctx}
+    end
+  end
+
+  def handle_rule(:offset_clause, %{n: n_cap}, ctx), do: n_cap.eval.(ctx)
+
+  def handle_rule(:field_list, %{head: head_cap, tail: tail_caps}, ctx) do
+    with {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
+      {:ok, [head | tail], ctx}
+    end
+  end
 
   def handle_rule(:disjunction, %{left: left_cap, right: right_caps}, ctx),
     do: eval_chain(left_cap, :right, right_caps, :or, ctx)
@@ -191,6 +259,10 @@ defmodule ScryCore.Actions do
       :error -> {:ok, :absent, ctx}
     end
   end
+
+  # `maybe_eval/3`'s own :absent sentinel, resolved to a real default.
+  defp absent_to(default, :absent), do: default
+  defp absent_to(_default, value), do: value
 
   # Reuses Ichor.Actions.eval_all/2 (already correct for both a single
   # capture and a repeated-under-*/+ list of them) rather than

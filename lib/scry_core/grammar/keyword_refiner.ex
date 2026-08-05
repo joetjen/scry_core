@@ -22,7 +22,16 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "in" => :KW_IN,
     "nil" => :KW_NIL,
     "true" => :KW_TRUE,
-    "false" => :KW_FALSE
+    "false" => :KW_FALSE,
+    "group" => :KW_GROUP,
+    "by" => :KW_BY,
+    "having" => :KW_HAVING,
+    "distinct" => :KW_DISTINCT,
+    "order" => :KW_ORDER,
+    "limit" => :KW_LIMIT,
+    "offset" => :KW_OFFSET,
+    "desc" => :KW_DESC,
+    "asc" => :KW_ASC
   }
 
   @impl true

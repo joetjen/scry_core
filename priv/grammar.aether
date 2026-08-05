@@ -13,9 +13,14 @@
 ;     rest of the exact-rational tower -- arithmetic *expressions*,
 ;     inexact/float coexistence -- see ScryCore.Rational's own
 ;     moduledoc) deferred
-;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]` (§5) --
-;     group by/having/distinct/order by/limit, the rest of §5's keyword
-;     reference, and all of §6/§7/§8/§9 deferred
+;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
+;     full §5.2 header-modifier chain (`group by`/`having`/`distinct`/
+;     `order by`/`limit ... offset`, in their required fixed order) (§5)
+;     -- `group by ... rollup`/`... cube`, the "having requires an
+;     aggregate expression in the body" compile-time check (nothing
+;     checks it yet -- there's no such thing as an aggregate expression
+;     in the grammar yet either), and the rest of §5's keyword reference
+;     deferred; all of §6/§7/§8/§9 deferred
 ;   - one EP1(a) extension point (`select_ep1a`, lang_spec §2), proving
 ;     the union-of-simultaneous-kind-contributions composition pattern
 ;     the whole design actually needs (not "core references a rule it
@@ -55,7 +60,9 @@ TRIVIA  := (SPACE | COMMENT)*
 IDENT := [[:alpha:]_][[:alnum:]_-]*
   @refine("ScryCore.Grammar.KeywordRefiner", "refine",
           KW_SELECT, KW_WHERE, KW_AND, KW_OR, KW_NOT, KW_IN,
-          KW_NIL, KW_TRUE, KW_FALSE)
+          KW_NIL, KW_TRUE, KW_FALSE,
+          KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
+          KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC)
 
 ; ---- literals ----
 ;
@@ -111,7 +118,14 @@ NEVER := []
 
 ; ---- grammar ----
 
-select := KW_SELECT source:path select_ep1a? where_clause? LBRACE body:body_list RBRACE
+; Modifiers appear in lang_spec.md §5.2/§6's own fixed order, mirroring
+; evaluation order front to back: an EP1(a) modifier (narrows/reshapes
+; the source) runs first, then where (filters), group by (groups),
+; having (filters groups), distinct (dedupes the projection), order by
+; (sorts), limit ... offset (paginates last).
+select := KW_SELECT source:path select_ep1a? where_clause? group_by_clause?
+          having_clause? distinct_clause? order_by_clause? limit_clause?
+          LBRACE body:body_list RBRACE
 
 ; core's EP1(a) header-modifier extension point (lang_spec §2, §5.2).
 ; Unlike the language spec's own text, this is *not* "exactly one kind
@@ -147,6 +161,38 @@ select_ep1a := NEVER
 ; select_ep1a := <supplied by a kind fragment>
 
 where_clause := KW_WHERE cond:predicate
+
+; `... rollup`/`... cube` (lang_spec §5.2) not yet supported -- this is
+; always the "plain" group-by shape.
+group_by_clause := KW_GROUP KW_BY fields:field_list
+
+having_clause := KW_HAVING cond:predicate
+
+; A bare keyword, no argument -- `select`'s own `distinct_clause?`
+; reference only ever needs to detect *presence*, not read a value out
+; of this rule, so no named capture is needed here (same
+; single-capture-passthrough default `comp_op`'s own bare token
+; alternatives already rely on).
+distinct_clause := KW_DISTINCT
+
+order_by_clause := KW_ORDER KW_BY items:order_item_list
+order_item_list := head:order_item (COMMA tail:order_item)*
+
+; `dir:(KW_DESC | KW_ASC)?` -- a *named, optional parenthesized choice*
+; of tokens -- confirmed empirically (scratch grammar, not assumed) to
+; behave like every other optional *token* reference in this file
+; (`neg:KW_NOT?`): absence is a real capture, the literal empty string
+; `""`, checked by value -- not the `Map.has_key?/2` check a bare
+; optional *rule* reference needs. It also produces a second, harmless
+; spurious capture under whichever of `KW_DESC`/`KW_ASC` actually
+; matched (same class of finding as `select_ep1a?`'s own history, just
+; not a problem here since ScryCore.Actions only ever reads `dir`).
+order_item := field:path dir:(KW_DESC | KW_ASC)?
+
+limit_clause  := KW_LIMIT n:INTEGER offset_clause?
+offset_clause := KW_OFFSET n:INTEGER
+
+field_list := head:path (COMMA tail:path)*
 
 predicate   := disjunction
 disjunction := left:conjunction (KW_OR right:conjunction)*

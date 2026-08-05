@@ -8,12 +8,15 @@ defmodule ScryCore.Query do
   which front end produced it.
 
   Field shapes here match the full design in impl_spec.md §7, not just
-  what `priv/grammar.aether`'s current Phase 1 subset can populate --
-  `group_bys`/`group_mode`/`havings`/`distinct`/`order_bys`/`limit`/
-  `offset` all exist for a builder (or a later grammar phase) to fill in
-  even though `ScryCore.Actions` can't produce them yet. `variant` is
-  the extension slot an EP1(b)/(c)/(d)-shaped construct from a loaded
-  kind populates (impl_spec.md §2); core itself never writes to it.
+  what `priv/grammar.aether`'s current Phase 1 subset can populate.
+  `group_bys`/`havings`/`distinct`/`order_bys`/`limit`/`offset` are all
+  populated now (the full lang_spec.md §5.2 header-modifier chain,
+  minus `group by ... rollup`/`... cube`); `group_mode` is the one
+  exception still stuck at its `:plain` default either way -- rollup/cube
+  aren't in the grammar yet, so nothing ever sets it to anything else.
+  `variant` is the extension slot an EP1(b)/(c)/(d)-shaped construct from
+  a loaded kind populates (impl_spec.md §2); core itself never writes to
+  it.
 
   `wheres` is a list, combined with `and`, even though the current
   grammar only ever produces zero or one entry (one `WHERE` clause per
