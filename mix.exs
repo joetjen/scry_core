@@ -25,14 +25,7 @@ defmodule ScryCore.MixProject do
       docs: docs(),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls],
-      # :ichor is runtime: false (correctly excluded from a real release,
-      # §4 of impl_spec.md's grammar-composition design) -- but Dialyzer
-      # respects that flag when auto-discovering PLT apps too, and
-      # ScryCore.GrammarCompose's own typespecs genuinely reference
-      # Aether.Grammar.t()/Ichor.TokenRefiner, so it has to be added
-      # back explicitly here or every reference to an Ichor type reads
-      # as unknown.
-      dialyzer: [plt_add_apps: [:mix, :ichor]]
+      dialyzer: [plt_add_apps: [:mix]]
     ]
   end
 
@@ -52,17 +45,30 @@ defmodule ScryCore.MixProject do
       # === ICHOR (grammar compiler) ===
       # `ichor_runtime` is the real runtime dependency -- capture dispatch
       # (Ichor.Actions), error formatting, the compiled Tokenizer/Parser
-      # combinators. `ichor` itself never ships to production (grammar
-      # composition and codegen happen at build time via a
-      # `mix ichor.gen`-equivalent tooling, never via `use Ichor` at an
-      # end consumer's own compile time) -- but scry_core is not an
-      # ordinary consumer of Ichor, it's the library responsible for
-      # driving composition itself (ScryCore.GrammarCompose,
-      # Ichor.generate_from_grammar/2), so its own test suite genuinely
-      # needs `ichor` (the compiler), not just `ichor_runtime`. Hence
-      # `[:dev, :test]`, not just `:dev`. See impl_spec.md §4.
+      # combinators.
+      #
+      # `ichor` is, in principle, a build-time-only tool (grammar
+      # composition and codegen belong at build time via a
+      # `mix ichor.gen`-equivalent Mix compiler task, never via `use
+      # Ichor` at an end consumer's own compile time -- see impl_spec.md
+      # §4) and was originally scoped `only: [:dev, :test]` on that
+      # basis. That scoping turned out to be unusable: `ScryCore.Grammar`
+      # and `ScryCore.GrammarCompose` call Ichor's "raw pipeline"
+      # (Aether.Parser + Grammar.Analysis + Grammar.VM) directly rather
+      # than working from a pre-generated module, so `ichor` is a genuine
+      # compile-time requirement of scry_core's own `lib/` -- not just of
+      # its test suite. Confirmed empirically: even after also declaring
+      # `ichor` directly in a downstream package's own deps, `mix
+      # compile` for scry_core-as-a-dependency still failed to resolve
+      # `Aether.Grammar` -- Mix does not propagate an `only:`-scoped
+      # dependency transitively, and compiling scry_core as a dependency
+      # only ever draws on scry_core's own declared dependency graph.
+      # Real (unscoped) for now; the fix that lets this go back to
+      # `only: [:dev, :test]` is building the actual Mix compiler task,
+      # tracked as a confirmed-blocking item in impl_spec.md's Open
+      # Implementation Risks.
       {:ichor_runtime, "~> 0.2"},
-      {:ichor, "~> 0.2", only: [:dev, :test], runtime: false},
+      {:ichor, "~> 0.2"},
 
       # === CODE QUALITY & STATIC ANALYSIS ===
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
