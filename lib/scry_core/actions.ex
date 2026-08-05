@@ -49,6 +49,15 @@ defmodule ScryCore.Actions do
   def handle_token(:INTEGER, text, _ctx), do: {:ok, String.to_integer(text)}
   def handle_token(:ESCAPED_IDENT, text, _ctx), do: {:ok, String.slice(text, 1..-2//1)}
 
+  # Deliberately *not* a real Elixir atom (`String.to_atom/1`): query
+  # text is arbitrary external input, and atoms are never garbage
+  # collected on the BEAM -- turning unbounded, attacker-controlled text
+  # into new atoms one at a time is a well-known atom-table-exhaustion
+  # DoS vector, not a hypothetical one. `{:atom, name}` (a plain binary
+  # wrapped in a tuple tag) is exactly as distinguishable from a bare
+  # STRING literal for downstream matching purposes, without that risk.
+  def handle_token(:ATOM, text, _ctx), do: {:ok, {:atom, String.slice(text, 1..-1//1)}}
+
   # Strips the delimiter (either quote char, both one byte -- ASCII `"`
   # or `'`) and resolves escapes over what's left. lang_spec.md §4's own
   # list, exactly: \" \' \\ \n \t \uXXXX -- an unrecognized \<char> was

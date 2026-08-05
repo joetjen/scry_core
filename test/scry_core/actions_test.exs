@@ -318,4 +318,28 @@ defmodule ScryCore.ActionsTest do
     assert {:ok, %Query{} = q2} = run(g, ~s(SELECT users WHERE status in [] { name }))
     assert q2.wheres == [{:in, ["status"], []}]
   end
+
+  test "an atom literal, tagged rather than a real Elixir atom", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE status = :active { name }))
+    assert q.wheres == [{:cmp, :eq, ["status"], {:atom, "active"}}]
+
+    # Not `:active` -- see ScryCore.Actions' own handle_token(:ATOM, ...)
+    # for why turning arbitrary query text into real Elixir atoms would
+    # be a DoS vector, not just a style choice.
+    refute match?({:cmp, :eq, ["status"], :active}, hd(q.wheres))
+  end
+
+  test "an atom literal's case is preserved as-is, unlike a keyword's reclassification", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE status = :Active { name }))
+    assert q.wheres == [{:cmp, :eq, ["status"], {:atom, "Active"}}]
+  end
+
+  test "atom literals inside a list literal", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users WHERE status in [:active, :pending] { name }))
+
+    assert q.wheres == [{:in, ["status"], [{:atom, "active"}, {:atom, "pending"}]}]
+  end
 end

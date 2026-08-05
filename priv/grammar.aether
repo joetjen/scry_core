@@ -17,11 +17,13 @@
 ;     (`\" \' \\ \n \t \uXXXX`, §4), integers, decimals, `2/3`-shaped
 ;     rational literals, radix integers (`0x`/`0o`/`0b`), list literals
 ;     (`[...]`, usable anywhere a literal is, not just inside `in
-;     [...]`), nil/true/false (§4) -- everything else in §4 (multiline
-;     strings, regex sigils, atoms, duration/byte-size/date literals,
-;     and the rest of the exact-rational tower -- arithmetic
-;     *expressions*, inexact/float coexistence -- see ScryCore.Rational's
-;     own moduledoc) deferred
+;     [...]`), atom literals (`:name`, tagged `{:atom, name}` rather
+;     than a real Elixir atom -- ScryCore.Actions' own
+;     handle_token(:ATOM, ...) explains why), nil/true/false (§4) --
+;     everything else in §4 (multiline strings, regex sigils, duration/
+;     byte-size/date literals, and the rest of the exact-rational tower
+;     -- arithmetic *expressions*, inexact/float coexistence -- see
+;     ScryCore.Rational's own moduledoc) deferred
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
 ;     full §5.2 header-modifier chain (`group by`/`having`/`distinct`/
 ;     `order by`/`limit ... offset`, in their required fixed order) (§5)
@@ -81,6 +83,14 @@ IDENT := [[:alpha:]_][[:alnum:]_-]*
 ; lang_spec §3's own "collision check is case-insensitive too") are all
 ; the identifier "select" this way, never KW_SELECT.
 ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_-]* "`"
+
+; Colon-*prefixed* (lang_spec §5.3: "`:active` is colon-prefixed;
+; `subtotal:` is colon-suffixed" -- the latter, an alias/named
+; body-item marker, is a separate, still-deferred construct, and
+; doesn't collide with this). Never subject to `@refine` -- a
+; completely separate token from IDENT, same reasoning as
+; ESCAPED_IDENT immediately above.
+ATOM := ":" [[:alpha:]_][[:alnum:]_-]*
 
 ; ---- literals ----
 ;
@@ -263,7 +273,7 @@ list := LBRACK items:literal_list? RBRACK
 ; starts with the LBRACK token, never `literal` itself at position
 ; zero), so it needs none of Ichor's left-recursion rewrite machinery,
 ; same as `select`/`body_item`'s own recursion elsewhere in this file.
-literal := STRING | rational | DECIMAL | RADIX | INTEGER | list | KW_NIL | KW_TRUE | KW_FALSE
+literal := STRING | rational | DECIMAL | RADIX | INTEGER | list | ATOM | KW_NIL | KW_TRUE | KW_FALSE
 
 rational := numerator:INTEGER SLASH denominator:INTEGER
 
