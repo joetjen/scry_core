@@ -12,6 +12,10 @@
 - `ScryCore.Query`: the shared struct both Scry front ends (text grammar, and the not-yet-implemented Elixir-native builder, impl_spec.md §7) converge on.
 - `ScryCore.Actions`: turns `priv/grammar.aether`'s parse tree into `%ScryCore.Query{}` -- covers everything the current Phase 1 grammar can produce (`select`/`where`/boolean logic/comparisons/`in`/dotted paths/projected fields), with core-only handling for the EP1(a) extension point (stored unexamined under `variant.select_ep1a`, a stand-in for real composed-Actions dispatch once a second real kind exists to compose against).
 
+### Changed
+
+- **`select_ep1a` is no longer "exactly one fragment may define this rule."** lang_spec.md §5.2 itself has `last` (time-series) and `deep` (document) nominating the same header-modifier position, and a build can legitimately load both kinds at once -- treating a second fragment's contribution as a collision would make that combination impossible. `priv/grammar.aether` now gives `select_ep1a` a real default (`NEVER := []`, an empty character class that always fails -- not a `!`-negated lookahead, which turns out to mean "always succeeds with zero width" instead, confirmed empirically), and `ScryCore.GrammarCompose.merge/2` unions every loaded fragment's contribution into one `Choice` (deduplicating an exact repeat) for any rule name in its own `extension_points/0`, rather than requiring identity across every merge. A consequence worth calling out on its own: core alone now genuinely passes `Grammar.Analysis` (a zero-kind build, e.g. `scry_relational` alone, needs a working parser too) -- the "core alone fails, extension points are dangling references" property from the first version of this file was true only of that earlier, narrower design, not a property the architecture actually needs.
+
 ### Fixed
 
 - `mix.exs`: `ichor` is now `only: [:dev, :test]`, not just `:dev` -- scry_core's own test suite drives grammar composition directly (unlike an ordinary consuming application, which only needs `ichor` at its own dev-time `mix ichor.gen` step) and genuinely needs the compiler present under `MIX_ENV=test`.

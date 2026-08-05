@@ -6,18 +6,15 @@ defmodule ScryCore.ActionsTest do
   @core_source File.read!("priv/grammar.aether")
 
   setup_all do
+    # No stub needed for select_ep1a -- core's own grammar is complete
+    # and analyzes on its own now (ScryCore.GrammarComposeTest covers
+    # why: an unfilled extension point needs a real "always fails"
+    # default, not a dangling reference, so a zero-kind build still
+    # compiles). None of these core-only tests exercise the extension
+    # point for real, since no real kind fragment exists yet to merge
+    # in properly (impl_spec.md §4).
     {:ok, core} = Aether.Parser.parse(@core_source, "priv/grammar.aether")
-
-    # select_ep1a is core's genuinely-unfilled EP1(a) extension point
-    # (ScryCore.GrammarComposeTest covers that it's dangling on its own)
-    # -- stubbed here with a token no test query below ever has
-    # immediately after the source path (`NOT_EQ`, i.e. "not="), purely
-    # so Grammar.Analysis's completeness check passes without the stub
-    # ever actually matching real input. None of these core-only tests
-    # exercise it for real, since no real kind fragment exists yet to
-    # merge in properly (impl_spec.md §4).
-    stub = %{core | rules: Map.put(core.rules, :select_ep1a, Grammar.IR.rule_ref(:NOT_EQ))}
-    {:ok, analyzed} = Grammar.Analysis.run(stub)
+    {:ok, analyzed} = Grammar.Analysis.run(core)
     %{grammar: analyzed}
   end
 
