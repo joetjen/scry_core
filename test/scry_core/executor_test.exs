@@ -33,10 +33,21 @@ defmodule ScryCore.ExecutorTest do
     %{"name" => "Gadget", "price" => 4}
   ]
 
+  @events [
+    # Stored at 6-digit (default) microsecond precision -- deliberately
+    # not matching whatever precision a query literal happens to parse
+    # at, the exact mismatch that broke Kernel `==`/`<` for DateTime and
+    # NaiveDateTime before ScryCore.Executor.compare/3 dispatched
+    # through DateTime.compare/2/NaiveDateTime.compare/2 instead.
+    %{"name" => "launch", "at" => ~U[2026-01-01 14:00:00.500000Z]},
+    %{"name" => "standup", "at" => ~N[2026-01-01 09:00:00.500000]}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
-    ["products"] => @products
+    ["products"] => @products,
+    ["events"] => @events
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -156,5 +167,43 @@ defmodule ScryCore.ExecutorTest do
     }
 
     assert {:ok, [%{"name" => "Gadget"}]} = run(query)
+  end
+
+  test "a %DateTime{} literal compares equal to a row value at a different microsecond precision" do
+    query = %Query{
+      source: ["events"],
+      wheres: [{:cmp, :eq, ["at"], ~U[2026-01-01 14:00:00.5Z]}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, [%{"name" => "launch"}]} = run(query)
+  end
+
+  test "a %DateTime{} literal orders correctly despite a microsecond-precision mismatch" do
+    query = %Query{
+      source: ["events"],
+      wheres: [{:cmp, :gt, ["at"], ~U[2026-01-01 13:59:59Z]}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, [%{"name" => "launch"}]} = run(query)
+
+    not_after_query = %Query{
+      source: ["events"],
+      wheres: [{:cmp, :gt, ["at"], ~U[2026-01-01 14:00:00.500000Z]}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, []} = run(not_after_query)
+  end
+
+  test "a %NaiveDateTime{} literal compares equal despite a microsecond-precision mismatch" do
+    query = %Query{
+      source: ["events"],
+      wheres: [{:cmp, :eq, ["at"], ~N[2026-01-01 09:00:00.5]}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, [%{"name" => "standup"}]} = run(query)
   end
 end

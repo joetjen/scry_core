@@ -79,10 +79,27 @@ defmodule ScryCore.Executor do
   # on ingest" model has no adapter-facing hook yet, a real, separate
   # gap, not something this clause papers over).
   defp compare(op, %Rational{} = a, b) when is_integer(b) or is_struct(b, Rational),
-    do: rational_result(op, Rational.compare(a, b))
+    do: ordering_result(op, Rational.compare(a, b))
 
   defp compare(op, a, %Rational{} = b) when is_integer(a),
-    do: rational_result(op, Rational.compare(a, b))
+    do: ordering_result(op, Rational.compare(a, b))
+
+  # Same problem, a different struct: `%DateTime{}`/`%NaiveDateTime{}`
+  # store a microsecond field as a `{value, precision}` tuple, so two
+  # values representing the exact same instant at different parsed
+  # precision (`14:00:00.5` vs `14:00:00.500000`) are neither `==` nor
+  # correctly ordered by Kernel's `< >` -- confirmed empirically
+  # (`DateTime.compare/2` says `:eq`, Kernel `<` says `true`, for the
+  # same pair) before trusting this needed fixing at all, the same way
+  # Rational's own struct-ordering problem was confirmed rather than
+  # assumed above. `%Date{}` genuinely doesn't need this -- no
+  # microsecond field, so Kernel's own comparison is already exact for
+  # it, verified the same way.
+  defp compare(op, %DateTime{} = a, %DateTime{} = b),
+    do: ordering_result(op, DateTime.compare(a, b))
+
+  defp compare(op, %NaiveDateTime{} = a, %NaiveDateTime{} = b),
+    do: ordering_result(op, NaiveDateTime.compare(a, b))
 
   defp compare(:eq, a, b), do: a == b
   defp compare(:not_eq, a, b), do: a != b
@@ -91,12 +108,14 @@ defmodule ScryCore.Executor do
   defp compare(:le, a, b), do: a <= b
   defp compare(:ge, a, b), do: a >= b
 
-  defp rational_result(:eq, ordering), do: ordering == :eq
-  defp rational_result(:not_eq, ordering), do: ordering != :eq
-  defp rational_result(:lt, ordering), do: ordering == :lt
-  defp rational_result(:gt, ordering), do: ordering == :gt
-  defp rational_result(:le, ordering), do: ordering != :gt
-  defp rational_result(:ge, ordering), do: ordering != :lt
+  # Shared by every `:lt`/`:eq`/`:gt`-returning `compare/2` above
+  # (`Rational`, `DateTime`, `NaiveDateTime`).
+  defp ordering_result(:eq, ordering), do: ordering == :eq
+  defp ordering_result(:not_eq, ordering), do: ordering != :eq
+  defp ordering_result(:lt, ordering), do: ordering == :lt
+  defp ordering_result(:gt, ordering), do: ordering == :gt
+  defp ordering_result(:le, ordering), do: ordering != :gt
+  defp ordering_result(:ge, ordering), do: ordering != :lt
 
   defp get_path(row, [key]), do: Map.get(row, key)
   defp get_path(row, [key | rest]), do: row |> Map.get(key, %{}) |> get_path(rest)
