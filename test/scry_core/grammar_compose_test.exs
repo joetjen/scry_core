@@ -29,7 +29,7 @@ defmodule ScryCore.GrammarComposeTest do
   COMMENT := "#" (!"\\n" .)*
   TRIVIA  := (SPACE | COMMENT)*
 
-  select_ep1a := KW_LAST value:NUMBER
+  select_ep1a := KW_LAST value:INTEGER
 
   KW_LAST := "last"
   """
@@ -81,7 +81,7 @@ defmodule ScryCore.GrammarComposeTest do
   @grammar "fake_bad_fragment"
   @root select_ep1a
 
-  select_ep1a := KW_LAST value:NUMBER
+  select_ep1a := KW_LAST value:INTEGER
 
   KW_LAST := "last"
   """
@@ -95,11 +95,11 @@ defmodule ScryCore.GrammarComposeTest do
   COMMENT := "#" (!"\\n" .)*
   TRIVIA  := (SPACE | COMMENT)*
 
-  select_ep1a := KW_LAST value:NUMBER
+  select_ep1a := KW_LAST value:INTEGER
 
-  ; collides with core's own NUMBER (a different shape: hex digits, not
+  ; collides with core's own INTEGER (a different shape: hex digits, not
   ; decimal) -- must be rejected, not silently overwritten.
-  NUMBER := HEX+
+  INTEGER := HEX+
   KW_LAST := "last"
   """
 
@@ -274,7 +274,7 @@ defmodule ScryCore.GrammarComposeTest do
 
       assert {:error, error} = GrammarCompose.merge(core, fragment)
       assert error.message =~ "collision"
-      assert error.message =~ inspect(:NUMBER)
+      assert error.message =~ inspect(:INTEGER)
     end
 
     test "does not reject a fragment's identical redeclaration of a shared token" do

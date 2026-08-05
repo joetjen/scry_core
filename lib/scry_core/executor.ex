@@ -23,7 +23,7 @@ defmodule ScryCore.Executor do
   module works around.
   """
 
-  alias ScryCore.{EngineBehaviour, Query}
+  alias ScryCore.{EngineBehaviour, Query, Rational}
 
   @doc """
   Executes `query` against `engine_module` (a module implementing
@@ -51,12 +51,36 @@ defmodule ScryCore.Executor do
   defp eval_predicate({:or, l, r}, row), do: eval_predicate(l, row) or eval_predicate(r, row)
   defp eval_predicate({:not, p}, row), do: not eval_predicate(p, row)
 
+  # `%Rational{}`/integer are compared exactly (cross-multiplication via
+  # Rational.compare/2, ScryCore.Rational's own moduledoc) rather than
+  # through Kernel's `< > <= >=`, which order structs by their raw field
+  # values -- structurally consistent, but not numerically meaningful
+  # for two arbitrary rationals (e.g. comparing 1/2 against 2/3 by field
+  # order is not the same as comparing their magnitudes). A row's own
+  # field value is plain data straight from an engine's `fetch/2`, so it
+  # only ever needs this treatment when it's already an integer -- a
+  # native float there isn't yet covered (lang_spec.md §4's "conversion
+  # on ingest" model has no adapter-facing hook yet, a real, separate
+  # gap, not something this clause papers over).
+  defp compare(op, %Rational{} = a, b) when is_integer(b) or is_struct(b, Rational),
+    do: rational_result(op, Rational.compare(a, b))
+
+  defp compare(op, a, %Rational{} = b) when is_integer(a),
+    do: rational_result(op, Rational.compare(a, b))
+
   defp compare(:eq, a, b), do: a == b
   defp compare(:not_eq, a, b), do: a != b
   defp compare(:lt, a, b), do: a < b
   defp compare(:gt, a, b), do: a > b
   defp compare(:le, a, b), do: a <= b
   defp compare(:ge, a, b), do: a >= b
+
+  defp rational_result(:eq, ordering), do: ordering == :eq
+  defp rational_result(:not_eq, ordering), do: ordering != :eq
+  defp rational_result(:lt, ordering), do: ordering == :lt
+  defp rational_result(:gt, ordering), do: ordering == :gt
+  defp rational_result(:le, ordering), do: ordering != :gt
+  defp rational_result(:ge, ordering), do: ordering != :lt
 
   defp get_path(row, [key]), do: Map.get(row, key)
   defp get_path(row, [key | rest]), do: row |> Map.get(key, %{}) |> get_path(rest)

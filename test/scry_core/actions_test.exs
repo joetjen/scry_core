@@ -1,7 +1,7 @@
 defmodule ScryCore.ActionsTest do
   use ExUnit.Case, async: true
 
-  alias ScryCore.Query
+  alias ScryCore.{Query, Rational}
 
   setup_all do
     # No stub needed for select_ep1a -- core's own grammar is complete
@@ -97,5 +97,45 @@ defmodule ScryCore.ActionsTest do
              run(g, ~s(select users where age > 30 and not status = "x" { name }))
 
     assert q.wheres == [{:and, {:cmp, :gt, ["age"], 30}, {:not, {:cmp, :eq, ["status"], "x"}}}]
+  end
+
+  test "a decimal literal parses to its exact rational value", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT products WHERE price = 3.14 { name }))
+    assert q.wheres == [{:cmp, :eq, ["price"], Rational.new(157, 50)}]
+  end
+
+  test "a decimal literal whose value is a whole number collapses to a plain integer", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT products WHERE price = 4.0 { name }))
+    assert q.wheres == [{:cmp, :eq, ["price"], 4}]
+  end
+
+  test "a 2/3-shaped rational literal", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT products WHERE ratio > 2/3 { name }))
+    assert q.wheres == [{:cmp, :gt, ["ratio"], Rational.new(2, 3)}]
+  end
+
+  test "a rational literal that reduces to a whole number collapses to a plain integer", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT products WHERE qty = 6/3 { name }))
+    assert q.wheres == [{:cmp, :eq, ["qty"], 2}]
+  end
+
+  test "hex/octal/binary radix literals parse as plain integers, not a distinct type", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT flags WHERE mask = 0x1F { name }))
+    assert q.wheres == [{:cmp, :eq, ["mask"], 31}]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(select flags where mask = 0X1f { name }))
+    assert q2.wheres == [{:cmp, :eq, ["mask"], 31}]
+
+    assert {:ok, %Query{} = q3} = run(g, ~s(SELECT flags WHERE mask = 0o17 { name }))
+    assert q3.wheres == [{:cmp, :eq, ["mask"], 15}]
+
+    assert {:ok, %Query{} = q4} = run(g, ~s(SELECT flags WHERE mask = 0b101 { name }))
+    assert q4.wheres == [{:cmp, :eq, ["mask"], 5}]
   end
 end

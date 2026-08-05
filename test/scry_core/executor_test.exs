@@ -1,7 +1,7 @@
 defmodule ScryCore.ExecutorTest do
   use ExUnit.Case, async: true
 
-  alias ScryCore.{Executor, Query}
+  alias ScryCore.{Executor, Query, Rational}
 
   # A minimal fixture, not the real static engine (that's
   # scry_test_engine_core, a separate package -- scry_core can't
@@ -28,9 +28,15 @@ defmodule ScryCore.ExecutorTest do
 
   @orders [%{"id" => 1, "total" => 75}]
 
+  @products [
+    %{"name" => "Widget", "price" => 3},
+    %{"name" => "Gadget", "price" => 4}
+  ]
+
   @data %{
     ["users"] => @users,
-    ["orders"] => @orders
+    ["orders"] => @orders,
+    ["products"] => @products
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -130,5 +136,25 @@ defmodule ScryCore.ExecutorTest do
     query = %Query{source: ["nonexistent"], select: []}
 
     assert {:error, {:no_such_source, ["nonexistent"]}} = run(query)
+  end
+
+  test "a %Rational{} literal compares exactly against a plain-integer row value" do
+    query = %Query{
+      source: ["products"],
+      wheres: [{:cmp, :gt, ["price"], Rational.new(7, 2)}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, [%{"name" => "Gadget"}]} = run(query)
+  end
+
+  test "a %Rational{} literal that reduces to an integer still compares correctly" do
+    query = %Query{
+      source: ["products"],
+      wheres: [{:cmp, :eq, ["price"], Rational.new(8, 2)}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, [%{"name" => "Gadget"}]} = run(query)
   end
 end

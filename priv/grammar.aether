@@ -6,10 +6,13 @@
 ;
 ;   - `#` line comments (lang_spec §3) -- `;` block comments deferred
 ;   - bare identifiers + dot-path (§3) -- backtick-escaping deferred
-;   - double-quoted strings, bare integers, nil/true/false (§4) --
+;   - double-quoted strings, integers, decimals, `2/3`-shaped rational
+;     literals, radix integers (`0x`/`0o`/`0b`), nil/true/false (§4) --
 ;     everything else in §4 (multiline strings, regex sigils, atoms,
-;     lists as a literal kind, radix/duration/byte-size/date literals,
-;     the exact-rational tower) deferred
+;     lists as a literal kind, duration/byte-size/date literals, and the
+;     rest of the exact-rational tower -- arithmetic *expressions*,
+;     inexact/float coexistence -- see ScryCore.Rational's own
+;     moduledoc) deferred
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]` (§5) --
 ;     group by/having/distinct/order by/limit, the rest of §5's keyword
 ;     reference, and all of §6/§7/§8/§9 deferred
@@ -55,12 +58,34 @@ IDENT := [[:alpha:]_][[:alnum:]_-]*
           KW_NIL, KW_TRUE, KW_FALSE)
 
 ; ---- literals ----
-
-NUMBER := DIGIT+
-STRING := "\"" (!"\"" .)* "\""
+;
+; Three mutually-exclusive number tokens, disambiguated by maximal munch
+; alone (Aether's own lexer rule: longest match at a given position wins
+; -- see guides/aether/AETHER.md's "Maximal munch") -- declaration order
+; between them is irrelevant, since a given input position can only ever
+; actually match one of the three shapes to begin with:
+;
+;   - DECIMAL requires a literal "." (`DIGIT+ "." DIGIT+`), so it simply
+;     doesn't match plain digits at all (`30` never reaches DECIMAL,
+;     only INTEGER)
+;   - RADIX requires the literal "0" + a base letter, strictly longer
+;     than the single "0" digit INTEGER alone could match at that same
+;     position (`0x1F`: RADIX consumes all 4 characters, INTEGER only 1)
+;
+; `[xX]`/`[oO]`/`[bB]` spell out both cases explicitly rather than
+; relying on `@case_insensitive` -- that pragma only affects bare
+; *string* literals (`"lit"`), never character classes, per the same
+; guide's own `@case_insensitive` section.
+INTEGER := DIGIT+
+DECIMAL := DIGIT+ "." DIGIT+
+RADIX   := "0" [xX] HEX+
+         | "0" [oO] [0-7]+
+         | "0" [bB] [01]+
+STRING  := "\"" (!"\"" .)* "\""
 
 ; ---- operators / delimiters ----
 
+SLASH  := "/"
 NOT_EQ := "not="
 LE     := "<="
 GE     := ">="
@@ -135,7 +160,17 @@ comp_op := LE | GE | NOT_EQ | EQ | LT | GT
 
 literal_list := head:literal (COMMA tail:literal)*
 
-literal := STRING | NUMBER | KW_NIL | KW_TRUE | KW_FALSE
+; `rational` before bare INTEGER: both start with the same INTEGER
+; token, so ordered-PEG-choice would otherwise never get a chance to try
+; the SLASH-containing alternative -- ordinary backtracking makes this
+; safe (see priv/grammar.aether's own `body_item` comment for the same
+; convention elsewhere). Deliberately plain-INTEGER-only on both sides
+; (not DECIMAL) -- lang_spec.md §4's own example is `2/3`, not a
+; division of two arbitrary exact rationals, which would need real
+; division, not just `ScryCore.Rational.new/2`'s construct-and-reduce.
+literal := STRING | rational | DECIMAL | RADIX | INTEGER | KW_NIL | KW_TRUE | KW_FALSE
+
+rational := numerator:INTEGER SLASH denominator:INTEGER
 
 path := head:IDENT (DOT tail:IDENT)*
 

@@ -43,11 +43,35 @@ defmodule ScryCore.Actions do
 
   @behaviour Ichor.Actions
 
-  alias ScryCore.Query
+  alias ScryCore.{Query, Rational}
 
   @impl true
-  def handle_token(:NUMBER, text, _ctx), do: {:ok, String.to_integer(text)}
+  def handle_token(:INTEGER, text, _ctx), do: {:ok, String.to_integer(text)}
   def handle_token(:STRING, text, _ctx), do: {:ok, String.slice(text, 1..-2//1)}
+
+  # "3.14" -> Rational.new(314, 100) -- reduces to 157/50, matching
+  # lang_spec.md §4's own worked example exactly, since decimal literals
+  # are defined to parse directly to their exact rational value, never
+  # an IEEE-754 approximation.
+  def handle_token(:DECIMAL, text, _ctx) do
+    [whole, fraction] = String.split(text, ".", parts: 2)
+    numerator = String.to_integer(whole <> fraction)
+    denominator = Integer.pow(10, String.length(fraction))
+    {:ok, Rational.new(numerator, denominator)}
+  end
+
+  # Radix literals "enter the ordinary exact-rational tower" (lang_spec
+  # §4) as plain integers, not a distinct type -- 0x1F is exactly 31.
+  def handle_token(:RADIX, <<"0", base_letter::binary-size(1), digits::binary>>, _ctx) do
+    base =
+      case String.downcase(base_letter) do
+        "x" -> 16
+        "o" -> 8
+        "b" -> 2
+      end
+
+    {:ok, String.to_integer(digits, base)}
+  end
 
   @impl true
   def handle_rule(:select, captures, ctx) do
@@ -132,9 +156,17 @@ defmodule ScryCore.Actions do
     with {:ok, _text, ctx} <- cap.eval.(ctx), do: {:ok, false, ctx}
   end
 
-  # STRING/NUMBER are real tokens (unlike the three refiner-target
-  # clauses above), so the default single-capture passthrough already
-  # gives the right value via handle_token/3 -- no clause needed here.
+  # STRING/DECIMAL/RADIX/INTEGER are real tokens (unlike the three
+  # refiner-target clauses above), so the default single-capture
+  # passthrough already gives the right value via handle_token/3 -- no
+  # clause needed here.
+
+  def handle_rule(:rational, %{numerator: num_cap, denominator: den_cap}, ctx) do
+    with {:ok, numerator, ctx} <- num_cap.eval.(ctx),
+         {:ok, denominator, ctx} <- den_cap.eval.(ctx) do
+      {:ok, Rational.new(numerator, denominator), ctx}
+    end
+  end
 
   def handle_rule(:literal_list, %{head: head_cap, tail: tail_caps}, ctx) do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),
