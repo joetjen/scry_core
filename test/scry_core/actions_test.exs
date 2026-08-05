@@ -342,4 +342,29 @@ defmodule ScryCore.ActionsTest do
 
     assert q.wheres == [{:in, ["status"], [{:atom, "active"}, {:atom, "pending"}]}]
   end
+
+  test "a multiline string, embedded newline preserved verbatim", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users WHERE bio = """line one
+line two""" { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["bio"], "line one\nline two"}]
+  end
+
+  test "a multiline string containing a lone double-quote, unescaped", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users WHERE bio = """she said "hi" once""" { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["bio"], ~s(she said "hi" once)}]
+  end
+
+  test "an empty multiline string", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE bio = """""" { name }))
+    assert q.wheres == [{:cmp, :eq, ["bio"], ""}]
+  end
+
+  test "a multiline string honors the same escapes as single-line strings", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE bio = """tab\there""" { name }))
+    assert q.wheres == [{:cmp, :eq, ["bio"], "tab\there"}]
+  end
 end

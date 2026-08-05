@@ -69,6 +69,13 @@ defmodule ScryCore.Actions do
     {:ok, text |> String.slice(1..-2//1) |> unescape()}
   end
 
+  # Same idea, three-character delimiter on each side instead of one --
+  # priv/grammar.aether's own MULTILINE_STRING comment has the "why no
+  # indentation stripping" reasoning.
+  def handle_token(:MULTILINE_STRING, text, _ctx) do
+    {:ok, text |> String.slice(3..-4//1) |> unescape()}
+  end
+
   # "3.14" -> Rational.new(314, 100) -- reduces to 157/50, matching
   # lang_spec.md §4's own worked example exactly, since decimal literals
   # are defined to parse directly to their exact rational value, never

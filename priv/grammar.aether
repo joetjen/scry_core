@@ -14,16 +14,18 @@
 ;   - bare identifiers + dot-path, backtick-escaped on keyword collision
 ;     (`` `select` ``, §3)
 ;   - double- and single-quoted strings with real escape handling
-;     (`\" \' \\ \n \t \uXXXX`, §4), integers, decimals, `2/3`-shaped
-;     rational literals, radix integers (`0x`/`0o`/`0b`), list literals
-;     (`[...]`, usable anywhere a literal is, not just inside `in
-;     [...]`), atom literals (`:name`, tagged `{:atom, name}` rather
-;     than a real Elixir atom -- ScryCore.Actions' own
-;     handle_token(:ATOM, ...) explains why), nil/true/false (§4) --
-;     everything else in §4 (multiline strings, regex sigils, duration/
-;     byte-size/date literals, and the rest of the exact-rational tower
-;     -- arithmetic *expressions*, inexact/float coexistence -- see
-;     ScryCore.Rational's own moduledoc) deferred
+;     (`\" \' \\ \n \t \uXXXX`, §4), triple-quoted multiline strings
+;     (verbatim content, no indentation stripping -- lang_spec §4 says
+;     nothing more specific, see MULTILINE_STRING's own comment for the
+;     reasoning), integers, decimals, `2/3`-shaped rational literals,
+;     radix integers (`0x`/`0o`/`0b`), list literals (`[...]`, usable
+;     anywhere a literal is, not just inside `in [...]`), atom literals
+;     (`:name`, tagged `{:atom, name}` rather than a real Elixir atom --
+;     ScryCore.Actions' own handle_token(:ATOM, ...) explains why),
+;     nil/true/false (§4) -- everything else in §4 (regex sigils,
+;     duration/byte-size/date literals, and the rest of the
+;     exact-rational tower -- arithmetic *expressions*, inexact/float
+;     coexistence -- see ScryCore.Rational's own moduledoc) deferred
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
 ;     full §5.2 header-modifier chain (`group by`/`having`/`distinct`/
 ;     `order by`/`limit ... offset`, in their required fixed order) (§5)
@@ -128,6 +130,20 @@ RADIX   := "0" [xX] HEX+
 ; as "literal backslash" immediately followed by "end of string".
 STRING := "\"" (ESCAPE | !"\"" .)* "\""
         | "'" (ESCAPE | !"'" .)* "'"
+
+; lang_spec §4 lists `"""..."""` alongside the two single-quote-style
+; delimiters but says nothing more about it -- no example, no stated
+; escape/indentation-stripping behavior. Absent that, this is the most
+; conservative reading available: content is captured verbatim between
+; the delimiters (embedded newlines included, no leading-whitespace
+; stripping the way e.g. Elixir's own heredocs do), honoring the same
+; ESCAPE token as the two single-line forms for consistency -- mainly
+; useful here for embedding a literal `"""` in content without it being
+; read as the closing delimiter. Maximal munch disambiguates this from
+; a pair of adjacent empty STRING tokens the same way RADIX beats
+; INTEGER elsewhere in this file: `"""..."""` is strictly longer than
+; whatever STRING alone could match starting from the same `"`.
+MULTILINE_STRING := "\"\"\"" (ESCAPE | !"\"\"\"" .)* "\"\"\""
 
 ; \" \' \\ \n \t \uXXXX -- lang_spec §4's own escape list, exactly.
 ; An unrecognized `\<char>` is deliberately not rejected: ordered PEG
@@ -273,7 +289,8 @@ list := LBRACK items:literal_list? RBRACK
 ; starts with the LBRACK token, never `literal` itself at position
 ; zero), so it needs none of Ichor's left-recursion rewrite machinery,
 ; same as `select`/`body_item`'s own recursion elsewhere in this file.
-literal := STRING | rational | DECIMAL | RADIX | INTEGER | list | ATOM | KW_NIL | KW_TRUE | KW_FALSE
+literal := STRING | MULTILINE_STRING | rational | DECIMAL | RADIX | INTEGER | list | ATOM
+         | KW_NIL | KW_TRUE | KW_FALSE
 
 rational := numerator:INTEGER SLASH denominator:INTEGER
 
