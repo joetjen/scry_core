@@ -115,9 +115,7 @@ defmodule ScryCore.GrammarCompose do
 
   # Every extension-point rule name core declares -- see this module's
   # own moduledoc for why these specifically need union-not-collision
-  # merge semantics. Grows as core adds more (currently just the one
-  # EP1(a) header-modifier point; body_item_ep1 -- EP1(b)/(c)/(d) body
-  # items -- is next).
+  # merge semantics. Grows as core adds more.
   #
   # A plain list, not a MapSet -- Dialyzer has known, longstanding
   # friction with MapSet's opaque internal representation whenever the
@@ -129,7 +127,7 @@ defmodule ScryCore.GrammarCompose do
   # and at this size (two entries, growing slowly) there's no
   # performance reason to prefer a MapSet anyway.
   @spec extension_points() :: [atom()]
-  defp extension_points, do: [:select_ep1a]
+  defp extension_points, do: [:select_ep1a, :body_item_ep1]
 
   defp check_skip_match(%{skip: same}, %{skip: same}), do: :ok
 

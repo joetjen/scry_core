@@ -11,6 +11,8 @@
 
 - `ScryCore.Query`: the shared struct both Scry front ends (text grammar, and the not-yet-implemented Elixir-native builder, impl_spec.md §7) converge on.
 - `ScryCore.Actions`: turns `priv/grammar.aether`'s parse tree into `%ScryCore.Query{}` -- covers everything the current Phase 1 grammar can produce (`select`/`where`/boolean logic/comparisons/`in`/dotted paths/projected fields), with core-only handling for the EP1(a) extension point (stored unexamined under `variant.select_ep1a`, a stand-in for real composed-Actions dispatch once a second real kind exists to compose against).
+- `priv/grammar.aether`: `body_list` now accepts a nested `SELECT` (ordinary PEG recursion, no extension point needed) or a kind-contributed body item, not just a plain field -- a new `body_item_ep1` extension point (EP1(b)/(c)/(d): block-opening constructs, scoped pseudo-fields, value pseudo-fields), the union-capable kind introduced for `select_ep1a` below. Validated end to end with a fake `VIA edge { body }`-shaped fragment (`ScryCore.GrammarComposeTest`) whose own inner body recurses back into core's real `body_list`, not a fragment-local copy of it -- the actual point of testing an EP1(b) shape specifically, since EP1(a) never had to compose with anything of core's own.
+- `Query.select` entries are now tagged (`{:field, path}` | a nested `%Query{}` directly | `{:variant, term()}`) instead of bare paths, to make room for the two new shapes above.
 
 ### Changed
 

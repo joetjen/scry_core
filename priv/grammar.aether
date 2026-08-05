@@ -139,4 +139,25 @@ literal := STRING | NUMBER | KW_NIL | KW_TRUE | KW_FALSE
 
 path := head:IDENT (DOT tail:IDENT)*
 
-body_list := head:path (COMMA tail:path)*
+; A body item is a nested SELECT (core-only, no extension needed --
+; ordinary PEG recursion, same rule referencing itself indirectly
+; through body_list), a kind-contributed construct (EP1(b)/(c)/(d)
+; body-item shapes -- a block-opening construct, a scoped pseudo-field,
+; or a bare value pseudo-field; lang_spec §2's impl_spec companion),
+; or a plain field path -- tried in that order (most specific leading
+; token first, generic fallback last; PEG's first-match-wins doesn't
+; actually need the ordering here, since all three start with
+; structurally distinct tokens, but it's the same defensive convention
+; select_ep1a's own alternatives follow).
+body_item := select | body_item_ep1 | path
+
+; core's EP1(b)/(c)/(d) body-item extension point -- the same
+; union-of-simultaneous-contributions design as select_ep1a (this
+; file's own comment there has the full reasoning); a real kind
+; contributes its own block-opening construct, pseudo-field, or value
+; pseudo-field here (VIA, PARENT, SIBLINGS, ANCESTORS, PATH, ... in the
+; language spec's own vocabulary), and more than one kind can
+; contribute simultaneously.
+body_item_ep1 := NEVER
+
+body_list := head:body_item (COMMA tail:body_item)*

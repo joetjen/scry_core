@@ -5,15 +5,17 @@ defmodule ScryCore.Actions do
   Covers only what that grammar's current Phase 1 subset can produce;
   see its own header for what's deferred.
 
-  Core-only: this module has no idea what a real kind's own EP1(a)
-  extension-point rule looks like, since none exists yet
+  Core-only: this module has no idea what a real kind's own EP1(a)/
+  EP1(b)/(c)/(d) extension-point rules look like, since none exist yet
   (`scry_time_series` and friends are still just fixture-shaped stands-in
   in `ScryCore.GrammarComposeTest`). Whatever a loaded fragment's
-  `select_ep1a` evaluates to gets stored under `query.variant.select_ep1a`
-  unexamined -- a deliberate stand-in for real composed-Actions dispatch
-  (impl_spec.md §4: "Scry's own composed Ichor.Actions module is
-  assembled the same way the grammar is"), not yet implemented because
-  there is no second real kind to compose against yet.
+  `select_ep1a`/`body_item_ep1` evaluates to gets tagged `:variant` and
+  left unexamined (`Query.body_item/0`; `query.variant.select_ep1a` for
+  the header-modifier position) -- a deliberate stand-in for real
+  composed-Actions dispatch (impl_spec.md §4: "Scry's own composed
+  Ichor.Actions module is assembled the same way the grammar is"), not
+  yet implemented because there is no second real kind to compose
+  against yet.
 
   Two different "is this optional thing absent" conventions are in play
   here, matching the two different capture shapes the grammar's own
@@ -64,6 +66,18 @@ defmodule ScryCore.Actions do
          {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
       {:ok, [head | tail], ctx}
     end
+  end
+
+  # A nested query -- select's own handler already returns %Query{}
+  # directly, so no extra wrapping is needed here (Query.body_item/0).
+  def handle_rule(:body_item, %{select: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:body_item, %{body_item_ep1: cap}, ctx) do
+    with {:ok, value, ctx} <- cap.eval.(ctx), do: {:ok, {:variant, value}, ctx}
+  end
+
+  def handle_rule(:body_item, %{path: cap}, ctx) do
+    with {:ok, path, ctx} <- cap.eval.(ctx), do: {:ok, {:field, path}, ctx}
   end
 
   def handle_rule(:body_list, %{head: head_cap, tail: tail_caps}, ctx) do

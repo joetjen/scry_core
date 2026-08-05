@@ -54,6 +54,29 @@ defmodule ScryCore.GrammarComposeTest do
   KW_DEEP := "deep"
   """
 
+  # An EP1(b) block-opening construct, standing in for scry_graph's
+  # `VIA edge { body }` (lang_spec §8.1) -- fills body_item_ep1, not
+  # select_ep1a, and its own body recurses straight back into core's
+  # body_list (an ordinary dangling reference, exactly like referencing
+  # KW_WHERE above -- resolved once merged, not before). This is the
+  # actual point of testing an EP1(b) shape specifically: EP1(a)
+  # (select_ep1a) never had to compose with anything of core's own, but
+  # a block-opening construct's body is *itself* built from core's body
+  # grammar, recursively.
+  @graph_like_fragment """
+  @grammar "fake_graph_fragment"
+  @root body_item_ep1
+  @case_insensitive
+  @skip TRIVIA
+
+  COMMENT := "#" (!"\\n" .)*
+  TRIVIA  := (SPACE | COMMENT)*
+
+  body_item_ep1 := KW_VIA edge:path LBRACE inner:body_list RBRACE
+
+  KW_VIA := "via"
+  """
+
   @mismatched_skip_fragment """
   @grammar "fake_bad_fragment"
   @root select_ep1a
@@ -182,6 +205,53 @@ defmodule ScryCore.GrammarComposeTest do
                Grammar.VM.run(g, ~s(SELECT metric { name }), NoActions, nil)
 
       refute Map.has_key?(captures, :select_ep1a)
+    end
+  end
+
+  describe "merge/2 with an EP1(b) block-opening fragment (body_item_ep1)" do
+    setup do
+      core = parse!(@core_source, "priv/grammar.aether")
+      graph = parse!(@graph_like_fragment, "graph.aether")
+      {:ok, merged} = GrammarCompose.merge(core, graph)
+      {:ok, analyzed} = Grammar.Analysis.run(merged)
+      %{grammar: analyzed}
+    end
+
+    test "the block construct itself parses as a body item", %{grammar: g} do
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(g, ~s(SELECT users { name, via knows { id } }), NoActions, nil)
+
+      assert %Ichor.Node{rule: :body_list, captures: body} = captures.body
+      # `tail` sits under `*` (a repeated capture), so it's always a
+      # list -- same rule already established for path's own `tail`.
+      assert [%Ichor.Node{rule: :body_item_ep1, captures: via}] = body.tail
+      assert %Ichor.Node{rule: :path, captures: %{head: "knows"}} = via.edge
+    end
+
+    test "the fragment's own body recurses back into core's body_list, not a copy of it", %{
+      grammar: g
+    } do
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(
+                 g,
+                 ~s(SELECT users { via knows { id, name } }),
+                 NoActions,
+                 nil
+               )
+
+      %Ichor.Node{rule: :body_list, captures: %{head: via_item}} = captures.body
+      %Ichor.Node{rule: :body_item_ep1, captures: via} = via_item
+
+      assert %Ichor.Node{rule: :body_list, captures: inner_body} = via.inner
+      assert %Ichor.Node{rule: :path, captures: %{head: "id"}} = inner_body.head
+    end
+
+    test "still falls back to a plain field when the construct isn't used", %{grammar: g} do
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(g, ~s(SELECT users { name }), NoActions, nil)
+
+      assert %Ichor.Node{rule: :body_list, captures: %{head: %Ichor.Node{rule: :path}}} =
+               captures.body
     end
   end
 

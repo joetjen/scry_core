@@ -23,14 +23,31 @@ defmodule ScryCore.ActionsTest do
   test "a bare select with no where clause", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name }))
     assert q.source == ["users"]
-    assert q.select == [["name"]]
+    assert q.select == [{:field, ["name"]}]
     assert q.wheres == []
   end
 
   test "multiple projected fields, dotted source", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders.line_items { name, email }))
     assert q.source == ["orders", "line_items"]
-    assert q.select == [["name"], ["email"]]
+    assert q.select == [{:field, ["name"]}, {:field, ["email"]}]
+  end
+
+  test "a nested SELECT as a body item", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(SELECT users { name, SELECT orders WHERE total > 50 { id, total } })
+             )
+
+    assert q.select == [
+             {:field, ["name"]},
+             %Query{
+               source: ["orders"],
+               wheres: [{:cmp, :gt, ["total"], 50}],
+               select: [{:field, ["id"]}, {:field, ["total"]}]
+             }
+           ]
   end
 
   test "a where clause with a numeric comparison", %{grammar: g} do
