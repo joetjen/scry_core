@@ -47,6 +47,7 @@ defmodule ScryCore.Actions do
 
   @impl true
   def handle_token(:INTEGER, text, _ctx), do: {:ok, String.to_integer(text)}
+  def handle_token(:ESCAPED_IDENT, text, _ctx), do: {:ok, String.slice(text, 1..-2//1)}
 
   # Strips the delimiter (either quote char, both one byte -- ASCII `"`
   # or `'`) and resolves escapes over what's left. lang_spec.md §4's own
@@ -121,6 +122,12 @@ defmodule ScryCore.Actions do
       {:ok, [head | tail], ctx}
     end
   end
+
+  # field_name := IDENT | ESCAPED_IDENT has no clause of its own -- a
+  # bare single-token alternative per branch, same single-capture
+  # passthrough `comp_op` already relies on, giving `path`'s own `head`/
+  # `tail` the right string either way (IDENT's own default text, or
+  # ESCAPED_IDENT's delimiter-stripped text above).
 
   # A nested query -- select's own handler already returns %Query{}
   # directly, so no extra wrapping is needed here (Query.body_item/0).

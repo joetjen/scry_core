@@ -5,7 +5,14 @@
 ; real parser before the full language is written out. Phase 1 has:
 ;
 ;   - `#` line comments (lang_spec §3) -- `;` block comments deferred
-;   - bare identifiers + dot-path (§3) -- backtick-escaping deferred
+;     (a real gap, not just an unstarted one: lang_spec §3 defines it as
+;     consuming its own matching `}` via `{`/`}` depth counting, which
+;     is a context-free, not regular, construct -- it cannot be
+;     expressed as lexer-level trivia the way `#`/SPACE are, in Aether
+;     or any other PEG-lexer; it needs real parser-level (rule) support,
+;     a materially bigger undertaking than "add another comment token")
+;   - bare identifiers + dot-path, backtick-escaped on keyword collision
+;     (`` `select` ``, §3)
 ;   - double- and single-quoted strings with real escape handling
 ;     (`\" \' \\ \n \t \uXXXX`, §4), integers, decimals, `2/3`-shaped
 ;     rational literals, radix integers (`0x`/`0o`/`0b`), nil/true/false
@@ -48,9 +55,7 @@ TRIVIA  := (SPACE | COMMENT)*
 ; IDENT feeds keyword reclassification below -- every structural keyword
 ; this phase needs is a *reclassified* IDENT match, not its own token,
 ; so declaration order between them and IDENT never matters (only the
-; reclassification does). No backtick-escape mechanism yet (deferred,
-; see file header): a query that needs "select" etc. as a plain field
-; name has no way to write it in this phase.
+; reclassification does).
 ;
 ; @refine, not @keywords: @keywords' table lookup is an exact,
 ; case-sensitive match against the token's raw text, and does not pick
@@ -64,6 +69,17 @@ IDENT := [[:alpha:]_][[:alnum:]_-]*
           KW_NIL, KW_TRUE, KW_FALSE,
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
           KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC)
+
+; A field name that happens to collide with a keyword (lang_spec §3:
+; "Escaped with backtick only on keyword collision") -- a wholly
+; separate token from IDENT, not something IDENT itself can produce no
+; matter what it matches, so it's never subject to `@refine` above:
+; backtick-escaped text is *always* a plain identifier, regardless of
+; whether the text between the backticks happens to also be spelled
+; like a keyword. `select`/`` `SELECT` ``/`` `Select` `` (any case, per
+; lang_spec §3's own "collision check is case-insensitive too") are all
+; the identifier "select" this way, never KW_SELECT.
+ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_-]* "`"
 
 ; ---- literals ----
 ;
@@ -238,7 +254,9 @@ literal := STRING | rational | DECIMAL | RADIX | INTEGER | KW_NIL | KW_TRUE | KW
 
 rational := numerator:INTEGER SLASH denominator:INTEGER
 
-path := head:IDENT (DOT tail:IDENT)*
+path := head:field_name (DOT tail:field_name)*
+
+field_name := IDENT | ESCAPED_IDENT
 
 ; A body item is a nested SELECT (core-only, no extension needed --
 ; ordinary PEG recursion, same rule referencing itself indirectly

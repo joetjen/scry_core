@@ -252,4 +252,36 @@ defmodule ScryCore.ActionsTest do
     assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE path = "C:\Users" { name }))
     assert q.wheres == [{:cmp, :eq, ["path"], "C:\\Users"}]
   end
+
+  test "a backtick-escaped identifier lets a keyword-colliding name be used as a source", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT `select` { name }))
+    assert q.source == ["select"]
+  end
+
+  test "a backtick-escaped identifier as a projected field", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { `where` }))
+    assert q.select == [{:field, ["where"]}]
+  end
+
+  test "a backtick-escaped identifier in a dotted path, mixed with a plain segment", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT `order`.total { name }))
+    assert q.source == ["order", "total"]
+  end
+
+  test "the escaped text is preserved as-is, not downcased or otherwise normalized", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { `Where` }))
+    assert q.select == [{:field, ["Where"]}]
+  end
+
+  test "an unescaped keyword-colliding name still can't be used as a plain field name", %{
+    grammar: g
+  } do
+    assert {:error, _} = run(g, ~s(SELECT select { name }))
+  end
 end
