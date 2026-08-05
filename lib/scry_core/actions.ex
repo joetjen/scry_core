@@ -76,6 +76,27 @@ defmodule ScryCore.Actions do
     {:ok, text |> String.slice(3..-4//1) |> unescape()}
   end
 
+  # DATE's own token pattern is lexically permissive (see its comment in
+  # priv/grammar.aether) -- real calendar validation happens here, via
+  # the stdlib, not in the grammar. Tries the most specific shape (a
+  # real offset/"Z") first, then the date+time-with-no-offset form, then
+  # falls back to a bare date. A genuinely invalid calendar date (`2026-
+  # 02-30`) surfaces as `{:error, reason}` here and propagates through
+  # the whole pipeline as an ordinary parse error -- confirmed
+  # empirically (scratch grammar) before relying on it, not assumed.
+  def handle_token(:DATE, text, _ctx) do
+    case DateTime.from_iso8601(text) do
+      {:ok, datetime, _utc_offset} ->
+        {:ok, datetime}
+
+      {:error, _} ->
+        case NaiveDateTime.from_iso8601(text) do
+          {:ok, naive_datetime} -> {:ok, naive_datetime}
+          {:error, _} -> Date.from_iso8601(text)
+        end
+    end
+  end
+
   # "3.14" -> Rational.new(314, 100) -- reduces to 157/50, matching
   # lang_spec.md §4's own worked example exactly, since decimal literals
   # are defined to parse directly to their exact rational value, never

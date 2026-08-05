@@ -21,9 +21,14 @@
 ;     radix integers (`0x`/`0o`/`0b`), list literals (`[...]`, usable
 ;     anywhere a literal is, not just inside `in [...]`), atom literals
 ;     (`:name`, tagged `{:atom, name}` rather than a real Elixir atom --
-;     ScryCore.Actions' own handle_token(:ATOM, ...) explains why),
-;     nil/true/false (§4) -- everything else in §4 (regex sigils,
-;     duration/byte-size/date literals, and the rest of the
+;     ScryCore.Actions' own handle_token(:ATOM, ...) explains why), ISO
+;     8601 date/timestamp literals (a real `Date`/`NaiveDateTime`/
+;     `DateTime`, per what's present -- calendar validation happens via
+;     the stdlib in ScryCore.Actions, not in the grammar), nil/true/
+;     false (§4) -- everything else in §4 (regex sigils, duration/
+;     byte-size literals -- lang_spec §4 gives no unit vocabulary for
+;     either, unlike ISO 8601's own well-defined standard, so implementing
+;     them means inventing one first -- and the rest of the
 ;     exact-rational tower -- arithmetic *expressions*, inexact/float
 ;     coexistence -- see ScryCore.Rational's own moduledoc) deferred
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
@@ -118,6 +123,24 @@ DECIMAL := DIGIT+ "." DIGIT+
 RADIX   := "0" [xX] HEX+
          | "0" [oO] [0-7]+
          | "0" [bB] [01]+
+
+; ISO 8601 (lang_spec §4's own example: `2026-01-01T14:00:00Z`) --
+; lexically permissive on purpose, not a full calendar-aware match
+; (real ISO 8601 has more shapes than are worth spelling out char by
+; char here: fractional seconds, a numeric UTC offset instead of `Z`,
+; date-only with no time part at all). `ScryCore.Actions` hands
+; whatever this matches to Elixir's own `Date`/`NaiveDateTime`/
+; `DateTime`.from_iso8601/1 -- genuine calendar validation (rejecting
+; `2026-02-30`, say) happens there, confirmed empirically to surface
+; correctly as `{:error, _}` through the whole pipeline, not just
+; assumed. Maximal munch resolves any overlap with INTEGER/DECIMAL the
+; same way RADIX already does elsewhere in this file -- a real date is
+; always longer than the leading digits alone could match.
+DATE := DIGIT DIGIT DIGIT DIGIT "-" DIGIT DIGIT "-" DIGIT DIGIT
+        ("T" DIGIT DIGIT ":" DIGIT DIGIT ":" DIGIT DIGIT
+          ("." DIGIT+)?
+          ("Z" | [+-] DIGIT DIGIT ":" DIGIT DIGIT)?
+        )?
 
 ; Two delimiters (lang_spec §4: "pick to avoid escaping" -- a string
 ; containing a `"` can be written `'...'` instead), both honoring
@@ -289,7 +312,7 @@ list := LBRACK items:literal_list? RBRACK
 ; starts with the LBRACK token, never `literal` itself at position
 ; zero), so it needs none of Ichor's left-recursion rewrite machinery,
 ; same as `select`/`body_item`'s own recursion elsewhere in this file.
-literal := STRING | MULTILINE_STRING | rational | DECIMAL | RADIX | INTEGER | list | ATOM
+literal := STRING | MULTILINE_STRING | DATE | rational | DECIMAL | RADIX | INTEGER | list | ATOM
          | KW_NIL | KW_TRUE | KW_FALSE
 
 rational := numerator:INTEGER SLASH denominator:INTEGER

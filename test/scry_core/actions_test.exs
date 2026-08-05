@@ -367,4 +367,41 @@ line two""" { name }))
     assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE bio = """tab\there""" { name }))
     assert q.wheres == [{:cmp, :eq, ["bio"], "tab\there"}]
   end
+
+  test "a full ISO 8601 timestamp with a Z offset parses to a real DateTime", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT events WHERE at = 2026-01-01T14:00:00Z { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["at"], ~U[2026-01-01 14:00:00Z]}]
+  end
+
+  test "a timestamp with a numeric UTC offset is normalized to UTC", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT events WHERE at = 2026-01-01T14:00:00+02:00 { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["at"], ~U[2026-01-01 12:00:00Z]}]
+  end
+
+  test "a timestamp with no offset parses to a NaiveDateTime", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT events WHERE at = 2026-01-01T14:00:00 { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["at"], ~N[2026-01-01 14:00:00]}]
+  end
+
+  test "a bare date (no time part) parses to a Date", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT events WHERE day = 2026-01-01 { name }))
+    assert q.wheres == [{:cmp, :eq, ["day"], ~D[2026-01-01]}]
+  end
+
+  test "a timestamp with fractional seconds", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT events WHERE at = 2026-01-01T14:00:00.500Z { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["at"], ~U[2026-01-01 14:00:00.500Z]}]
+  end
+
+  test "an invalid calendar date surfaces as a parse error, not a raise", %{grammar: g} do
+    assert {:error, _} = run(g, ~s(SELECT events WHERE day = 2026-02-30 { name }))
+  end
 end
