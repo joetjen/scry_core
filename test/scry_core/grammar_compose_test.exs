@@ -17,7 +17,7 @@ defmodule ScryCore.GrammarComposeTest do
   # (`KW_LAST := "last"`) rather than via `@keywords`/`@refine`, since a
   # fragment can't eagerly reference core's IDENT from its own file
   # (Aether validates `@keywords`'/`@refine`'s base token locally).
-  @well_formed_fragment """
+  @time_series_like_fragment """
   @grammar "fake_time_series_fragment"
   @root select_ep1a
   @case_insensitive
@@ -32,6 +32,49 @@ defmodule ScryCore.GrammarComposeTest do
   select_ep1a := KW_LAST value:NUMBER
 
   KW_LAST := "last"
+  """
+
+  # A second, independent fragment contributing a *different*
+  # alternative to the same extension point -- standing in for
+  # scry_document's `deep` (lang_spec §5.2), which nominates the exact
+  # same "before WHERE" position `last` does. Proves the real
+  # requirement: more than one kind can load simultaneously and each
+  # still gets its own working alternative there.
+  @document_like_fragment """
+  @grammar "fake_document_fragment"
+  @root select_ep1a
+  @case_insensitive
+  @skip TRIVIA
+
+  COMMENT := "#" (!"\\n" .)*
+  TRIVIA  := (SPACE | COMMENT)*
+
+  select_ep1a := KW_DEEP
+
+  KW_DEEP := "deep"
+  """
+
+  # An EP1(b) block-opening construct, standing in for scry_graph's
+  # `VIA edge { body }` (lang_spec §8.1) -- fills body_item_ep1, not
+  # select_ep1a, and its own body recurses straight back into core's
+  # body_list (an ordinary dangling reference, exactly like referencing
+  # KW_WHERE above -- resolved once merged, not before). This is the
+  # actual point of testing an EP1(b) shape specifically: EP1(a)
+  # (select_ep1a) never had to compose with anything of core's own, but
+  # a block-opening construct's body is *itself* built from core's body
+  # grammar, recursively.
+  @graph_like_fragment """
+  @grammar "fake_graph_fragment"
+  @root body_item_ep1
+  @case_insensitive
+  @skip TRIVIA
+
+  COMMENT := "#" (!"\\n" .)*
+  TRIVIA  := (SPACE | COMMENT)*
+
+  body_item_ep1 := KW_VIA edge:path LBRACE inner:body_list RBRACE
+
+  KW_VIA := "via"
   """
 
   @mismatched_skip_fragment """
@@ -66,22 +109,36 @@ defmodule ScryCore.GrammarComposeTest do
   end
 
   describe "core alone" do
-    test "parses cleanly (extension points are valid dangling references at parse time)" do
-      assert %Aether.Grammar{} = parse!(@core_source, "priv/grammar.aether")
-    end
-
-    test "fails Grammar.Analysis on its own -- select_ep1a is genuinely unfilled" do
+    test "parses cleanly and passes Grammar.Analysis -- a zero-kind build must still compile" do
       core = parse!(@core_source, "priv/grammar.aether")
 
-      assert {:error, errors} = Grammar.Analysis.run(core)
-      assert Enum.any?(errors, &(&1.message =~ "select_ep1a"))
+      # Not "fails, since select_ep1a is unfilled" -- that was true only
+      # of an earlier design where the extension point was a genuinely
+      # dangling reference. Real builds with no kind contributing at a
+      # given extension point (scry_relational alone, say) still need a
+      # working parser; core itself now supplies a real "always fails"
+      # default (`NEVER`, priv/grammar.aether) precisely so this holds.
+      assert {:ok, _analyzed} = Grammar.Analysis.run(core)
+    end
+
+    test "the unfilled extension point genuinely never matches, it's not just permissive" do
+      core = parse!(@core_source, "priv/grammar.aether")
+      {:ok, analyzed} = Grammar.Analysis.run(core)
+
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(analyzed, ~s(SELECT metric { name }), NoActions, nil)
+
+      refute Map.has_key?(captures, :select_ep1a)
+
+      assert {:error, _} =
+               Grammar.VM.run(analyzed, ~s(SELECT metric last 5 { name }), NoActions, nil)
     end
   end
 
   describe "merge/2 with a correctly-authored fragment" do
     setup do
       core = parse!(@core_source, "priv/grammar.aether")
-      fragment = parse!(@well_formed_fragment)
+      fragment = parse!(@time_series_like_fragment)
       {:ok, merged} = GrammarCompose.merge(core, fragment)
       %{merged: merged}
     end
@@ -112,6 +169,92 @@ defmodule ScryCore.GrammarComposeTest do
     end
   end
 
+  describe "merge/2 with two simultaneously-loaded fragments" do
+    setup do
+      core = parse!(@core_source, "priv/grammar.aether")
+      time_series = parse!(@time_series_like_fragment, "time_series.aether")
+      document = parse!(@document_like_fragment, "document.aether")
+
+      {:ok, once_merged} = GrammarCompose.merge(core, time_series)
+      {:ok, twice_merged} = GrammarCompose.merge(once_merged, document)
+      {:ok, analyzed} = Grammar.Analysis.run(twice_merged)
+      %{grammar: analyzed}
+    end
+
+    test "both kinds' alternatives work, independently, in the same build", %{grammar: g} do
+      assert {:ok, %Ichor.Node{rule: :select, captures: last_captures}} =
+               Grammar.VM.run(g, ~s(SELECT metric last 5 { name }), NoActions, nil)
+
+      assert %Ichor.Node{rule: :select_ep1a, captures: %{value: "5"}} =
+               last_captures.select_ep1a
+
+      assert {:ok, %Ichor.Node{rule: :select, captures: deep_captures}} =
+               Grammar.VM.run(g, ~s(SELECT metric deep { name }), NoActions, nil)
+
+      # Unwrapped to the raw text, not a %Ichor.Node{} -- select_ep1a's
+      # document-like alternative has exactly one capture (KW_DEEP
+      # alone), and Ichor.Actions' own single-capture-passthrough
+      # default applies per rule, same as `last`'s two-capture
+      # alternative building a real node above is also just that
+      # default, not special extension-point behavior.
+      assert deep_captures.select_ep1a == "deep"
+    end
+
+    test "the position is still absent, not ambiguous, when neither is used", %{grammar: g} do
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(g, ~s(SELECT metric { name }), NoActions, nil)
+
+      refute Map.has_key?(captures, :select_ep1a)
+    end
+  end
+
+  describe "merge/2 with an EP1(b) block-opening fragment (body_item_ep1)" do
+    setup do
+      core = parse!(@core_source, "priv/grammar.aether")
+      graph = parse!(@graph_like_fragment, "graph.aether")
+      {:ok, merged} = GrammarCompose.merge(core, graph)
+      {:ok, analyzed} = Grammar.Analysis.run(merged)
+      %{grammar: analyzed}
+    end
+
+    test "the block construct itself parses as a body item", %{grammar: g} do
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(g, ~s(SELECT users { name, via knows { id } }), NoActions, nil)
+
+      assert %Ichor.Node{rule: :body_list, captures: body} = captures.body
+      # `tail` sits under `*` (a repeated capture), so it's always a
+      # list -- same rule already established for path's own `tail`.
+      assert [%Ichor.Node{rule: :body_item_ep1, captures: via}] = body.tail
+      assert %Ichor.Node{rule: :path, captures: %{head: "knows"}} = via.edge
+    end
+
+    test "the fragment's own body recurses back into core's body_list, not a copy of it", %{
+      grammar: g
+    } do
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(
+                 g,
+                 ~s(SELECT users { via knows { id, name } }),
+                 NoActions,
+                 nil
+               )
+
+      %Ichor.Node{rule: :body_list, captures: %{head: via_item}} = captures.body
+      %Ichor.Node{rule: :body_item_ep1, captures: via} = via_item
+
+      assert %Ichor.Node{rule: :body_list, captures: inner_body} = via.inner
+      assert %Ichor.Node{rule: :path, captures: %{head: "id"}} = inner_body.head
+    end
+
+    test "still falls back to a plain field when the construct isn't used", %{grammar: g} do
+      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
+               Grammar.VM.run(g, ~s(SELECT users { name }), NoActions, nil)
+
+      assert %Ichor.Node{rule: :body_list, captures: %{head: %Ichor.Node{rule: :path}}} =
+               captures.body
+    end
+  end
+
   describe "merge/2 skip-mismatch check" do
     test "rejects a fragment whose @skip doesn't match core's, with an actionable message" do
       core = parse!(@core_source, "priv/grammar.aether")
@@ -125,7 +268,7 @@ defmodule ScryCore.GrammarComposeTest do
   end
 
   describe "merge/2 collision detection" do
-    test "rejects a fragment that redefines an existing name differently" do
+    test "rejects a fragment that redefines an existing (non-extension-point) name differently" do
       core = parse!(@core_source, "priv/grammar.aether")
       fragment = parse!(@colliding_fragment)
 
@@ -136,9 +279,18 @@ defmodule ScryCore.GrammarComposeTest do
 
     test "does not reject a fragment's identical redeclaration of a shared token" do
       core = parse!(@core_source, "priv/grammar.aether")
-      fragment = parse!(@well_formed_fragment)
+      fragment = parse!(@time_series_like_fragment)
 
       assert {:ok, _merged} = GrammarCompose.merge(core, fragment)
+    end
+
+    test "does not reject two fragments both contributing to the same extension point" do
+      core = parse!(@core_source, "priv/grammar.aether")
+      time_series = parse!(@time_series_like_fragment, "time_series.aether")
+      document = parse!(@document_like_fragment, "document.aether")
+
+      assert {:ok, once_merged} = GrammarCompose.merge(core, time_series)
+      assert {:ok, _twice_merged} = GrammarCompose.merge(once_merged, document)
     end
   end
 end

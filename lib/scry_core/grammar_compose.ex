@@ -36,6 +36,26 @@ defmodule ScryCore.GrammarCompose do
       discarded in favor of core's own at merge time. Any other name
       defined by both is a genuine collision (lang_spec.md §2's
       grammar-composition-time keyword-collision rule) and raises.
+
+  A third, more fundamental requirement, found while working out how
+  `select_ep1a` should actually behave once more than one kind is
+  loaded: **an extension point is not "exactly one fragment may define
+  this rule."** lang_spec.md §5.2 already says as much for real --
+  `last` (time-series) and `deep` (document) both nominate the same
+  "before WHERE" position, and nothing stops a build from loading both
+  kinds at once, each contributing its own alternative there. Treating
+  a second fragment's `select_ep1a` as a collision (the general rule
+  above) would make that combination impossible. `extension_points/0`
+  below names every rule this applies to; `merge/2` folds *every*
+  loaded fragment's contribution into one `Choice`, deduplicating an
+  exact repeat rather than erroring, instead of requiring exact
+  identity or raising. Core itself has to carry a real "never matches"
+  default for each (`priv/grammar.aether`'s `NEVER := []`, an empty
+  character class -- not a `!`-negated lookahead, which turns out to
+  mean "always succeeds with zero width," the opposite of what's
+  needed here), so a build with zero kinds contributing at that
+  position still compiles into a genuinely usable grammar rather than
+  one with a dangling reference.
   """
 
   alias Ichor.Error
@@ -61,21 +81,26 @@ defmodule ScryCore.GrammarCompose do
 
   @doc """
   Merges `core` (an `%Aether.Grammar{}`, not yet run through
-  `Grammar.Analysis`) with `fragment` (same). Returns the merged
-  `%Aether.Grammar{}`, still not yet analyzed -- callers hand it to
-  `Ichor.generate_from_grammar/2` (or `Grammar.Analysis.run/1` directly,
-  for just the completeness check) themselves.
+  `Grammar.Analysis`) with `fragment` (same) -- or, to compose more than
+  one fragment, fold this over a list: `Enum.reduce(fragments, core,
+  fn fragment, acc -> {:ok, merged} = merge(acc, fragment); merged end)`.
+  Returns the merged `%Aether.Grammar{}`, still not yet analyzed --
+  callers hand it to `Ichor.generate_from_grammar/2` (or
+  `Grammar.Analysis.run/1` directly, for just the completeness check)
+  themselves.
 
   `core`'s own `root`/`skip`/`engine`/`case_insensitive` win; a
   fragment's copies of those settings are never consulted beyond the
-  skip-match check above.
+  skip-match check above. An extension-point rule name
+  (`extension_points/0`) unions every contribution instead of requiring
+  identity -- see this module's own moduledoc.
   """
   @spec merge(Aether.Grammar.t(), Aether.Grammar.t()) ::
           {:ok, Aether.Grammar.t()} | {:error, Error.t()}
   def merge(%Aether.Grammar{} = core, %Aether.Grammar{} = fragment) do
     with :ok <- check_skip_match(core, fragment),
          {:ok, tokens} <- merge_maps(core.tokens, fragment.tokens, "token"),
-         {:ok, rules} <- merge_maps(core.rules, fragment.rules, "rule") do
+         {:ok, rules} <- merge_maps(core.rules, fragment.rules, "rule", extension_points()) do
       {:ok,
        %{
          core
@@ -87,6 +112,22 @@ defmodule ScryCore.GrammarCompose do
        }}
     end
   end
+
+  # Every extension-point rule name core declares -- see this module's
+  # own moduledoc for why these specifically need union-not-collision
+  # merge semantics. Grows as core adds more.
+  #
+  # A plain list, not a MapSet -- Dialyzer has known, longstanding
+  # friction with MapSet's opaque internal representation whenever the
+  # set comes from a small compile-time-constant literal (success
+  # typing narrows straight through the literal, then flags every
+  # MapSet.member?/2 call site as an opaqueness violation against its
+  # own inferred type). Real friction, not a real bug; a plain list and
+  # `in` sidesteps it entirely rather than fighting or suppressing it,
+  # and at this size (two entries, growing slowly) there's no
+  # performance reason to prefer a MapSet anyway.
+  @spec extension_points() :: [atom()]
+  defp extension_points, do: [:select_ep1a, :body_item_ep1]
 
   defp check_skip_match(%{skip: same}, %{skip: same}), do: :ok
 
@@ -109,16 +150,31 @@ defmodule ScryCore.GrammarCompose do
   # wins without complaint. `strip_meta/1` first: source-span metadata
   # naturally differs between two files even when the matched shape is
   # identical, so it can't be part of the equality check.
-  defp merge_maps(core_map, fragment_map, kind) do
+  #
+  # A name in `extension_points`, though, is never a collision at all --
+  # both sides' definitions are unioned into one Choice instead (see
+  # this module's own moduledoc for why more than one fragment needs to
+  # be able to contribute to the same extension point simultaneously).
+  defp merge_maps(core_map, fragment_map, kind, extension_points \\ []) do
     conflicts =
       for {name, fragment_def} <- fragment_map,
+          name not in extension_points,
           Map.has_key?(core_map, name),
           strip_meta(Map.fetch!(core_map, name)) != strip_meta(fragment_def),
           do: name
 
     case conflicts do
       [] ->
-        {:ok, Map.merge(fragment_map, core_map)}
+        merged =
+          Enum.reduce(fragment_map, core_map, fn {name, fragment_def}, acc ->
+            if name in extension_points do
+              Map.update(acc, name, fragment_def, &union_rule(&1, fragment_def))
+            else
+              Map.put_new(acc, name, fragment_def)
+            end
+          end)
+
+        {:ok, merged}
 
       names ->
         {:error,
@@ -128,6 +184,31 @@ defmodule ScryCore.GrammarCompose do
                "declared differently by core and this fragment",
            stage: :analysis
          )}
+    end
+  end
+
+  # Folds a fragment's contribution into an extension point's existing
+  # definition -- flattens into an already-Choice accumulator (the
+  # normal case once a second, third, ... fragment contributes) rather
+  # than nesting a Choice inside a Choice, and skips an exact repeat
+  # (the same fragment merged twice, or two fragments that happen to
+  # define the identical thing) rather than adding dead PEG alternatives
+  # Grammar.Analysis's own duplicate-alternative lint would flag anyway.
+  defp union_rule(%Choice{exprs: existing} = choice, new_def) do
+    new_stripped = strip_meta(new_def)
+
+    if Enum.any?(existing, &(strip_meta(&1) == new_stripped)) do
+      choice
+    else
+      %{choice | exprs: existing ++ [new_def]}
+    end
+  end
+
+  defp union_rule(existing_def, new_def) do
+    if strip_meta(existing_def) == strip_meta(new_def) do
+      existing_def
+    else
+      %Choice{exprs: [existing_def, new_def], meta: nil}
     end
   end
 

@@ -14,8 +14,11 @@
 ;     group by/having/distinct/order by/limit, the rest of §5's keyword
 ;     reference, and all of §6/§7/§8/§9 deferred
 ;   - one EP1(a) extension point (`select_ep1a`, lang_spec §2), proving
-;     the "core references a rule it deliberately never defines" pattern
-;     the whole composition design depends on
+;     the union-of-simultaneous-kind-contributions composition pattern
+;     the whole design actually needs (not "core references a rule it
+;     never defines" -- core supplies a real always-fails default, see
+;     `select_ep1a`'s own comment below for why that turned out to
+;     matter)
 ;
 ; Every deferral above is a real gap, not a design decision -- each one
 ; needs its own pass. See impl_spec.md §8 for how this file's own
@@ -71,17 +74,34 @@ RBRACK := "]"
 COMMA  := ","
 DOT    := "."
 
+; `[]` (an empty character class) matches no character, ever -- the
+; "always fails" default an extension point needs when nothing has
+; contributed to it (see `select_ep1a` below). Deliberately not a
+; `!`-negated lookahead on some "any character" token: that combination
+; means "always *succeeds*, with zero width" (there being no character
+; left to fail to find only happens at true end of input) -- the
+; opposite of what's wanted here, confirmed empirically before settling
+; on this instead.
+NEVER := []
+
 ; ---- grammar ----
 
 select := KW_SELECT source:path select_ep1a? where_clause? LBRACE body:body_list RBRACE
 
-; Deliberately undefined -- core's EP1(a) header-modifier extension
-; point (lang_spec §2, §5.2). A kind fragment supplies this rule; core
-; never does. Referencing it here is what makes core's own grammar
-; genuinely incomplete on its own -- see ScryCore.GrammarCompose's test
-; suite for both halves of that claim (core alone fails
-; Grammar.Analysis; core + a fragment that defines this rule succeeds).
-;
+; core's EP1(a) header-modifier extension point (lang_spec §2, §5.2).
+; Unlike the language spec's own text, this is *not* "exactly one kind
+; may ever fill this" -- §5.2 itself has `last` (time-series) and
+; `deep` (document) both nominating the same position, and a build can
+; legitimately load both kinds at once. `select_ep1a` therefore always
+; has a real definition (`NEVER` immediately below, when no kind
+; contributes here) that `ScryCore.GrammarCompose.merge/2` unions each
+; loaded fragment's own contribution into, rather than a dangling
+; reference exactly one fragment is allowed to supply. See that
+; module's own moduledoc for the full reasoning and
+; `ScryCore.GrammarComposeTest` for both a one-fragment and a
+; two-simultaneous-fragment proof.
+select_ep1a := NEVER
+
 ; Every optional (`?`-suffixed) *rule* reference below is deliberately
 ; left unrenamed (`select_ep1a?`, `where_clause?`, `literal_list?` --
 ; never e.g. `where:where_clause?`), for the same empirically-found
@@ -119,4 +139,25 @@ literal := STRING | NUMBER | KW_NIL | KW_TRUE | KW_FALSE
 
 path := head:IDENT (DOT tail:IDENT)*
 
-body_list := head:path (COMMA tail:path)*
+; A body item is a nested SELECT (core-only, no extension needed --
+; ordinary PEG recursion, same rule referencing itself indirectly
+; through body_list), a kind-contributed construct (EP1(b)/(c)/(d)
+; body-item shapes -- a block-opening construct, a scoped pseudo-field,
+; or a bare value pseudo-field; lang_spec §2's impl_spec companion),
+; or a plain field path -- tried in that order (most specific leading
+; token first, generic fallback last; PEG's first-match-wins doesn't
+; actually need the ordering here, since all three start with
+; structurally distinct tokens, but it's the same defensive convention
+; select_ep1a's own alternatives follow).
+body_item := select | body_item_ep1 | path
+
+; core's EP1(b)/(c)/(d) body-item extension point -- the same
+; union-of-simultaneous-contributions design as select_ep1a (this
+; file's own comment there has the full reasoning); a real kind
+; contributes its own block-opening construct, pseudo-field, or value
+; pseudo-field here (VIA, PARENT, SIBLINGS, ANCESTORS, PATH, ... in the
+; language spec's own vocabulary), and more than one kind can
+; contribute simultaneously.
+body_item_ep1 := NEVER
+
+body_list := head:body_item (COMMA tail:body_item)*

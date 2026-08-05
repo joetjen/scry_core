@@ -20,6 +20,14 @@ defmodule ScryCore.Query do
   `select`, lang_spec.md §5.2) -- matching the composable builder API's
   eventual ability to push more than one (`ScryCore.Query.where/2`,
   impl_spec.md §7), not a speculative field with nothing behind it.
+
+  A `select` entry is one of three shapes -- a plain field path, a
+  nested query (`priv/grammar.aether`'s `body_item := select | ...`,
+  ordinary PEG recursion, no extension point needed), or a kind's own
+  EP1(b)/(c)/(d) body-item construct, tagged `:variant` and left
+  unexamined by core the same way `variant` itself is. A nested query
+  is `t()` directly, not wrapped in its own tag -- already
+  self-describing via its struct, unlike the other two shapes.
   """
 
   @type predicate ::
@@ -28,6 +36,8 @@ defmodule ScryCore.Query do
           | {:and, predicate(), predicate()}
           | {:or, predicate(), predicate()}
           | {:not, predicate()}
+
+  @type body_item :: {:field, [String.t()]} | t() | {:variant, term()}
 
   @type t :: %__MODULE__{
           source: [String.t()] | nil,
@@ -39,7 +49,7 @@ defmodule ScryCore.Query do
           order_bys: [{[String.t()], :asc | :desc}],
           limit: non_neg_integer() | nil,
           offset: non_neg_integer() | nil,
-          select: [[String.t()]],
+          select: [body_item()],
           variant: %{optional(atom()) => term()}
         }
 
