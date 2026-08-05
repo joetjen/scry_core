@@ -92,7 +92,12 @@ defmodule ScryCore.MixProject do
         "format",
         "compile --warnings-as-errors",
         "credo --strict",
-        "sobelow",
+        # `--skip`: honors `@sobelow_skip` annotations on specific
+        # functions (AGENTS.md: a low-confidence finding needs a
+        # targeted, justified skip, never a blanket suppression) --
+        # without this flag Sobelow ignores the annotation entirely and
+        # reports the finding anyway.
+        "sobelow --skip",
         "test",
         "dialyzer"
       ]

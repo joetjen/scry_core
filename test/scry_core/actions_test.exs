@@ -3,8 +3,6 @@ defmodule ScryCore.ActionsTest do
 
   alias ScryCore.Query
 
-  @core_source File.read!("priv/grammar.aether")
-
   setup_all do
     # No stub needed for select_ep1a -- core's own grammar is complete
     # and analyzes on its own now (ScryCore.GrammarComposeTest covers
@@ -13,8 +11,7 @@ defmodule ScryCore.ActionsTest do
     # compiles). None of these core-only tests exercise the extension
     # point for real, since no real kind fragment exists yet to merge
     # in properly (impl_spec.md §4).
-    {:ok, core} = Aether.Parser.parse(@core_source, "priv/grammar.aether")
-    {:ok, analyzed} = Grammar.Analysis.run(core)
+    {:ok, analyzed} = ScryCore.Grammar.compile()
     %{grammar: analyzed}
   end
 
