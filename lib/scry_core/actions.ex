@@ -47,7 +47,17 @@ defmodule ScryCore.Actions do
 
   @impl true
   def handle_token(:INTEGER, text, _ctx), do: {:ok, String.to_integer(text)}
-  def handle_token(:STRING, text, _ctx), do: {:ok, String.slice(text, 1..-2//1)}
+
+  # Strips the delimiter (either quote char, both one byte -- ASCII `"`
+  # or `'`) and resolves escapes over what's left. lang_spec.md §4's own
+  # list, exactly: \" \' \\ \n \t \uXXXX -- an unrecognized \<char> was
+  # already let through unresolved by priv/grammar.aether's own STRING
+  # token (a deliberate leniency, see its comment there), so `unescape/1`
+  # only ever needs clauses for the six real escapes plus the two
+  # fallthrough cases (an ordinary character, and the empty remainder).
+  def handle_token(:STRING, text, _ctx) do
+    {:ok, text |> String.slice(1..-2//1) |> unescape()}
+  end
 
   # "3.14" -> Rational.new(314, 100) -- reduces to 157/50, matching
   # lang_spec.md §4's own worked example exactly, since decimal literals
@@ -249,6 +259,21 @@ defmodule ScryCore.Actions do
   defp op_from_text(">"), do: :gt
   defp op_from_text("<="), do: :le
   defp op_from_text(">="), do: :ge
+
+  defp unescape(text), do: unescape(text, [])
+
+  defp unescape(<<"\\\"", rest::binary>>, acc), do: unescape(rest, [acc, ?"])
+  defp unescape(<<"\\'", rest::binary>>, acc), do: unescape(rest, [acc, ?'])
+  defp unescape(<<"\\\\", rest::binary>>, acc), do: unescape(rest, [acc, ?\\])
+  defp unescape(<<"\\n", rest::binary>>, acc), do: unescape(rest, [acc, ?\n])
+  defp unescape(<<"\\t", rest::binary>>, acc), do: unescape(rest, [acc, ?\t])
+
+  defp unescape(<<"\\u", hex::binary-size(4), rest::binary>>, acc) do
+    unescape(rest, [acc, <<String.to_integer(hex, 16)::utf8>>])
+  end
+
+  defp unescape(<<c::utf8, rest::binary>>, acc), do: unescape(rest, [acc, <<c::utf8>>])
+  defp unescape(<<>>, acc), do: IO.iodata_to_binary(acc)
 
   # An optional *rule* reference has no capture key at all when it
   # didn't match -- see this module's own moduledoc for why that's the

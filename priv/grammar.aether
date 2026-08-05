@@ -6,13 +6,14 @@
 ;
 ;   - `#` line comments (lang_spec §3) -- `;` block comments deferred
 ;   - bare identifiers + dot-path (§3) -- backtick-escaping deferred
-;   - double-quoted strings, integers, decimals, `2/3`-shaped rational
-;     literals, radix integers (`0x`/`0o`/`0b`), nil/true/false (§4) --
-;     everything else in §4 (multiline strings, regex sigils, atoms,
-;     lists as a literal kind, duration/byte-size/date literals, and the
-;     rest of the exact-rational tower -- arithmetic *expressions*,
-;     inexact/float coexistence -- see ScryCore.Rational's own
-;     moduledoc) deferred
+;   - double- and single-quoted strings with real escape handling
+;     (`\" \' \\ \n \t \uXXXX`, §4), integers, decimals, `2/3`-shaped
+;     rational literals, radix integers (`0x`/`0o`/`0b`), nil/true/false
+;     (§4) -- everything else in §4 (multiline strings, regex sigils,
+;     atoms, lists as a literal kind, duration/byte-size/date literals,
+;     and the rest of the exact-rational tower -- arithmetic
+;     *expressions*, inexact/float coexistence -- see ScryCore.Rational's
+;     own moduledoc) deferred
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
 ;     full §5.2 header-modifier chain (`group by`/`having`/`distinct`/
 ;     `order by`/`limit ... offset`, in their required fixed order) (§5)
@@ -88,7 +89,26 @@ DECIMAL := DIGIT+ "." DIGIT+
 RADIX   := "0" [xX] HEX+
          | "0" [oO] [0-7]+
          | "0" [bB] [01]+
-STRING  := "\"" (!"\"" .)* "\""
+
+; Two delimiters (lang_spec §4: "pick to avoid escaping" -- a string
+; containing a `"` can be written `'...'` instead), both honoring
+; ESCAPE at every position before falling back to "any character other
+; than this string's own delimiter". `\"` previously had no special
+; meaning at all (confirmed by actually running a query containing one
+; before this existed -- it silently ended the string early, exactly
+; the bug ESCAPE fixes): with no escape token tried first, `!"\"" .`
+; alone treats `\` as just another ordinary character, so `\"` matched
+; as "literal backslash" immediately followed by "end of string".
+STRING := "\"" (ESCAPE | !"\"" .)* "\""
+        | "'" (ESCAPE | !"'" .)* "'"
+
+; \" \' \\ \n \t \uXXXX -- lang_spec §4's own escape list, exactly.
+; An unrecognized `\<char>` is deliberately not rejected: ordered PEG
+; choice just falls through to STRING's own "any character" fallback
+; above, treating the backslash as a literal character on its own.
+; Real validation of a malformed escape needs lexer-level error
+; propagation this phase doesn't have.
+ESCAPE := "\\" ("\"" | "'" | "\\" | "n" | "t" | "u" HEX HEX HEX HEX)
 
 ; ---- operators / delimiters ----
 

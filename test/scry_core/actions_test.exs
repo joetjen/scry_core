@@ -216,4 +216,40 @@ defmodule ScryCore.ActionsTest do
     assert {:error, _} = run(g, ~s(SELECT users LIMIT 5 WHERE age > 30 { name }))
     assert {:error, _} = run(g, ~s(SELECT users ORDER BY age DISTINCT { name }))
   end
+
+  test "double-quoted string escapes: quote, backslash, newline, tab", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~S(SELECT users WHERE bio = "line1\nline2\ttabbed \"quoted\" back\\slash" { name })
+             )
+
+    assert q.wheres == [
+             {:cmp, :eq, ["bio"], "line1\nline2\ttabbed \"quoted\" back\\slash"}
+           ]
+  end
+
+  test "a \\uXXXX unicode escape", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE name = "caf\u00e9" { name }))
+    assert q.wheres == [{:cmp, :eq, ["name"], "café"}]
+  end
+
+  test "single-quoted strings, useful for content containing an unescaped double-quote", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE quote = 'she said "hi"' { name }))
+    assert q.wheres == [{:cmp, :eq, ["quote"], ~s(she said "hi")}]
+  end
+
+  test "single-quoted strings support the same escapes, including an escaped single-quote", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE name = 'it\'s "quoted"' { name }))
+    assert q.wheres == [{:cmp, :eq, ["name"], ~s(it's "quoted")}]
+  end
+
+  test "an unrecognized escape passes the backslash through literally", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE path = "C:\Users" { name }))
+    assert q.wheres == [{:cmp, :eq, ["path"], "C:\\Users"}]
+  end
 end
