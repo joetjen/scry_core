@@ -284,4 +284,38 @@ defmodule ScryCore.ActionsTest do
   } do
     assert {:error, _} = run(g, ~s(SELECT select { name }))
   end
+
+  test "a list literal as a comparison value, not just inside in [...]", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE tags = ["a", "b"] { name }))
+    assert q.wheres == [{:cmp, :eq, ["tags"], ["a", "b"]}]
+  end
+
+  test "an empty list literal", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE tags = [] { name }))
+    assert q.wheres == [{:cmp, :eq, ["tags"], []}]
+  end
+
+  test "a nested list literal", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users WHERE matrix = [[1, 2], [3, 4]] { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["matrix"], [[1, 2], [3, 4]]}]
+  end
+
+  test "a list literal of mixed literal kinds", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users WHERE mixed = [1, "two", 3.5, nil, true] { name }))
+
+    assert q.wheres == [{:cmp, :eq, ["mixed"], [1, "two", Rational.new(7, 2), nil, true]}]
+  end
+
+  test "in [...] still works, now built on the same list rule", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users WHERE status in ["active", "pending"] { name }))
+
+    assert q.wheres == [{:in, ["status"], ["active", "pending"]}]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT users WHERE status in [] { name }))
+    assert q2.wheres == [{:in, ["status"], []}]
+  end
 end

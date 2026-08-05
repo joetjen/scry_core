@@ -15,9 +15,10 @@
 ;     (`` `select` ``, §3)
 ;   - double- and single-quoted strings with real escape handling
 ;     (`\" \' \\ \n \t \uXXXX`, §4), integers, decimals, `2/3`-shaped
-;     rational literals, radix integers (`0x`/`0o`/`0b`), nil/true/false
-;     (§4) -- everything else in §4 (multiline strings, regex sigils,
-;     atoms, lists as a literal kind, duration/byte-size/date literals,
+;     rational literals, radix integers (`0x`/`0o`/`0b`), list literals
+;     (`[...]`, usable anywhere a literal is, not just inside `in
+;     [...]`), nil/true/false (§4) -- everything else in §4 (multiline
+;     strings, regex sigils, atoms, duration/byte-size/date literals,
 ;     and the rest of the exact-rational tower -- arithmetic
 ;     *expressions*, inexact/float coexistence -- see ScryCore.Rational's
 ;     own moduledoc) deferred
@@ -235,12 +236,18 @@ disjunction := left:conjunction (KW_OR right:conjunction)*
 conjunction := left:negation (KW_AND right:negation)*
 negation    := neg:KW_NOT? expr:comparison
 
+; `in`'s own right-hand side is just `list` now, the same rule a list
+; *literal* uses (`literal`'s own alternatives below) -- `in [...]`
+; never needed its own bracket-handling, `list` already covers a
+; possibly-empty, comma-separated `literal` sequence in brackets.
 comparison := left:path op:comp_op right:literal
-            | left:path in:KW_IN LBRACK literal_list? RBRACK
+            | left:path in:KW_IN items:list
 
 comp_op := LE | GE | NOT_EQ | EQ | LT | GT
 
 literal_list := head:literal (COMMA tail:literal)*
+
+list := LBRACK items:literal_list? RBRACK
 
 ; `rational` before bare INTEGER: both start with the same INTEGER
 ; token, so ordered-PEG-choice would otherwise never get a chance to try
@@ -250,7 +257,13 @@ literal_list := head:literal (COMMA tail:literal)*
 ; (not DECIMAL) -- lang_spec.md §4's own example is `2/3`, not a
 ; division of two arbitrary exact rationals, which would need real
 ; division, not just `ScryCore.Rational.new/2`'s construct-and-reduce.
-literal := STRING | rational | DECIMAL | RADIX | INTEGER | KW_NIL | KW_TRUE | KW_FALSE
+;
+; `list` recurses back into `literal` (a list of lists, `[[1,2],[3]]`,
+; is valid) -- ordinary PEG recursion, not left-recursive (`list`
+; starts with the LBRACK token, never `literal` itself at position
+; zero), so it needs none of Ichor's left-recursion rewrite machinery,
+; same as `select`/`body_item`'s own recursion elsewhere in this file.
+literal := STRING | rational | DECIMAL | RADIX | INTEGER | list | KW_NIL | KW_TRUE | KW_FALSE
 
 rational := numerator:INTEGER SLASH denominator:INTEGER
 

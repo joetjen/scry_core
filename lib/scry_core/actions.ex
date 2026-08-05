@@ -222,10 +222,16 @@ defmodule ScryCore.Actions do
     end
   end
 
-  def handle_rule(:comparison, %{left: left_cap} = captures, ctx) do
+  def handle_rule(:comparison, %{left: left_cap, items: items_cap}, ctx) do
     with {:ok, path, ctx} <- left_cap.eval.(ctx),
-         {:ok, items, ctx} <- maybe_eval(captures, :literal_list, ctx) do
-      {:ok, {:in, path, if(items == :absent, do: [], else: items)}, ctx}
+         {:ok, items, ctx} <- items_cap.eval.(ctx) do
+      {:ok, {:in, path, items}, ctx}
+    end
+  end
+
+  def handle_rule(:list, captures, ctx) do
+    with {:ok, items, ctx} <- maybe_eval(captures, :literal_list, ctx) do
+      {:ok, absent_to([], items), ctx}
     end
   end
 
