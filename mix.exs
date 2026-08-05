@@ -25,7 +25,14 @@ defmodule ScryCore.MixProject do
       docs: docs(),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls],
-      dialyzer: [plt_add_apps: [:mix]]
+      # :ichor is runtime: false (correctly excluded from a real release,
+      # §4 of impl_spec.md's grammar-composition design) -- but Dialyzer
+      # respects that flag when auto-discovering PLT apps too, and
+      # ScryCore.GrammarCompose's own typespecs genuinely reference
+      # Aether.Grammar.t()/Ichor.TokenRefiner, so it has to be added
+      # back explicitly here or every reference to an Ichor type reads
+      # as unknown.
+      dialyzer: [plt_add_apps: [:mix, :ichor]]
     ]
   end
 
@@ -45,14 +52,17 @@ defmodule ScryCore.MixProject do
       # === ICHOR (grammar compiler) ===
       # `ichor_runtime` is the real runtime dependency -- capture dispatch
       # (Ichor.Actions), error formatting, the compiled Tokenizer/Parser
-      # combinators. `ichor` itself stays dev-only: grammar composition
-      # and codegen happen at build time via `mix ichor.gen`-equivalent
-      # tooling, never via `use Ichor` at the consuming app's own compile
-      # time, so `ichor` (the compiler, the bulk of the package) never
-      # needs to ship. See impl_spec.md §4 for the composition mechanics
-      # this depends on.
+      # combinators. `ichor` itself never ships to production (grammar
+      # composition and codegen happen at build time via a
+      # `mix ichor.gen`-equivalent tooling, never via `use Ichor` at an
+      # end consumer's own compile time) -- but scry_core is not an
+      # ordinary consumer of Ichor, it's the library responsible for
+      # driving composition itself (ScryCore.GrammarCompose,
+      # Ichor.generate_from_grammar/2), so its own test suite genuinely
+      # needs `ichor` (the compiler), not just `ichor_runtime`. Hence
+      # `[:dev, :test]`, not just `:dev`. See impl_spec.md §4.
       {:ichor_runtime, "~> 0.2"},
-      {:ichor, "~> 0.2", only: :dev, runtime: false},
+      {:ichor, "~> 0.2", only: [:dev, :test], runtime: false},
 
       # === CODE QUALITY & STATIC ANALYSIS ===
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

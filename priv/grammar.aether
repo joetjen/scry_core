@@ -1,0 +1,114 @@
+; Scry core grammar -- Phase 1 subset.
+;
+; Covers a deliberately bounded slice of lang_spec.md so the core/variant
+; composition architecture (impl_spec.md §2/§4) can be proven against a
+; real parser before the full language is written out. Phase 1 has:
+;
+;   - `#` line comments (lang_spec §3) -- `;` block comments deferred
+;   - bare identifiers + dot-path (§3) -- backtick-escaping deferred
+;   - double-quoted strings, bare integers, nil/true/false (§4) --
+;     everything else in §4 (multiline strings, regex sigils, atoms,
+;     lists as a literal kind, radix/duration/byte-size/date literals,
+;     the exact-rational tower) deferred
+;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]` (§5) --
+;     group by/having/distinct/order by/limit, the rest of §5's keyword
+;     reference, and all of §6/§7/§8/§9 deferred
+;   - one EP1(a) extension point (`select_ep1a`, lang_spec §2), proving
+;     the "core references a rule it deliberately never defines" pattern
+;     the whole composition design depends on
+;
+; Every deferral above is a real gap, not a design decision -- each one
+; needs its own pass. See impl_spec.md §8 for how this file's own
+; composition gets tested (ScryCore.GrammarCompose + its test suite).
+
+@grammar "scry_core"
+@root select
+@case_insensitive
+@skip TRIVIA
+
+; ---- trivia ----
+
+COMMENT := "#" (!"\n" .)*
+TRIVIA  := (SPACE | COMMENT)*
+
+; ---- identifiers / keywords ----
+;
+; IDENT feeds keyword reclassification below -- every structural keyword
+; this phase needs is a *reclassified* IDENT match, not its own token,
+; so declaration order between them and IDENT never matters (only the
+; reclassification does). No backtick-escape mechanism yet (deferred,
+; see file header): a query that needs "select" etc. as a plain field
+; name has no way to write it in this phase.
+;
+; @refine, not @keywords: @keywords' table lookup is an exact,
+; case-sensitive match against the token's raw text, and does not pick
+; up @case_insensitive -- confirmed empirically, not a guess (see
+; ScryCore.Grammar.KeywordRefiner's moduledoc). @refine hands the whole
+; decision to that module instead, which downcases first.
+
+IDENT := [[:alpha:]_][[:alnum:]_-]*
+  @refine("ScryCore.Grammar.KeywordRefiner", "refine",
+          KW_SELECT, KW_WHERE, KW_AND, KW_OR, KW_NOT, KW_IN,
+          KW_NIL, KW_TRUE, KW_FALSE)
+
+; ---- literals ----
+
+NUMBER := DIGIT+
+STRING := "\"" (!"\"" .)* "\""
+
+; ---- operators / delimiters ----
+
+NOT_EQ := "not="
+LE     := "<="
+GE     := ">="
+EQ     := "="
+LT     := "<"
+GT     := ">"
+LBRACE := "{"
+RBRACE := "}"
+LBRACK := "["
+RBRACK := "]"
+COMMA  := ","
+DOT    := "."
+
+; ---- grammar ----
+
+select := KW_SELECT source:path select_ep1a? where:where_clause? LBRACE body:body_list RBRACE
+
+; Deliberately undefined -- core's EP1(a) header-modifier extension
+; point (lang_spec §2, §5.2). A kind fragment supplies this rule; core
+; never does. Referencing it here is what makes core's own grammar
+; genuinely incomplete on its own -- see ScryCore.GrammarCompose's test
+; suite for both halves of that claim (core alone fails
+; Grammar.Analysis; core + a fragment that defines this rule succeeds).
+;
+; Deliberately left unrenamed (`select_ep1a?`, not `modifier:select_ep1a?`)
+; -- explicitly naming an Opt-wrapped bare rule reference was found,
+; empirically, to produce a second, separate raw-text capture alongside
+; the properly dispatched one under the rule's own implicit
+; self-capture name, not a single renamed capture as the rest of
+; Aether's naming rules would suggest. The bare form doesn't have this
+; problem and is simpler besides -- Actions-level code reads the
+; extension point's own rule name directly, no alias needed.
+
+; select_ep1a := <supplied by a kind fragment>
+
+where_clause := KW_WHERE cond:predicate
+
+predicate   := disjunction
+disjunction := left:conjunction (KW_OR right:conjunction)*
+conjunction := left:negation (KW_AND right:negation)*
+negation    := neg:KW_NOT? expr:comparison
+
+comparison := left:path op:comp_op right:literal
+            | left:path in:KW_IN LBRACK items:literal_list? RBRACK
+
+comp_op := LE | GE | NOT_EQ | EQ | LT | GT
+
+literal_list := head:literal (COMMA tail:literal)*
+
+literal := STRING | NUMBER | KW_NIL | KW_TRUE | KW_FALSE
+
+path := head:IDENT (DOT tail:IDENT)*
+
+body_list := head:path (COMMA tail:path)*

@@ -1,0 +1,190 @@
+defmodule ScryCore.GrammarCompose do
+  @moduledoc """
+  Merges core's grammar with a kind fragment's, per impl_spec.md §4 --
+  the pre-processing step Ichor has no native equivalent for, sitting
+  between independently parsing each `.aether` source (both succeed on
+  their own; core's EP1/EP2 extension points are dangling `RuleRef`s by
+  design, and `Aether.Reader`/`Aether.Eval` don't validate ordinary
+  rule-body references, only `@root`/`@skip`/`@keywords`/`@refine`) and
+  handing the merged result to `Ichor.generate_from_grammar/2`, which
+  runs `Grammar.Analysis` and codegen exactly as it would for any
+  hand-written single-file grammar.
+
+  Two authoring requirements this module enforces, both found by
+  actually running the composition against a real fragment rather than
+  assumed from reading Ichor's source alone:
+
+    - **A fragment must declare `@skip` matching core's own skip token
+      name.** Aether bakes default skip-splicing into a rule's IR at
+      *parse time*, using whichever token is active in *that file* --
+      not the merged grammar's eventual skip token. A fragment that
+      defaults to plain `SPACE` (no `@skip` pragma) while core uses
+      `TRIVIA` (built from `SPACE`) ends up with an unmatchable
+      `Star(RuleRef(:SPACE))` baked into its own rules post-merge: once
+      `TRIVIA` is the *active* skip token, `SPACE` becomes invisible
+      trivia the tokenizer consumes before any rule -- including an
+      explicit reference to `SPACE` itself -- ever sees it. `merge/2`
+      checks this and raises a clear, actionable error instead of
+      leaving a fragment author to debug a cryptic "did not expect more
+      input" parse failure with no connection to its real cause.
+    - **A shared/common token or rule name (`TRIVIA`, `COMMENT`, ...) may
+      be declared in both core and a fragment only if the two
+      declarations are structurally identical.** A fragment needs its
+      own local copy to satisfy Aether's eager per-file validation of
+      `@skip` (same class of eager check as `@keywords`/`@refine`), but
+      that copy is never meant to *diverge* from core's -- it's
+      discarded in favor of core's own at merge time. Any other name
+      defined by both is a genuine collision (lang_spec.md §2's
+      grammar-composition-time keyword-collision rule) and raises.
+  """
+
+  alias Ichor.Error
+
+  alias Grammar.IR.{
+    AndPred,
+    Any,
+    Capture,
+    CharClass,
+    Choice,
+    Custom,
+    CustomLexeme,
+    Indent,
+    Literal,
+    NotPred,
+    Opt,
+    Plus,
+    Rep,
+    RuleRef,
+    Seq,
+    Star
+  }
+
+  @doc """
+  Merges `core` (an `%Aether.Grammar{}`, not yet run through
+  `Grammar.Analysis`) with `fragment` (same). Returns the merged
+  `%Aether.Grammar{}`, still not yet analyzed -- callers hand it to
+  `Ichor.generate_from_grammar/2` (or `Grammar.Analysis.run/1` directly,
+  for just the completeness check) themselves.
+
+  `core`'s own `root`/`skip`/`engine`/`case_insensitive` win; a
+  fragment's copies of those settings are never consulted beyond the
+  skip-match check above.
+  """
+  @spec merge(Aether.Grammar.t(), Aether.Grammar.t()) ::
+          {:ok, Aether.Grammar.t()} | {:error, Error.t()}
+  def merge(%Aether.Grammar{} = core, %Aether.Grammar{} = fragment) do
+    with :ok <- check_skip_match(core, fragment),
+         {:ok, tokens} <- merge_maps(core.tokens, fragment.tokens, "token"),
+         {:ok, rules} <- merge_maps(core.rules, fragment.rules, "rule") do
+      {:ok,
+       %{
+         core
+         | tokens: tokens,
+           rules: rules,
+           token_order: merge_token_order(core.token_order, fragment.token_order),
+           rule_order: core.rule_order ++ (fragment.rule_order -- core.rule_order),
+           refiners: Map.merge(core.refiners, fragment.refiners)
+       }}
+    end
+  end
+
+  defp check_skip_match(%{skip: same}, %{skip: same}), do: :ok
+
+  defp check_skip_match(core, fragment) do
+    {:error,
+     Error.new(
+       message:
+         "fragment's @skip (#{inspect(fragment.skip)}) doesn't match core's " <>
+           "(#{inspect(core.skip)}) -- a fragment must declare `@skip #{core.skip}` " <>
+           "(and a locally-identical definition of it) to match core's skip token, " <>
+           "or its rules' auto-spliced whitespace handling will silently break once merged",
+       stage: :analysis
+     )}
+  end
+
+  # A name in both maps is only a real collision if the two definitions
+  # actually differ -- a fragment's required local redeclaration of a
+  # shared token like TRIVIA (to satisfy Aether's own eager @skip
+  # validation) is expected to be identical to core's, and core's copy
+  # wins without complaint. `strip_meta/1` first: source-span metadata
+  # naturally differs between two files even when the matched shape is
+  # identical, so it can't be part of the equality check.
+  defp merge_maps(core_map, fragment_map, kind) do
+    conflicts =
+      for {name, fragment_def} <- fragment_map,
+          Map.has_key?(core_map, name),
+          strip_meta(Map.fetch!(core_map, name)) != strip_meta(fragment_def),
+          do: name
+
+    case conflicts do
+      [] ->
+        {:ok, Map.merge(fragment_map, core_map)}
+
+      names ->
+        {:error,
+         Error.new(
+           message:
+             "#{kind} name collision at grammar composition: #{Enum.map_join(names, ", ", &inspect/1)} " <>
+               "declared differently by core and this fragment",
+           stage: :analysis
+         )}
+    end
+  end
+
+  # Every Grammar.IR node carries source-span metadata that naturally
+  # differs between two files even when the matched shape is identical
+  # -- stripped before the equality check in merge_maps/3. Grammar.IR
+  # exposes children/1 for reading but nothing generic for rebuilding a
+  # node with new children, so this covers each of the 16 node types by
+  # hand rather than guessing at a shortcut.
+  defp strip_meta(%Seq{exprs: exprs}), do: %Seq{exprs: Enum.map(exprs, &strip_meta/1), meta: nil}
+
+  defp strip_meta(%Choice{exprs: exprs}),
+    do: %Choice{exprs: Enum.map(exprs, &strip_meta/1), meta: nil}
+
+  defp strip_meta(%Star{expr: expr}), do: %Star{expr: strip_meta(expr), meta: nil}
+  defp strip_meta(%Plus{expr: expr}), do: %Plus{expr: strip_meta(expr), meta: nil}
+  defp strip_meta(%Opt{expr: expr}), do: %Opt{expr: strip_meta(expr), meta: nil}
+
+  defp strip_meta(%Rep{expr: expr, min: min, max: max}),
+    do: %Rep{expr: strip_meta(expr), min: min, max: max, meta: nil}
+
+  defp strip_meta(%AndPred{expr: expr}), do: %AndPred{expr: strip_meta(expr), meta: nil}
+  defp strip_meta(%NotPred{expr: expr}), do: %NotPred{expr: strip_meta(expr), meta: nil}
+
+  defp strip_meta(%Indent{expr: expr, kind: kind}),
+    do: %Indent{expr: strip_meta(expr), kind: kind, meta: nil}
+
+  defp strip_meta(%Capture{name: name, expr: expr}),
+    do: %Capture{name: name, expr: strip_meta(expr), meta: nil}
+
+  defp strip_meta(%Literal{value: value}), do: %Literal{value: value, meta: nil}
+  defp strip_meta(%CharClass{ranges: ranges}), do: %CharClass{ranges: ranges, meta: nil}
+  defp strip_meta(%Any{}), do: %Any{meta: nil}
+  defp strip_meta(%RuleRef{name: name}), do: %RuleRef{name: name, meta: nil}
+
+  defp strip_meta(%Custom{module: m, function: f, deps: d, nullable: n, leading: l}),
+    do: %Custom{module: m, function: f, deps: d, nullable: n, leading: l, meta: nil}
+
+  defp strip_meta(%CustomLexeme{module: m, function: f, deps: d, nullable: n}),
+    do: %CustomLexeme{module: m, function: f, deps: d, nullable: n, meta: nil}
+
+  # Naive `core_order ++ fragment_order` would put every fragment token
+  # after ALL of core's, including :IDENT -- meaning any fragment
+  # keyword sharing IDENT's maximal-munch length always loses the
+  # declaration-order tie-break and never actually reclassifies away
+  # from IDENT. Every fragment-contributed token is therefore inserted
+  # immediately before :IDENT instead of appended at the end. :IDENT is
+  # the only base identifier-shaped token in this design (§2 of this
+  # module's moduledoc), so this one special case covers every kind's
+  # keyword tokens, not just one fragment's.
+  defp merge_token_order(core_order, fragment_order) do
+    new_from_fragment = fragment_order -- core_order
+
+    Enum.reduce(core_order, [], fn
+      :IDENT, acc -> [:IDENT | Enum.reverse(new_from_fragment)] ++ acc
+      tok, acc -> [tok | acc]
+    end)
+    |> Enum.reverse()
+  end
+end
