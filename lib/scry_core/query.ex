@@ -123,9 +123,41 @@ defmodule ScryCore.Query do
   parse time -- there's no distinguishing sigil the way `FRAGMENT`'s own
   `...` spread has, so a name with no matching `WITH` binding is simply
   assumed to be a real source, not a compile error. `WITH RECURSIVE`
-  (lang_spec.md §5.4.1) isn't part of this -- it needs `UNION`/`UNION
-  ALL` (§5.4) to mean anything at all, and neither combinator is
-  implemented anywhere in this codebase yet.
+  (lang_spec.md §5.4.1) isn't part of this -- `UNION`/`UNION ALL` (§5.4)
+  are implemented, but lang_spec's own worked example for the recursive
+  case uses the graph variant's own `VIA` (§8.1, not implemented in this
+  codebase), and the "relational hierarchical walk" alternative it
+  mentions in prose has no concrete Scry syntax shown anywhere for how a
+  recursive term would reference its own binding's prior-step rows --
+  genuinely blocked on new correlation syntax that doesn't exist yet,
+  not merely on the combinators it also needs.
+
+  `type_decls` (lang_spec.md §7: `TYPE <name> [: <kind>] { <field>:
+  <type> ... }`, "standalone artifacts, closer to DDL, never inline in a
+  query") mirrors `with_bindings`' own shape and top-level-only scope --
+  a `name => type_decl()` map, populated once by `document`'s own
+  handler, meaningful only on the query/combined-query `ScryCore.parse/1`
+  hands back. Unlike `with_bindings`, **nothing in this codebase reads
+  it yet** -- lang_spec §7's full type system (union-type comparison
+  checking, flow-sensitive null-safety narrowing through `and`/`or`/
+  `not`, a schema-registry hook, `Json<Type>` field-access validation)
+  is a real, separate, much larger undertaking than parsing the
+  declaration shape; this is the same "grammar accepts it, nothing
+  consumes it yet" posture `body_item_ep1 := NEVER`/`:variant` already
+  have for an EP1(b)/(c)/(d) construct with no real kind contributing
+  one. `type_expr()` mirrors lang_spec's own EBNF verbatim (`<type> ::=
+  <base-type> | ?<base-type> | <type> | <type>`) -- `{:named, name,
+  param}` covers every bare type name (`Int`, `String`, a reference to
+  another declared `TYPE`, and `Json`/`Json<...>` uniformly, *not*
+  gated to the literal name `"Json"` -- the grammar stays permissive
+  the same way `call_with_path`/`DISTINCT` already are for their own
+  generic constructs), `{:nullable, ...}` the `?` prefix, `{:union,
+  [...]}` a flattened (not binary-tree) list since union has no
+  associativity/directionality concern the way `EXCEPT`/`INTERSECT` do,
+  `{:shape, [...]}` an inline anonymous shape (`Json<{ color: String,
+  ... }>`), and `{:list, ...}` a list-of-type shape (`Json<[Type]>`) --
+  not restricted to appearing only inside a `Json<...>` parameter at
+  this type's own level, same permissive posture.
 
   `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8, the fixed
   built-in-function surface -- `sum`/`avg`/`count`/`min`/`max`/
@@ -300,6 +332,19 @@ defmodule ScryCore.Query do
           | t()
           | {:variant, term()}
 
+  @type type_expr ::
+          {:named, name :: String.t(), param :: type_expr() | nil}
+          | {:nullable, type_expr()}
+          | {:union, [type_expr()]}
+          | {:shape, [{String.t(), type_expr()}]}
+          | {:list, type_expr()}
+
+  @type type_decl :: %{
+          name: String.t(),
+          kind: String.t() | nil,
+          fields: [{String.t(), type_expr()}]
+        }
+
   @type t :: %__MODULE__{
           source: [String.t()] | nil,
           wheres: [predicate()],
@@ -313,7 +358,8 @@ defmodule ScryCore.Query do
           required: boolean(),
           select: [body_item()],
           variant: %{optional(atom()) => term()},
-          with_bindings: %{optional(String.t()) => t()}
+          with_bindings: %{optional(String.t()) => t()},
+          type_decls: %{optional(String.t()) => type_decl()}
         }
 
   defstruct source: nil,
@@ -328,5 +374,6 @@ defmodule ScryCore.Query do
             required: false,
             select: [],
             variant: %{},
-            with_bindings: %{}
+            with_bindings: %{},
+            type_decls: %{}
 end

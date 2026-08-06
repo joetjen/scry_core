@@ -1201,4 +1201,153 @@ line two""" { name }))
                run(g, ~s[SELECT orders WHERE row_number() OVER > 1 { id }])
     end
   end
+
+  describe "TYPE declarations (lang_spec.md §7) -- parsed, not yet consumed" do
+    test "a plain, non-nullable type", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, ~s(TYPE Employee { id: Int } SELECT users { id }))
+
+      assert q.type_decls == %{
+               "Employee" => %{
+                 name: "Employee",
+                 kind: nil,
+                 fields: [{"id", {:named, "Int", nil}}]
+               }
+             }
+    end
+
+    test "a nullable field, the ? prefix", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, ~s(TYPE Employee { age: ?Int } SELECT users { id }))
+
+      assert q.type_decls == %{
+               "Employee" => %{
+                 name: "Employee",
+                 kind: nil,
+                 fields: [{"age", {:nullable, {:named, "Int", nil}}}]
+               }
+             }
+    end
+
+    test "a backend kind tag", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s(TYPE Employee: relational { id: Int } SELECT users { id }))
+
+      assert q.type_decls["Employee"].kind == "relational"
+    end
+
+    test "a union type, the lang_spec.md §7 worked example", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s(TYPE Event { field: String | Int } SELECT users { id }))
+
+      assert q.type_decls["Event"].fields == [
+               {"field", {:union, [{:named, "String", nil}, {:named, "Int", nil}]}}
+             ]
+    end
+
+    test "? binds to the immediately following base-type only, not a trailing union chain",
+         %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s(TYPE T { f: ?Int | String } SELECT users { id }))
+
+      assert q.type_decls["T"].fields == [
+               {"f", {:union, [{:nullable, {:named, "Int", nil}}, {:named, "String", nil}]}}
+             ]
+    end
+
+    test "Json<{...}>, the lang_spec.md §7 worked example for an inline shape", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s(TYPE Purchase: relational { metadata: Json<{ color: String, size: ?Int }> } SELECT users { id })
+               )
+
+      assert q.type_decls["Purchase"] == %{
+               name: "Purchase",
+               kind: "relational",
+               fields: [
+                 {"metadata",
+                  {:named, "Json",
+                   {:shape,
+                    [
+                      {"color", {:named, "String", nil}},
+                      {"size", {:nullable, {:named, "Int", nil}}}
+                    ]}}}
+               ]
+             }
+    end
+
+    test "Json<[Type]>, a list-parameterized generic", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s|TYPE Purchase { tags: Json<[String]> } SELECT users { id }|)
+
+      assert q.type_decls["Purchase"].fields == [
+               {"tags", {:named, "Json", {:list, {:named, "String", nil}}}}
+             ]
+    end
+
+    test "Json used bare, with no parameter at all", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s(TYPE Purchase { metadata: Json } SELECT users { id }))
+
+      assert q.type_decls["Purchase"].fields == [{"metadata", {:named, "Json", nil}}]
+    end
+
+    test "a generic parameter is syntactically permitted on any name, not gated to \"Json\"",
+         %{grammar: g} do
+      # Grammar stays permissive (execution/type-checking, not yet
+      # implemented, would reject misuse) -- matches priv/grammar.aether's
+      # own `base_type` comment.
+      assert {:ok, %Query{} = q} =
+               run(g, ~s(TYPE T { f: SomeGeneric<Int> } SELECT users { id }))
+
+      assert q.type_decls["T"].fields == [{"f", {:named, "SomeGeneric", {:named, "Int", nil}}}]
+    end
+
+    test "multiple TYPE declarations coexist with FRAGMENT and WITH", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s(TYPE User { id: Int } TYPE Purchase { id: Int } FRAGMENT basics { id } WITH active = SELECT users { id } SELECT active { ...basics })
+               )
+
+      assert Map.keys(q.type_decls) |> Enum.sort() == ["Purchase", "User"]
+      assert q.select == [{:field, ["id"]}]
+    end
+
+    test "a query with no TYPE declaration at all defaults to an empty map, unaffected", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { id }))
+      assert q.type_decls == %{}
+    end
+
+    test "two TYPEs sharing a name is a compile error, not silent last-write-wins", %{
+      grammar: g
+    } do
+      assert {:error, {:duplicate_type, "T"}} =
+               run(g, ~s(TYPE T { id: Int } TYPE T { id: Int } SELECT users { id }))
+    end
+
+    test "a type name colliding with an existing keyword needs backtick-escaping, same as any field name",
+         %{grammar: g} do
+      # lang_spec §3: "Escaped with backtick only on keyword collision" --
+      # "order" is already KW_ORDER (ORDER BY), reclassified globally by
+      # ScryCore.Grammar.KeywordRefiner regardless of grammar position,
+      # so a bare `TYPE Order { ... }` doesn't parse; this is expected,
+      # pre-existing behavior this feature inherits, not a new gap.
+      assert {:error, _} = run(g, ~s(TYPE Order { id: Int } SELECT users { id }))
+
+      assert {:ok, %Query{} = q} = run(g, ~s(TYPE `Order` { id: Int } SELECT users { id }))
+      assert Map.has_key?(q.type_decls, "Order")
+    end
+
+    test "a combined query (UNION) still gets its own type_decls attached", %{grammar: g} do
+      assert {:ok, %ScryCore.CombinedQuery{} = q} =
+               run(
+                 g,
+                 ~s(TYPE T { id: Int } SELECT users { id } UNION SELECT customers { id })
+               )
+
+      assert Map.has_key?(q.type_decls, "T")
+    end
+  end
 end

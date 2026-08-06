@@ -15,11 +15,13 @@ defmodule ScryCore.CombinedQuery do
 
   `left`/`right` are each `Query.t() | t()` -- a leaf is an ordinary
   query, an internal node is itself a combination (from a longer chain).
-  `with_bindings` mirrors `Query.t()`'s own field of the same name and
-  the same meaning -- populated once, on whichever struct `document`'s
-  own top-level result turns out to be (`ScryCore.Actions`' own
-  `handle_rule(:document, ...)`), and read from there by
-  `ScryCore.Executor.run/4`'s public entry point.
+  `with_bindings`/`type_decls` both mirror `Query.t()`'s own fields of
+  the same name and the same meaning -- each populated once, on
+  whichever struct `document`'s own top-level result turns out to be
+  (`ScryCore.Actions`' own `handle_rule(:document, ...)`); `with_bindings`
+  is read from there by `ScryCore.Executor.run/4`'s public entry point,
+  `type_decls` by nothing yet (`Query.t()`'s own moduledoc has the full
+  "parsed, not yet consumed" scope reasoning).
 
   Deliberately scoped narrower than lang_spec's own grammar might allow
   in principle: a combinator only ever appears at the very top of a
@@ -44,8 +46,9 @@ defmodule ScryCore.CombinedQuery do
           op: op(),
           left: Query.t() | t(),
           right: Query.t() | t(),
-          with_bindings: %{optional(String.t()) => Query.t()}
+          with_bindings: %{optional(String.t()) => Query.t()},
+          type_decls: %{optional(String.t()) => Query.type_decl()}
         }
 
-  defstruct [:op, :left, :right, with_bindings: %{}]
+  defstruct [:op, :left, :right, with_bindings: %{}, type_decls: %{}]
 end

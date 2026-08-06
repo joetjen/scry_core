@@ -265,6 +265,86 @@ defmodule ScryCore.Actions do
     end
   end
 
+  # `TYPE <name> [: <kind>] { <field>: <type> ... }` (lang_spec §7,
+  # priv/grammar.aether's own `type_decl` comment has the full "parsed,
+  # not yet consumed" scope reasoning). Returns `{name, type_decl}`, the
+  # same `{name, value}` shape `fragment_decl`/`with_decl` above already
+  # return -- `document`'s own handler folds every one into a
+  # `name => type_decl` map via the same `build_name_map/2` helper.
+  def handle_rule(:type_decl, captures, ctx) do
+    with {:ok, name, ctx} <- captures.name.eval.(ctx),
+         {:ok, kind, ctx} <- maybe_eval(captures, :type_kind, ctx),
+         {:ok, fields, ctx} <- captures.fields.eval.(ctx) do
+      {:ok, {name, %{name: name, kind: absent_to(nil, kind), fields: fields}}, ctx}
+    end
+  end
+
+  def handle_rule(:type_kind, %{kind: kind_cap}, ctx), do: kind_cap.eval.(ctx)
+
+  def handle_rule(:type_field_list, %{head: head_cap, tail: tail_caps}, ctx) do
+    with {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
+      {:ok, [head | tail], ctx}
+    end
+  end
+
+  def handle_rule(:type_field, %{name: name_cap, expr: expr_cap}, ctx) do
+    with {:ok, name, ctx} <- name_cap.eval.(ctx),
+         {:ok, expr, ctx} <- expr_cap.eval.(ctx) do
+      {:ok, {name, expr}, ctx}
+    end
+  end
+
+  # A single operand with no `union_tail` collapses to just that
+  # operand's own value, no `{:union, [...]}` wrapper -- see
+  # priv/grammar.aether's own `type_expr` comment.
+  def handle_rule(:type_expr, %{head: head_cap, union_tail: tail_caps}, ctx) do
+    with {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, tail, ctx} <- eval_list(:union_tail, tail_caps, ctx) do
+      case tail do
+        [] -> {:ok, head, ctx}
+        _ -> {:ok, {:union, [head | tail]}, ctx}
+      end
+    end
+  end
+
+  def handle_rule(:union_tail, %{operand: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:type_operand, %{nullable: nullable_cap, base: base_cap}, ctx) do
+    with {:ok, nullable_text, ctx} <- nullable_cap.eval.(ctx),
+         {:ok, base, ctx} <- base_cap.eval.(ctx) do
+      case nullable_text do
+        "" -> {:ok, base, ctx}
+        _ -> {:ok, {:nullable, base}, ctx}
+      end
+    end
+  end
+
+  # `shape`/`list` (bare rule wrappers, not a bare-passthrough default)
+  # and `name` (an `IDENT`, optionally parameterized) are three
+  # independently-named `base_type` alternatives -- priv/grammar.aether's
+  # own `base_type` comment has the "every alternative gets its own key"
+  # reasoning.
+  def handle_rule(:base_type, %{shape: cap}, ctx), do: cap.eval.(ctx)
+  def handle_rule(:base_type, %{list: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:base_type, %{name: name_cap} = captures, ctx) do
+    with {:ok, name, ctx} <- name_cap.eval.(ctx),
+         {:ok, param, ctx} <- maybe_eval(captures, :type_param, ctx) do
+      {:ok, {:named, name, absent_to(nil, param)}, ctx}
+    end
+  end
+
+  def handle_rule(:type_param, %{inner: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:shape_type, %{fields: cap}, ctx) do
+    with {:ok, fields, ctx} <- cap.eval.(ctx), do: {:ok, {:shape, fields}, ctx}
+  end
+
+  def handle_rule(:list_type, %{inner: cap}, ctx) do
+    with {:ok, inner, ctx} <- cap.eval.(ctx), do: {:ok, {:list, inner}, ctx}
+  end
+
   # `combined_select`'s own handler already returns either a real
   # %ScryCore.Query{} (no combinator used) or a %ScryCore.CombinedQuery{}
   # (one or more used) -- no extra wrapping needed here, the same
@@ -298,34 +378,47 @@ defmodule ScryCore.Actions do
   end
 
   # The real root (priv/grammar.aether's own `@root document`/`document`
-  # comments have the full reasoning). `fragment_decl`/`with_decl` are
-  # both bare/unrenamed and `*`-repeated, so each always has its own key
-  # -- `[]`, not a missing one, when absent (confirmed empirically, same
-  # finding as `additive_tail`/`when_clause` elsewhere in this module),
-  # so no `maybe_eval` is needed here the way an *optional* rule
-  # reference would need.
+  # comments have the full reasoning). `type_decl`/`fragment_decl`/
+  # `with_decl` are all bare/unrenamed and `*`-repeated, so each always
+  # has its own key -- `[]`, not a missing one, when absent (confirmed
+  # empirically, same finding as `additive_tail`/`when_clause` elsewhere
+  # in this module), so no `maybe_eval` is needed here the way an
+  # *optional* rule reference would need.
   #
-  # Duplicate `FRAGMENT`/`WITH` names are each a real, reportable compile
-  # error (`Map.new/2` would otherwise silently let the second
-  # declaration win) -- checked before handing either map onward, which
+  # Duplicate `TYPE`/`FRAGMENT`/`WITH` names are each a real, reportable
+  # compile error (`Map.new/2` would otherwise silently let the second
+  # declaration win) -- checked before handing any map onward, which
   # assumes it's already unambiguous. `ScryCore.WithCycleCheck` runs
   # after the map is built but doesn't need the final query at all (a
   # cycle is a property of the bindings alone) -- ordered before
   # `FragmentResolver` for no real reason beyond it being the cheaper,
-  # `select`-independent check to fail on first.
+  # `select`-independent check to fail on first. `type_decls` needs no
+  # analogous cycle check -- a `TYPE`'s own fields reference other type
+  # names only as *data shape* descriptions, never as something
+  # `ScryCore.Executor` would ever recurse into evaluating (unlike a
+  # `WITH` binding's own `source`, which genuinely can recurse at
+  # execution time).
   #
   # `select_cap` (really `combined_select`, renamed -- see
   # priv/grammar.aether's own `document` comment) may itself evaluate to
   # either a %Query{} or a %CombinedQuery{} -- `ScryCore.FragmentResolver
   # .resolve/2` already dispatches on both (its own moduledoc), and
-  # `with_bindings` attaches to whichever type comes back, since either
-  # can legitimately be the top-level result of a document.
+  # `with_bindings`/`type_decls` both attach to whichever type comes
+  # back, since either can legitimately be the top-level result of a
+  # document.
   def handle_rule(
         :document,
-        %{fragment_decl: frag_caps, with_decl: with_caps, select: select_cap},
+        %{
+          type_decl: type_caps,
+          fragment_decl: frag_caps,
+          with_decl: with_caps,
+          select: select_cap
+        },
         ctx
       ) do
-    with {:ok, frags, ctx} <- eval_list(:fragment_decl, frag_caps, ctx),
+    with {:ok, types, ctx} <- eval_list(:type_decl, type_caps, ctx),
+         {:ok, type_decls} <- build_name_map(types, :duplicate_type),
+         {:ok, frags, ctx} <- eval_list(:fragment_decl, frag_caps, ctx),
          {:ok, fragments} <- build_name_map(frags, :duplicate_fragment),
          {:ok, withs, ctx} <- eval_list(:with_decl, with_caps, ctx),
          {:ok, with_bindings} <- build_name_map(withs, :duplicate_with),
@@ -333,10 +426,15 @@ defmodule ScryCore.Actions do
          {:ok, result, ctx} <- select_cap.eval.(ctx) do
       case ScryCore.FragmentResolver.resolve(result, fragments) do
         {:ok, %Query{} = resolved} ->
-          {:ok, %Query{resolved | with_bindings: with_bindings}, ctx}
+          {:ok, %Query{resolved | with_bindings: with_bindings, type_decls: type_decls}, ctx}
 
         {:ok, %ScryCore.CombinedQuery{} = resolved} ->
-          {:ok, %ScryCore.CombinedQuery{resolved | with_bindings: with_bindings}, ctx}
+          {:ok,
+           %ScryCore.CombinedQuery{
+             resolved
+             | with_bindings: with_bindings,
+               type_decls: type_decls
+           }, ctx}
 
         {:error, _} = err ->
           err

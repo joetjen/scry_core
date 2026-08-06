@@ -51,7 +51,8 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "following" => :KW_FOLLOWING,
     "current" => :KW_CURRENT,
     "row" => :KW_ROW,
-    "unbounded" => :KW_UNBOUNDED
+    "unbounded" => :KW_UNBOUNDED,
+    "type" => :KW_TYPE
   }
 
   @impl true

@@ -37,11 +37,23 @@
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
 ;     full §5.2 header-modifier chain (`group by`/`having`/`distinct`/
 ;     `order by`/`limit ... offset`, in their required fixed order) (§5)
-;     -- `group by ... rollup`/`... cube`, the "having requires an
-;     aggregate expression in the body" compile-time check (nothing
-;     checks it yet -- there's no such thing as an aggregate expression
-;     in the grammar yet either), and the rest of §5's keyword reference
-;     deferred; all of §6/§7/§8/§9 deferred
+;     -- `group by ... rollup`/`... cube` and the "having requires an
+;     aggregate expression in the body" *compile-time* check (it's
+;     enforced at *execution* time now -- ScryCore.Executor's own
+;     `aggregate_query?/1` -- but nothing statically validates it during
+;     parsing) still deferred. §5's own aggregates/casts/window functions
+;     (`sum`/`avg`/`count`/`min`/`max`/`stddev_*`/`var_*`/`percentile`,
+;     `string`/`int`/`exact`/`inexact`/`json`, `over`/`row_number`/`rank`/
+;     `first_value`/`last_value`), §6's correlation/computed
+;     fields/`WHEN`, and §9's `WITH`/`FRAGMENT` are all implemented (see
+;     each construct's own comment below for the real, current state --
+;     this list goes stale fast and isn't re-verified against it). §7's
+;     `TYPE` declaration *shape* parses (`type_decl`'s own comment below
+;     has the "parsed, not yet consumed" scope) -- the full type system
+;     (union-type checking, flow-sensitive null narrowing, a schema
+;     registry) does not. §8's five standard variants (graph/time-series/
+;     document/logic/search) remain entirely unimplemented -- no kind
+;     fragment exists in this codebase yet to compose in.
 ;   - one EP1(a) extension point (`select_ep1a`, lang_spec §2), proving
 ;     the union-of-simultaneous-kind-contributions composition pattern
 ;     the whole design actually needs (not "core references a rule it
@@ -95,7 +107,7 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT, KW_WITH,
           KW_UNION, KW_ALL, KW_INTERSECT, KW_EXCEPT,
           KW_OVER, KW_PARTITION, KW_ROWS, KW_BETWEEN, KW_PRECEDING,
-          KW_FOLLOWING, KW_CURRENT, KW_ROW, KW_UNBOUNDED)
+          KW_FOLLOWING, KW_CURRENT, KW_ROW, KW_UNBOUNDED, KW_TYPE)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -291,6 +303,12 @@ COMMA  := ","
 DOT    := "."
 COLON  := ":"
 
+; `TYPE`'s own union (`String | Int`) and nullable (`?Int`) markers
+; (lang_spec §7) -- neither character is used anywhere else in this
+; grammar, no maximal-munch/ordering conflict with any existing token.
+PIPE     := "|"
+QUESTION := "?"
+
 ; Arithmetic (lang_spec §5.10, §9's "Computed fields"). `POW` (`**`)
 ; declared before `STAR` (`*`) for readability only -- maximal munch
 ; already picks `POW` over two separate `STAR` matches at the same
@@ -392,7 +410,25 @@ NEVER := []
 ; is the same shape); the "renaming produces a spurious capture"
 ; finding only ever applies to `?`/`*`/`+`-quantified references, never
 ; a plain single one like this.
-document := fragment_decl* with_decl* select:combined_select TRIVIA?
+;
+; `type_decl*` first, before `fragment_decl*`/`with_decl*` -- lang_spec
+; §7's own framing ("standalone artifacts, closer to DDL, never inline
+; in a query") makes `TYPE` the most foundational, schema-level
+; declaration kind, so it goes first, the same "a fixed relative order
+; between declaration kinds, not something lang_spec mandates one way
+; or the other" reasoning `fragment_decl*`/`with_decl*`'s own ordering
+; already has (their own comment nearby). `ScryCore.Actions`' own
+; `document` handler stores every parsed `type_decl` in a `name =>
+; type_decl` map on the resulting query/combined query, the same shape
+; `with_bindings` already has -- but, deliberately, *only* stored, never
+; read by anything else in this codebase yet (no schema-registry hook,
+; no type-checking, no null-safety narrowing -- lang_spec §7's full
+; type system is a real, separate, much larger undertaking than parsing
+; the declaration shape). This is the exact same "grammar accepts it,
+; nothing consumes it yet" posture `body_item_ep1 := NEVER`/`:variant`
+; already have for an EP1(b)/(c)/(d) construct with no real kind
+; contributing one yet.
+document := type_decl* fragment_decl* with_decl* select:combined_select TRIVIA?
 
 ; `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` (lang_spec §5.4, "Top-level,
 ; joining two complete select blocks"). Bare, unrenamed
@@ -463,6 +499,79 @@ fragment_decl := KW_FRAGMENT name:field_name LBRACE body:body_list RBRACE
 ; neither combinator exists in this grammar yet; a real, separate,
 ; later increment once they do.
 with_decl := KW_WITH name:field_name EQ select:select
+
+; `TYPE <name> [: <kind>] { <field>: <type> ... }` (lang_spec §7). Field
+; separator is unconditionally `COMMA` -- the same pre-existing,
+; already-documented "comma optional on newline" gap `body_list`'s own
+; comment has (found while investigating this feature specifically: a
+; `NEWLINE`-no-longer-folded-into-skip-trivia token, threaded through
+; *every* separator position that should accept it, not a one-line
+; fix), not a new gap this feature introduces.
+type_decl := KW_TYPE name:field_name type_kind? LBRACE fields:type_field_list RBRACE
+type_kind := COLON kind:IDENT
+
+type_field_list := head:type_field (COMMA tail:type_field)*
+type_field := name:field_name COLON expr:type_expr
+
+; `<type> ::= <base-type> | ?<base-type> | <type> | <type>` (lang_spec
+; §7's own EBNF, verbatim). Union binds loosest -- `type_expr` is the
+; top-level entry point, `union_tail*` bare/unrenamed (the same
+; established "renaming a repeated rule reference produces a spurious
+; capture" finding `additive_tail*`/`combinator_tail*` already prove,
+; confirmed to bite here too via scratch grammar before catching it).
+; A single operand with no `union_tail` collapses to just that
+; operand's own value directly (`ScryCore.Actions`' own handler), no
+; `{:union, [...]}` wrapper for the trivial one-member case -- the same
+; "don't wrap what didn't need wrapping" convention `expression`'s own
+; head-with-no-`additive_tail` already has.
+type_expr := head:type_operand union_tail*
+union_tail := PIPE operand:type_operand
+
+; `?` is prefix (lang_spec §3: "reserves postfix position for a
+; possible future conditional-access operator"), binding to the
+; *immediately following* base-type only, not a trailing union chain --
+; `?Int | String` means `(?Int) | String`, i.e. `Int | Nil | String`,
+; not `?(Int | String)`. Bare optional *token* reference (`nullable:
+; QUESTION?`), not a rule -- always produces a capture, `""` when
+; absent, the same convention `order_item`'s own `dir:(KW_DESC|KW_ASC)?`
+; already uses, safe to rename unlike an optional *rule* reference.
+type_operand := nullable:QUESTION? base:base_type
+
+; Three alternatives, each independently named (`shape`/`list`/`name`)
+; rather than two bare passthroughs plus one named one -- the same
+; "every alternative gets its own capture key" shape `in_lhs` above
+; already proves safe (`ScryCore.Actions` tells them apart by which key
+; is present, not by mixing a bare-rule-reference default passthrough
+; with a named one in the same rule). `name:IDENT type_param?` covers
+; every bare type name (`Int`, `String`, a reference to another
+; declared `TYPE`, `Json` with or without a parameter) uniformly --
+; *not* gated to the literal name `"Json"` at the grammar level, the
+; same "grammar stays permissive" posture `call_with_path`/`DISTINCT`
+; already established for their own generic constructs (§7's own
+; `Json<Type>` is the one concrete motivating case, but nothing stops
+; a hypothetical future generic-shaped name from parsing the same way).
+base_type := shape:shape_type | list:list_type | name:IDENT type_param?
+
+; `type_param`/`shape_type`/`list_type` all recurse back into
+; `type_expr` -- ordinary PEG recursion, not left-recursive (each
+; starts with its own leading token -- `LT`/`LBRACE`/`LBRACK`
+; respectively -- never `type_expr` itself at position zero), the same
+; "recurses back into literal/expression, needs none of Ichor's
+; left-recursion rewrite machinery" reasoning `list`/`power` already
+; have elsewhere in this file.
+type_param := LT inner:type_expr GT
+
+; `Json<{ color: String, size: ?Int }>` (lang_spec §7's own worked
+; example) -- an inline, anonymous shape, reusing `type_field_list`
+; directly rather than requiring a separately-declared `TYPE` for every
+; nested structure.
+shape_type := LBRACE fields:type_field_list RBRACE
+
+; `Json<[Type]>` (lang_spec §7) -- not gated to appearing only inside a
+; `Json<...>` parameter at the grammar level, the same permissive
+; posture `base_type`'s own comment already has; a general list-of-type
+; shape, usable anywhere a type is expected.
+list_type := LBRACK inner:type_expr RBRACK
 
 ; Modifiers appear in lang_spec.md §5.2/§6's own fixed order, mirroring
 ; evaluation order front to back: an EP1(a) modifier (narrows/reshapes
