@@ -24,13 +24,15 @@
 ;     ScryCore.Actions' own handle_token(:ATOM, ...) explains why), ISO
 ;     8601 date/timestamp literals (a real `Date`/`NaiveDateTime`/
 ;     `DateTime`, per what's present -- calendar validation happens via
-;     the stdlib in ScryCore.Actions, not in the grammar), nil/true/
-;     false (§4) -- everything else in §4 (regex sigils, duration/
-;     byte-size literals -- lang_spec §4 gives no unit vocabulary for
-;     either, unlike ISO 8601's own well-defined standard, so implementing
-;     them means inventing one first -- and the rest of the
-;     exact-rational tower -- arithmetic *expressions*, inexact/float
-;     coexistence -- see ScryCore.Rational's own moduledoc) deferred
+;     the stdlib in ScryCore.Actions, not in the grammar), regex sigils
+;     (`@r/.../ `, `/`-delimited only for now -- SIGIL's own comment has
+;     the "any delimiter" reasoning) paired with the `~` match operator,
+;     nil/true/false (§4) -- everything else in §4 (duration/byte-size
+;     literals -- lang_spec §4 gives no unit vocabulary for either,
+;     unlike ISO 8601's own well-defined standard, so implementing them
+;     means inventing one first -- and the rest of the exact-rational
+;     tower -- arithmetic *expressions*, inexact/float coexistence --
+;     see ScryCore.Rational's own moduledoc) deferred
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
 ;     full §5.2 header-modifier chain (`group by`/`having`/`distinct`/
 ;     `order by`/`limit ... offset`, in their required fixed order) (§5)
@@ -176,6 +178,31 @@ MULTILINE_STRING := "\"\"\"" (ESCAPE | !"\"\"\"" .)* "\"\"\""
 ; propagation this phase doesn't have.
 ESCAPE := "\\" ("\"" | "'" | "\\" | "n" | "t" | "u" HEX HEX HEX HEX)
 
+; `@tag<delim>...<delim>` (lang_spec §3/§4) is specified with "any
+; delimiter" -- genuinely not expressible as a plain Aether token
+; pattern for an *arbitrary*, parse-time-chosen delimiter character:
+; requiring the same character back at the close is a backreference,
+; and neither Aether's native token primitives nor its own regex-sigil
+; desugaring support those (the latter rejects `\1`-`\9` outright, per
+; guides/aether/AETHER.md's own "Regex literals" section). `/` only,
+; for now -- lang_spec's one worked example (`@r/^[a-z]+@/`) uses it,
+; and true "any delimiter" support needs Aether's `@native`/
+; `CustomLexeme` escape hatch (real Elixir code plugged into the
+; lexer), not investigated yet. Tag is a single letter, not
+; `[[:alpha:]]+` -- lang_spec gives exactly one concrete tag (`r`);
+; supporting an arbitrary-length tag name ahead of a second real one
+; existing is exactly the kind of "design for a hypothetical future
+; requirement" this codebase otherwise avoids.
+;
+; `\/ ` inside content is the one recognized escape (lets a `/` appear
+; literally without ending the sigil) -- deliberately *not* reusing
+; ESCAPE/`unescape/1`: sigil content is regex syntax, where `\d`/`\s`/
+; etc. are meaningful to the regex engine itself and must reach it
+; completely unmodified, not be resolved as if they were string
+; escapes.
+SIGIL         := "@" [[:alpha:]] "/" (SIGIL_ESCAPE | !"/" .)* "/"
+SIGIL_ESCAPE  := "\\" "/"
+
 ; ---- operators / delimiters ----
 
 SLASH  := "/"
@@ -185,6 +212,7 @@ GE     := ">="
 EQ     := "="
 LT     := "<"
 GT     := ">"
+MATCH  := "~"
 LBRACE := "{"
 RBRACE := "}"
 LBRACK := "["
@@ -292,7 +320,7 @@ negation    := neg:KW_NOT? expr:comparison
 comparison := left:path op:comp_op right:literal
             | left:path in:KW_IN items:list
 
-comp_op := LE | GE | NOT_EQ | EQ | LT | GT
+comp_op := LE | GE | NOT_EQ | EQ | LT | GT | MATCH
 
 literal_list := head:literal (COMMA tail:literal)*
 
@@ -313,7 +341,7 @@ list := LBRACK items:literal_list? RBRACK
 ; zero), so it needs none of Ichor's left-recursion rewrite machinery,
 ; same as `select`/`body_item`'s own recursion elsewhere in this file.
 literal := STRING | MULTILINE_STRING | DATE | rational | DECIMAL | RADIX | INTEGER | list | ATOM
-         | KW_NIL | KW_TRUE | KW_FALSE
+         | SIGIL | KW_NIL | KW_TRUE | KW_FALSE
 
 rational := numerator:INTEGER SLASH denominator:INTEGER
 

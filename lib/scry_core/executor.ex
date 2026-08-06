@@ -116,6 +116,17 @@ defmodule ScryCore.Executor do
 
   defp matches_all?(row, wheres), do: Enum.all?(wheres, &eval_predicate(&1, row))
 
+  # Not an ordering comparison (`term_order/2`/`compare/3` don't apply
+  # here) -- a regex match against a string field, typically a `@r/.../ `
+  # sigil (lang_spec.md §5.9). No defensive `is_binary/1` guard: a
+  # non-string field value raises a plain `FunctionClauseError` from
+  # `Regex.match?/2` itself, the same "not specially hardened against a
+  # type mismatch" posture every other predicate here already has (e.g.
+  # `<`/`>` against mismatched types already "works" via Erlang's own
+  # total term order without erroring, just not usefully).
+  defp eval_predicate({:cmp, :match, path, %Regex{} = regex}, row),
+    do: Regex.match?(regex, get_path(row, path))
+
   defp eval_predicate({:cmp, op, path, literal}, row),
     do: compare(op, get_path(row, path), literal)
 

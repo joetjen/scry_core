@@ -34,7 +34,8 @@ defmodule ScryCore.Query do
   """
 
   @type predicate ::
-          {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge, path :: [String.t()], literal :: term()}
+          {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match, path :: [String.t()],
+           literal :: term()}
           | {:in, path :: [String.t()], values :: [term()]}
           | {:and, predicate(), predicate()}
           | {:or, predicate(), predicate()}

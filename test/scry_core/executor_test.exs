@@ -326,4 +326,24 @@ defmodule ScryCore.ExecutorTest do
     assert {:ok, rows} = run(query)
     assert Enum.map(rows, & &1["name"]) == ["B", "C"]
   end
+
+  test "a regex sigil literal matches via ~" do
+    query = %Query{
+      source: ["users"],
+      wheres: [{:cmp, :match, ["name"], ~r/^A/}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, [%{"name" => "Alice"}]} = run(query)
+  end
+
+  test "~ with no match yields no rows" do
+    query = %Query{
+      source: ["users"],
+      wheres: [{:cmp, :match, ["name"], ~r/^Z/}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, []} = run(query)
+  end
 end

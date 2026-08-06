@@ -404,4 +404,36 @@ line two""" { name }))
   test "an invalid calendar date surfaces as a parse error, not a raise", %{grammar: g} do
     assert {:error, _} = run(g, ~s(SELECT events WHERE day = 2026-02-30 { name }))
   end
+
+  # Asserted on `.source` (the pattern text), not `==` against the whole
+  # `%Regex{}` -- two separately-compiled regexes from *identical*
+  # source aren't `==` (their `:re_pattern` field, the compiled NIF
+  # resource, differs even then), confirmed empirically after these
+  # tests failed on a first pass despite the two sides printing
+  # identically. Real for Executor too, in principle, but not a fix it
+  # needs: `~` is the only operator lang_spec.md §5.9 pairs with a
+  # regex, and it dispatches straight to `Regex.match?/2`, never `==`.
+
+  test "a regex sigil literal, matched against a field with ~", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE email ~ @r/^[a-z]+@/ { name }))
+    assert [{:cmp, :match, ["email"], %Regex{source: "^[a-z]+@"}}] = q.wheres
+  end
+
+  test "a sigil escaping its own delimiter", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE path ~ @r/a\/b/ { name }))
+    assert [{:cmp, :match, ["path"], %Regex{source: "a/b"}}] = q.wheres
+  end
+
+  test "a regex escape (\\d) inside a sigil reaches the regex engine untouched", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE code ~ @r/\d+/ { name }))
+    assert [{:cmp, :match, ["code"], %Regex{source: "\\d+"}}] = q.wheres
+  end
+
+  test "an unsupported sigil tag surfaces as a parse error", %{grammar: g} do
+    assert {:error, _} = run(g, ~s(SELECT users WHERE name ~ @x/foo/ { name }))
+  end
+
+  test "a malformed regex sigil surfaces as a parse error, not a raise", %{grammar: g} do
+    assert {:error, _} = run(g, ~s(SELECT users WHERE name ~ @r/[a-z/ { name }))
+  end
 end
