@@ -27,10 +27,13 @@ defmodule ScryCore.Executor do
   work -- it collapses to one output row, the same mechanism `GROUP BY`
   itself uses per distinct key.
 
-  Only the 5 real aggregates (`sum`/`avg`/`count`/`min`/`max`) are
-  actually executable (`eval_aggregate/5`) -- the rest of lang_spec
-  §5.8's built-in surface (casts, `json`, window functions,
-  `count(distinct ...)`) still isn't. Every aggregate hard-errors
+  `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
+  `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
+  full standard-aggregate list, `count(distinct ...)` included) are
+  actually executable (`eval_aggregate/5`). Window functions (`over`,
+  `row_number()`, `rank()`, `first_value`/`last_value`, §5.5) are the one
+  remaining piece of §5.8's built-in surface still unimplemented. Every
+  aggregate hard-errors
   (`raise ArgumentError`) the moment any resolved operand is `nil`, per
   lang_spec.md's own "Aggregates over nullable fields hard-error the
   same way [as comparing a nullable field directly] -- no silent
@@ -554,7 +557,18 @@ defmodule ScryCore.Executor do
   # row the way this detection used to treat *any* call as a signal for
   # (a real, since-fixed bug -- found while adding casts, not present
   # before them, since no non-aggregate call existed to expose it).
-  @aggregate_names ["sum", "avg", "count", "min", "max"]
+  @aggregate_names [
+    "sum",
+    "avg",
+    "count",
+    "min",
+    "max",
+    "stddev_samp",
+    "stddev_pop",
+    "var_samp",
+    "var_pop",
+    "percentile"
+  ]
 
   # lang_spec.md §5.8's 4 explicit casts, plus `json` (§5.8/§7's own
   # "String reinterpreted as JSON" escape hatch -- the same per-value
@@ -1197,6 +1211,47 @@ defmodule ScryCore.Executor do
     raise ArgumentError, "distinct is only valid inside count(distinct ...), not #{name}(...)"
   end
 
+  # `percentile(expr, p)` (lang_spec.md §5.8: "General ordered-set
+  # aggregate, p ∈ [0,1]; median = percentile(x, 0.5)") -- the one
+  # standard aggregate that isn't single-argument, so it needs its own
+  # clauses, declared *before* the generic `[arg]`/catch-all clauses
+  # below -- otherwise a wrong-arity `percentile(x)` call (a genuine
+  # one-element `args` list) would match the generic `[arg]` clause
+  # instead of raising a `percentile`-specific arity error, and later
+  # crash inside `apply_aggregate/2` with an opaque `FunctionClauseError`
+  # (confirmed empirically before fixing the ordering, not assumed).
+  # `p` is a single scalar, not one value per member row -- resolved
+  # once against the group's own representative row (`representative/1`,
+  # the same row a plain field on a predicate's own group-lhs already
+  # resolves against), not mapped across `member_rows` the way
+  # `value_arg` is. `p`'s own out-of-range check runs before scanning
+  # `value_arg` at all -- an obviously-wrong `p` should fail fast, not
+  # after walking every member row for no reason.
+  defp eval_aggregate("percentile", [value_arg, p_arg], member_rows, scope, params) do
+    p = resolve_rhs(p_arg, representative(member_rows), scope, params)
+
+    unless compare(:ge, p, 0) and compare(:le, p, 1) do
+      raise ArgumentError,
+            "percentile(...)'s own p must be between 0 and 1, got: #{inspect(p)}"
+    end
+
+    values = Enum.map(member_rows, &resolve_rhs(value_arg, &1, scope, params))
+
+    if Enum.any?(values, &is_nil/1) do
+      raise ArgumentError,
+            "aggregate percentile(...) encountered a nil value -- lang_spec.md's own " <>
+              "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
+              "nil-skipping); filter it out explicitly first"
+    end
+
+    apply_percentile(values, p)
+  end
+
+  defp eval_aggregate("percentile", args, _member_rows, _scope, _params) do
+    raise ArgumentError,
+          "aggregate percentile/2 expects exactly two arguments (value, p), got #{length(args)}"
+  end
+
   defp eval_aggregate(name, [arg], member_rows, scope, params) do
     values = Enum.map(member_rows, &resolve_rhs(arg, &1, scope, params))
 
@@ -1233,6 +1288,72 @@ defmodule ScryCore.Executor do
   defp apply_aggregate("min", values), do: Enum.reduce(values, &pick_min/2)
   defp apply_aggregate("max", []), do: nil
   defp apply_aggregate("max", values), do: Enum.reduce(values, &pick_max/2)
+
+  # `var_pop`/`var_samp`/`stddev_pop`/`stddev_samp` (lang_spec.md §5.8,
+  # "ANSI SQL:2003 forms -- no ambiguous unqualified `stddev`"). Mean and
+  # sum-of-squared-deviations stay in the exact-rational tower throughout
+  # (`variance/2` below, via `Rational.add/sub/mul/div`) -- only the
+  # final `stddev_*` step needs a real square root, which the rationals
+  # aren't closed under (this module's own moduledoc, and `Rational`'s
+  # own "sqrt's per-input exactness recovery isn't here" note), so it
+  # goes through `Rational.to_float/1` + `:math.sqrt/1` and the result is
+  # a plain `float()` -- the one place these 4 aggregates are ever
+  # inexact. `_samp` (Bessel's correction, dividing by `n - 1`) is
+  # undefined below 2 data points, mirroring the SQL-standard "`NULL` for
+  # too little data" answer `_pop`'s own `[]` case (line above) already
+  # gives for zero -- both real, defined "no data" answers, not a
+  # dropped row or a crash.
+  defp apply_aggregate("var_pop", []), do: nil
+  defp apply_aggregate("var_pop", values), do: variance(values, length(values))
+  defp apply_aggregate("var_samp", values) when length(values) < 2, do: nil
+  defp apply_aggregate("var_samp", values), do: variance(values, length(values) - 1)
+  defp apply_aggregate("stddev_pop", []), do: nil
+  defp apply_aggregate("stddev_pop", values), do: values |> variance(length(values)) |> sqrt()
+  defp apply_aggregate("stddev_samp", values) when length(values) < 2, do: nil
+
+  defp apply_aggregate("stddev_samp", values),
+    do: values |> variance(length(values) - 1) |> sqrt()
+
+  defp variance(values, divisor) do
+    mean = Rational.div(Enum.reduce(values, &Rational.add/2), length(values))
+
+    sum_sq =
+      Enum.reduce(values, 0, fn x, acc ->
+        deviation = Rational.sub(x, mean)
+        Rational.add(acc, Rational.mul(deviation, deviation))
+      end)
+
+    Rational.div(sum_sq, divisor)
+  end
+
+  defp sqrt(x), do: x |> Rational.to_float() |> :math.sqrt()
+
+  # `percentile(expr, p)` -- discrete order-statistic (nearest-rank
+  # method: sort ascending via `term_order/2`, the same struct-aware
+  # ordering `min`/`max` above already use, then pick the value at rank
+  # `ceil(p * n)`, clamped to `[1, n]`), not the continuous/interpolated
+  # variant SQL calls `percentile_cont`. Deliberate: lang_spec's own
+  # "General ordered-set aggregate" framing (not "numeric aggregate")
+  # implies it works over *any* orderable value `term_order/2` already
+  # handles -- dates, strings, mixed exact/inexact numbers -- and
+  # interpolating between two neighboring values only ever makes sense
+  # for numbers; nearest-rank always picks an actual value from the set,
+  # so it's well-defined uniformly. `p = 0` picks the minimum, `p = 1`
+  # the maximum, `p = 0.5` the (lower, for an even `n`) median --
+  # matching `median = percentile(x, 0.5)`'s own worked example closely
+  # enough without claiming SQL's exact averaging behavior for it.
+  defp apply_percentile(values, p) do
+    sorted = Enum.sort(values, &(term_order(&1, &2) != :gt))
+    n = length(sorted)
+    rank = p |> Rational.mul(n) |> ceil_toward_pos_infinity() |> max(1) |> min(n)
+    Enum.at(sorted, rank - 1)
+  end
+
+  defp ceil_toward_pos_infinity(x) when is_float(x), do: ceil(x)
+  defp ceil_toward_pos_infinity(x) when is_integer(x), do: x
+
+  defp ceil_toward_pos_infinity(%Rational{numerator: n, denominator: d}),
+    do: Kernel.div(n, d) + if(Kernel.rem(n, d) == 0, do: 0, else: 1)
 
   # Via `term_order/2`, not Kernel `min`/`max` -- the exact same
   # `Rational`/`DateTime`/`NaiveDateTime` struct-ordering correctness

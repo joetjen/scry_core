@@ -128,16 +128,18 @@ defmodule ScryCore.Query do
   implemented anywhere in this codebase yet.
 
   `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8, the fixed
-  built-in-function surface -- `sum`/`avg`/`count`/`min`/`max`,
-  `string`/`int`/`exact`/`inexact`, and `json` are the 10 names actually
-  executable today; window functions still deferred) is deliberately not
+  built-in-function surface -- `sum`/`avg`/`count`/`min`/`max`/
+  `stddev_samp`/`stddev_pop`/`var_samp`/`var_pop`/`percentile`,
+  `string`/`int`/`exact`/`inexact`, and `json` are the 15 names actually
+  executable today; window functions (`over`, `row_number()`, `rank()`,
+  `first_value`/`last_value`, §5.5) still deferred) is deliberately not
   restricted to a known `name` at this type's own level, the same way
   `:variant` isn't restricted to a known kind -- the grammar (and this
   type) accept any `identifier(args)` call (lang_spec §5.8's own
   framing: "anything else ... is either an EP2 namespaced extension
   call, or ... `logic`'s EP2 bare call"), and it's `ScryCore.Executor`
   that decides, at execution time, which names it actually knows how to
-  run (`eval_aggregate/5` for the 5 aggregates, `apply_cast/2` for the 5
+  run (`eval_aggregate/5` for the 10 aggregates, `apply_cast/2` for the 5
   casts -- `json` included, alongside `string`/`int`/`exact`/`inexact`).
 
   `expr()`'s own `{:distinct, expr}` (lang_spec.md §5.8: `count(distinct

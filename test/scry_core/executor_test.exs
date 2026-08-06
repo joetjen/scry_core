@@ -112,6 +112,20 @@ defmodule ScryCore.ExecutorTest do
     %{"id" => 3, "metadata" => %{"tags" => []}}
   ]
 
+  # A well-known textbook example (mean 5, population variance 4,
+  # population stddev 2) -- lets a test assert exact, hand-checkable
+  # numbers rather than an opaque "close to" float comparison.
+  @measurements [
+    %{"id" => 1, "v" => 2},
+    %{"id" => 2, "v" => 4},
+    %{"id" => 3, "v" => 4},
+    %{"id" => 4, "v" => 4},
+    %{"id" => 5, "v" => 5},
+    %{"id" => 6, "v" => 5},
+    %{"id" => 7, "v" => 7},
+    %{"id" => 8, "v" => 9}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -125,7 +139,8 @@ defmodule ScryCore.ExecutorTest do
     ["team_a"] => @team_a,
     ["team_b"] => @team_b,
     ["tickets"] => @tickets,
-    ["cards"] => @cards
+    ["cards"] => @cards,
+    ["measurements"] => @measurements
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -1431,6 +1446,204 @@ defmodule ScryCore.ExecutorTest do
       assert_raise ArgumentError, ~r/distinct is only valid inside count\(distinct/, fn ->
         run(query)
       end
+    end
+  end
+
+  describe "extended standard aggregates (stddev/var/percentile, lang_spec.md §5.8)" do
+    test "var_pop/stddev_pop over the whole set, no explicit GROUP BY" do
+      query = %Query{
+        source: ["measurements"],
+        select: [
+          {:computed, "var_pop", {:call, "var_pop", [{:field, ["v"]}]}},
+          {:computed, "stddev_pop", {:call, "stddev_pop", [{:field, ["v"]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"var_pop" => 4, "stddev_pop" => 2.0}]} = run(query)
+    end
+
+    test "var_samp/stddev_samp use Bessel's correction (n - 1), not var_pop/stddev_pop's n" do
+      query = %Query{
+        source: ["measurements"],
+        select: [
+          {:computed, "var_samp", {:call, "var_samp", [{:field, ["v"]}]}},
+          {:computed, "stddev_samp", {:call, "stddev_samp", [{:field, ["v"]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"var_samp" => var_samp, "stddev_samp" => stddev_samp}]} = run(query)
+      assert var_samp == Rational.new(32, 7)
+      assert_in_delta stddev_samp, :math.sqrt(32 / 7), 0.0000001
+    end
+
+    test "stddev_pop/var_pop of a single-row group is 0, not nil (a defined answer, unlike _samp)" do
+      query = %Query{
+        source: ["measurements"],
+        wheres: [{:cmp, :eq, ["id"], 1}],
+        select: [
+          {:computed, "var_pop", {:call, "var_pop", [{:field, ["v"]}]}},
+          {:computed, "stddev_pop", {:call, "stddev_pop", [{:field, ["v"]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"var_pop" => 0, "stddev_pop" => stddev_pop}]} = run(query)
+      assert stddev_pop == 0.0
+    end
+
+    test "var_samp/stddev_samp of a single-row group is nil -- undefined below 2 data points" do
+      query = %Query{
+        source: ["measurements"],
+        wheres: [{:cmp, :eq, ["id"], 1}],
+        select: [
+          {:computed, "var_samp", {:call, "var_samp", [{:field, ["v"]}]}},
+          {:computed, "stddev_samp", {:call, "stddev_samp", [{:field, ["v"]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"var_samp" => nil, "stddev_samp" => nil}]} = run(query)
+    end
+
+    test "var_pop/stddev_pop of an empty group is nil, same empty-aggregate convention as sum/avg" do
+      query = %Query{
+        source: ["measurements"],
+        wheres: [{:cmp, :eq, ["id"], -1}],
+        select: [
+          {:computed, "var_pop", {:call, "var_pop", [{:field, ["v"]}]}},
+          {:computed, "stddev_pop", {:call, "stddev_pop", [{:field, ["v"]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"var_pop" => nil, "stddev_pop" => nil}]} = run(query)
+    end
+
+    test "a GROUP BY/HAVING using a new aggregate composes exactly like sum/avg/min/max already do" do
+      grouped = [
+        %{"id" => 1, "grp" => "a", "v" => 2},
+        %{"id" => 2, "grp" => "a", "v" => 4},
+        %{"id" => 3, "grp" => "b", "v" => 100},
+        %{"id" => 4, "grp" => "b", "v" => 100}
+      ]
+
+      query = %Query{
+        source: ["measurements"],
+        group_bys: [["grp"]],
+        havings: [{:cmp, :gt, {:call, "stddev_pop", [{:field, ["v"]}]}, 0}],
+        select: [
+          {:field, ["grp"]},
+          {:computed, "sd", {:call, "stddev_pop", [{:field, ["v"]}]}}
+        ]
+      }
+
+      data = Map.put(@data, ["measurements"], grouped)
+      assert {:ok, [%{"grp" => "a", "sd" => 1.0}]} = Executor.run(query, FakeEngine, data)
+    end
+
+    test "distinct on a new aggregate raises the same clear error sum/avg/min/max already do" do
+      query = %Query{
+        source: ["measurements"],
+        select: [{:computed, "x", {:call, "stddev_pop", [{:distinct, {:field, ["v"]}}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/distinct is only valid inside count\(distinct/, fn ->
+        run(query)
+      end
+    end
+
+    test "a nil value hard-errors, same as every other aggregate" do
+      query = %Query{
+        source: ["measurements"],
+        select: [{:computed, "x", {:call, "var_pop", [{:field, ["missing"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/encountered a nil value/, fn -> run(query) end
+    end
+
+    test "percentile(expr, p) -- p = 0/0.5/1 pick the min/median/max via nearest-rank" do
+      query = %Query{
+        source: ["measurements"],
+        select: [
+          {:computed, "p0", {:call, "percentile", [{:field, ["v"]}, 0]}},
+          {:computed, "p50", {:call, "percentile", [{:field, ["v"]}, Rational.new(1, 2)]}},
+          {:computed, "p100", {:call, "percentile", [{:field, ["v"]}, 1]}}
+        ]
+      }
+
+      assert {:ok, [%{"p0" => 2, "p50" => 4, "p100" => 9}]} = run(query)
+    end
+
+    test "percentile's own p can be a field, resolved once against the representative row" do
+      # p isn't required to be a literal -- it's an ordinary expr(), the
+      # same as any other aggregate's own argument. Every row here
+      # carries the identical "threshold" value, so this doesn't
+      # distinguish "resolved once" from "resolved per row" on its own,
+      # but it does confirm the field-reference code path for `p`
+      # (`resolve_rhs({:field, ...}, representative(member_rows), ...)`)
+      # actually works end to end, not just the literal-integer/Rational
+      # cases the other tests in this block already cover.
+      rows = Enum.map(@measurements, &Map.put(&1, "threshold", Rational.new(1, 2)))
+      data = Map.put(@data, ["measurements"], rows)
+
+      query = %Query{
+        source: ["measurements"],
+        select: [
+          {:computed, "p50", {:call, "percentile", [{:field, ["v"]}, {:field, ["threshold"]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"p50" => 4}]} = Executor.run(query, FakeEngine, data)
+    end
+
+    test "percentile hard-errors on a nil value in its value argument" do
+      query = %Query{
+        source: ["measurements"],
+        select: [{:computed, "x", {:call, "percentile", [{:field, ["missing"]}, 0]}}]
+      }
+
+      assert_raise ArgumentError, ~r/encountered a nil value/, fn -> run(query) end
+    end
+
+    test "percentile's own p outside [0, 1] raises a clear error" do
+      query = %Query{
+        source: ["measurements"],
+        select: [{:computed, "x", {:call, "percentile", [{:field, ["v"]}, 2]}}]
+      }
+
+      assert_raise ArgumentError, ~r/p must be between 0 and 1, got: 2/, fn -> run(query) end
+    end
+
+    test "percentile with the wrong arity raises a clear error, not a raw FunctionClauseError" do
+      query = %Query{
+        source: ["measurements"],
+        select: [{:computed, "x", {:call, "percentile", [{:field, ["v"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/percentile\/2 expects exactly two arguments/, fn ->
+        run(query)
+      end
+    end
+
+    test "distinct on percentile's own value argument raises a clear error" do
+      query = %Query{
+        source: ["measurements"],
+        select: [
+          {:computed, "x", {:call, "percentile", [{:distinct, {:field, ["v"]}}, 0]}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/distinct is only valid inside count\(distinct/, fn ->
+        run(query)
+      end
+    end
+
+    test "a cast wrapping a new aggregate is detected without an explicit GROUP BY" do
+      query = %Query{
+        source: ["measurements"],
+        select: [
+          {:computed, "sd", {:call, "string", [{:call, "stddev_pop", [{:field, ["v"]}]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"sd" => "2.0"}]} = run(query)
     end
   end
 
