@@ -108,16 +108,22 @@ defmodule ScryCore.GrammarComposeTest do
     grammar
   end
 
-  # `@root document` now (priv/grammar.aether's own `document` comment) --
-  # every real query text parses as `fragment_decl* select`, not `select`
-  # alone. None of the tests below are actually about FRAGMENT/`document`
-  # itself (that's ScryCore.FragmentResolverTest's job); they're
-  # exercising GrammarCompose/extension-point mechanics that all happen
-  # to live inside `select`, so this just unwraps the one extra layer of
-  # node the new root always wraps around it, uniformly.
+  # `@root document` now (priv/grammar.aether's own `document` comment)
+  # -- every real query text parses as `fragment_decl* with_decl*
+  # combined_select`, not `select` alone, and `combined_select` itself
+  # always wraps a bare `select` under its own `head` key (`combined_select
+  # := head:select combinator_tail*`) even when no combinator is used.
+  # None of the tests below are actually about FRAGMENT/`WITH`/combinators
+  # (those have their own test modules); they're exercising
+  # GrammarCompose/extension-point mechanics that all happen to live
+  # inside `select`, so this just unwraps the two extra layers of node
+  # the real root always wraps around it, uniformly.
   defp parse_select!(grammar, source) do
-    {:ok, %Ichor.Node{rule: :document, captures: %{select: select_node}}} =
-      Grammar.VM.run(grammar, source, NoActions, nil)
+    {:ok,
+     %Ichor.Node{
+       rule: :document,
+       captures: %{select: %Ichor.Node{rule: :combined_select, captures: %{head: select_node}}}
+     }} = Grammar.VM.run(grammar, source, NoActions, nil)
 
     select_node
   end

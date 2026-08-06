@@ -91,7 +91,8 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_NIL, KW_TRUE, KW_FALSE,
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
           KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED, KW_IF,
-          KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT, KW_WITH)
+          KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT, KW_WITH,
+          KW_UNION, KW_ALL, KW_INTERSECT, KW_EXCEPT)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -338,7 +339,62 @@ NEVER := []
 ; a real need to interleave them ever surfaces -- not a spec violation
 ; either way, just a narrower grammar than the language technically
 ; allows.
-document := fragment_decl* with_decl* select TRIVIA?
+; `select:combined_select` -- a renamed, bare (non-quantified) rule
+; reference, safe and already used throughout this file (`source:path`
+; is the same shape); the "renaming produces a spurious capture"
+; finding only ever applies to `?`/`*`/`+`-quantified references, never
+; a plain single one like this.
+document := fragment_decl* with_decl* select:combined_select TRIVIA?
+
+; `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` (lang_spec §5.4, "Top-level,
+; joining two complete select blocks"). Bare, unrenamed
+; `combinator_tail*` (renaming a repeated rule reference produces a
+; spurious extra raw-text capture -- confirmed to bite here too, the
+; same established finding `additive_tail*`/`fragment_decl*` already
+; have, this file's own first draft of this rule got it wrong before
+; catching it empirically), folded left-associative in
+; `ScryCore.Actions` (`fold_combinators/2`) -- the exact same shape
+; `expression`'s own `additive_tail*` already proves safe (a dedicated
+; wrapper rule per repeated element, not an inline
+; `(op:(...) ...)*` group, see `additive_tail`'s own comment for why
+; that distinction matters). Deliberately *not* naive right-recursion
+; (`right:combined_select` on `select` itself) -- that would silently
+; give `EXCEPT`/`INTERSECT` chains the *wrong* grouping (`A EXCEPT (B
+; EXCEPT C)` instead of the correct `(A EXCEPT B) EXCEPT C`, since
+; neither operator is commutative), a real correctness bug a naive
+; shape would have baked in from the start.
+;
+; Combinators apply only here, at the very top of a document -- neither
+; `with_decl` (still plain `select`) nor `body_item`'s own nested
+; `select` reference were widened to `combined_select`. `WITH RECURSIVE`
+; (lang_spec §5.4.1) is the one concrete case where a `WITH` binding
+; would need to be combinable, and it's an explicitly separate, later
+; increment (its own fixpoint-iteration logic, plus the graph variant's
+; `VIA`, per its own worked example); revisit this boundary then, not
+; before. See `ScryCore.CombinedQuery`'s own moduledoc for the fuller
+; reasoning, including why this is a real, separate result type rather
+; than a field on `select`/`Query.t()` itself.
+combined_select := head:select combinator_tail*
+
+; Three top-level alternatives, disambiguated by capture-key name
+; (`union`/`intersect`/`except`) -- the same established, proven-safe
+; pattern `comparison`/`field_body_item` already use, not a nested
+; `op:(...)` choice-group. A nested choice *would* be more compact here
+; (`op:(KW_UNION KW_ALL? | KW_INTERSECT | KW_EXCEPT) right:select`), but
+; every other nested choice-group in this file has needed either a
+; dedicated wrapper rule (`additive_tail`'s own history) or turned out
+; unsafe *inside* one depending on exactly what it contains -- a 3-way
+; choice with one 2-token-sequence alternative is genuinely new,
+; unverified shape here, not worth risking when three plain top-level
+; alternatives are just as easy to write and already proven throughout
+; this file. `all:KW_ALL?` is a bare optional *token* reference --
+; always produces a capture, the literal empty string when absent,
+; checked by value (`ScryCore.Actions` tells `UNION` from `UNION ALL`
+; this way, same convention `order_item`'s own `dir:(KW_DESC|KW_ASC)?`
+; already uses for a different optional token).
+combinator_tail := union:KW_UNION all:KW_ALL? right:select
+                  | intersect:KW_INTERSECT right:select
+                  | except:KW_EXCEPT right:select
 
 ; `<body-item> ...` (lang_spec §6's own template) reuses `body_list`
 ; directly -- a FRAGMENT's body is exactly as expressive as a SELECT's

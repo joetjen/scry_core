@@ -1,7 +1,7 @@
 defmodule ScryCore.ActionsTest do
   use ExUnit.Case, async: true
 
-  alias ScryCore.{Query, Rational}
+  alias ScryCore.{CombinedQuery, Query, Rational}
 
   setup_all do
     # No stub needed for select_ep1a -- core's own grammar is complete
@@ -841,5 +841,74 @@ line two""" { name }))
              order_bys: [{["total"], :desc}],
              limit: 5
            } = q.with_bindings["top"]
+  end
+
+  test "a query with no combinator still parses as a plain %Query{}, not wrapped", %{grammar: g} do
+    assert {:ok, %Query{}} = run(g, ~s[SELECT users { name }])
+  end
+
+  test "UNION parses to a %CombinedQuery{}", %{grammar: g} do
+    assert {:ok, %CombinedQuery{op: :union, left: left, right: right}} =
+             run(g, ~s[SELECT a { name } UNION SELECT b { name }])
+
+    assert %Query{source: ["a"], select: [{:field, ["name"]}]} = left
+    assert %Query{source: ["b"], select: [{:field, ["name"]}]} = right
+  end
+
+  test "UNION ALL parses to op: :union_all", %{grammar: g} do
+    assert {:ok, %CombinedQuery{op: :union_all}} =
+             run(g, ~s[SELECT a { name } UNION ALL SELECT b { name }])
+  end
+
+  test "INTERSECT parses to op: :intersect", %{grammar: g} do
+    assert {:ok, %CombinedQuery{op: :intersect}} =
+             run(g, ~s[SELECT a { name } INTERSECT SELECT b { name }])
+  end
+
+  test "EXCEPT parses to op: :except", %{grammar: g} do
+    assert {:ok, %CombinedQuery{op: :except}} =
+             run(g, ~s[SELECT a { name } EXCEPT SELECT b { name }])
+  end
+
+  test "a 3-way combinator chain folds left-associative, (A op1 B) op2 C", %{grammar: g} do
+    assert {:ok,
+            %CombinedQuery{
+              op: :except,
+              left: %CombinedQuery{
+                op: :union,
+                left: %Query{source: ["a"]},
+                right: %Query{source: ["b"]}
+              },
+              right: %Query{source: ["c"]}
+            }} =
+             run(g, ~s[SELECT a { name } UNION SELECT b { name } EXCEPT SELECT c { name }])
+  end
+
+  test "a FRAGMENT spread resolves on both sides of a combinator", %{grammar: g} do
+    assert {:ok, %CombinedQuery{left: left, right: right}} =
+             run(
+               g,
+               ~s[FRAGMENT f { id, name } SELECT a { ...f } UNION SELECT b { ...f }]
+             )
+
+    assert left.select == [{:field, ["id"]}, {:field, ["name"]}]
+    assert right.select == [{:field, ["id"]}, {:field, ["name"]}]
+  end
+
+  test "a WITH binding's own value cannot itself use a combinator (scope boundary)", %{
+    grammar: g
+  } do
+    assert {:error, _} =
+             run(
+               g,
+               ~s[WITH x = SELECT a { name } UNION SELECT b { name } SELECT x { name }]
+             )
+  end
+
+  test "a nested SELECT body item cannot itself use a combinator (scope boundary)", %{
+    grammar: g
+  } do
+    assert {:error, _} =
+             run(g, ~s[SELECT users { name, SELECT a { id } UNION SELECT b { id } }])
   end
 end

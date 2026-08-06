@@ -172,9 +172,35 @@ defmodule ScryCore.Executor do
   nested `SELECT` pays the same "re-fetch per surviving outer row" cost
   `REQUIRED`'s own paragraph already documents, compounded if the
   binding is itself layered on another `WITH` binding.
+
+  **Query combinators (lang_spec.md §5.4, `UNION`/`UNION ALL`/
+  `INTERSECT`/`EXCEPT`, `ScryCore.CombinedQuery`).** `run/4`'s own
+  argument may be a `%ScryCore.CombinedQuery{}` instead of a plain
+  `%Query{}` -- `run_any/6` dispatches on which, running both `left`/
+  `right` fully and independently (each through its own complete
+  pipeline: fetch, filter, group/aggregate, sort, project, dedupe,
+  paginate -- no pushdown, no shared fetch, the same "correct, not
+  necessarily efficient" posture as everywhere else in this module) and
+  combining the two row lists (`combine_rows/3`). `union`/`intersect`/
+  `except` (not `_all`) dedupe their own *result*, standard SQL:1999 set
+  semantics; row membership for `intersect`/`except` uses ordinary
+  `MapSet` structural equality, which has the identical, previously-
+  undocumented `%DateTime{}`/`%NaiveDateTime{}` precision-mismatch gap
+  `term_order/2`'s own comment already documents for *ordering* two such
+  values -- found, not fixed, while writing this. A chain of 3+
+  combinators folds left-associative at parse time (`priv/grammar.aether`
+  's own `combined_select` comment), so `A EXCEPT B EXCEPT C` correctly
+  means `(A EXCEPT B) EXCEPT C`, not the reverse (`EXCEPT`/`INTERSECT`
+  aren't commutative). Combinators only ever appear at the very top of a
+  document -- never inside a `WITH` binding's own value, never inside a
+  nested `SELECT` body item (`ScryCore.CombinedQuery`'s own moduledoc has
+  the scoping reasoning) -- so `project_item`'s own nested-query clause
+  keeps calling `run/6` directly, unchanged; only `run/4`'s own public
+  entry and `fetch_rows/6`'s `WITH`-resolution clause go through
+  `run_any/6`.
   """
 
-  alias ScryCore.{EngineBehaviour, Query, Rational}
+  alias ScryCore.{CombinedQuery, EngineBehaviour, Query, Rational}
 
   @typedoc "One `{ancestor_source_name, ancestor_row}` per enclosing query, nearest first."
   @type scope :: [{String.t(), EngineBehaviour.row()}]
@@ -183,22 +209,115 @@ defmodule ScryCore.Executor do
   @type params :: %{optional(String.t()) => term()}
 
   @doc """
-  Executes `query` against `engine_module` (a module implementing
+  Executes `query_or_combined` -- a `%ScryCore.Query{}`, or a
+  `%ScryCore.CombinedQuery{}` (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`,
+  lang_spec.md §5.4) -- against `engine_module` (a module implementing
   `ScryCore.EngineBehaviour`) using `conn`, resolving any `$name`
-  placeholder against `params`. Returns one projected result row per
-  source row surviving every predicate in `query.wheres` (combined
-  with `and`), sorted, deduped, and paginated per `query.order_bys`/
-  `query.distinct`/`query.limit`/`query.offset` -- or, if `query` uses
-  `GROUP BY` or a function call anywhere in its `select`/`havings`, one
-  row per group (or one flat-aggregate row with no explicit `GROUP BY`)
-  instead. See this module's own moduledoc for the exact pipeline order,
-  the correlation/`REQUIRED`/external-parameter semantics, and the full
-  `GROUP BY`/`HAVING`/aggregate-function story.
+  placeholder against `params`. For a plain `%Query{}`: one projected
+  result row per source row surviving every predicate in `query.wheres`
+  (combined with `and`), sorted, deduped, and paginated per
+  `query.order_bys`/`query.distinct`/`query.limit`/`query.offset` -- or,
+  if `query` uses `GROUP BY` or a function call anywhere in its
+  `select`/`havings`, one row per group (or one flat-aggregate row with
+  no explicit `GROUP BY`) instead. For a `%CombinedQuery{}`: both sides
+  run fully and independently this same way, then their row lists are
+  combined per `op`. See this module's own moduledoc for the exact
+  pipeline order, the correlation/`REQUIRED`/external-parameter/`WITH`/
+  combinator semantics, and the full `GROUP BY`/`HAVING`/aggregate-
+  function story.
   """
-  @spec run(Query.t(), module(), term(), params()) ::
+  @spec run(Query.t() | CombinedQuery.t(), module(), term(), params()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
-  def run(%Query{} = query, engine_module, conn, params \\ %{}),
-    do: run(query, [], params, query.with_bindings, engine_module, conn)
+  def run(query_or_combined, engine_module, conn, params \\ %{}),
+    do:
+      run_any(
+        query_or_combined,
+        [],
+        params,
+        query_or_combined.with_bindings,
+        engine_module,
+        conn
+      )
+
+  # Dispatches on which of the two top-level result shapes
+  # `ScryCore.parse/1` can produce (`ScryCore.CombinedQuery`'s own
+  # moduledoc) -- a plain `%Query{}` goes to `run/6` below, a
+  # `%CombinedQuery{}` (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`,
+  # lang_spec.md §5.4) to `run_combined/6`. Every recursive call site
+  # that executes *something the grammar could have produced as either
+  # shape* goes through this, not `run/6` directly -- today that's just
+  # `fetch_rows/6`'s own `WITH`-binding-resolution clause below (a
+  # nested `SELECT` body item, by contrast, is always plain `Query.t()`,
+  # never combined -- `ScryCore.CombinedQuery`'s own moduledoc has the
+  # scoping reasoning -- so `project_item`'s own nested-query clause
+  # keeps calling `run/6` directly, unchanged).
+  @spec run_any(
+          Query.t() | CombinedQuery.t(),
+          scope(),
+          params(),
+          %{String.t() => Query.t()},
+          module(),
+          term()
+        ) ::
+          {:ok, [EngineBehaviour.row()]} | {:error, term()}
+  defp run_any(%Query{} = query, scope, params, with_bindings, engine_module, conn),
+    do: run(query, scope, params, with_bindings, engine_module, conn)
+
+  defp run_any(%CombinedQuery{} = combined, scope, params, with_bindings, engine_module, conn),
+    do: run_combined(combined, scope, params, with_bindings, engine_module, conn)
+
+  # Runs both sides fully, independently, through their own complete
+  # pipeline (fetch, filter, group/aggregate, sort, project, dedupe,
+  # paginate -- whatever each side's own modifiers call for), then
+  # combines the two row lists -- no pushdown, no shared fetch, the same
+  # "correct, not necessarily efficient" posture this module's own
+  # moduledoc already documents elsewhere. `left`/`right` are each
+  # `Query.t() | CombinedQuery.t()` (`CombinedQuery`'s own moduledoc),
+  # so this recurses through `run_any/6` again for an arbitrarily deep
+  # chain, not just a single combinator.
+  defp run_combined(
+         %CombinedQuery{op: op, left: left, right: right},
+         scope,
+         params,
+         with_bindings,
+         engine_module,
+         conn
+       ) do
+    with {:ok, left_rows} <- run_any(left, scope, params, with_bindings, engine_module, conn),
+         {:ok, right_rows} <- run_any(right, scope, params, with_bindings, engine_module, conn) do
+      {:ok, combine_rows(op, left_rows, right_rows)}
+    end
+  end
+
+  # `union`/`intersect`/`except` (not `_all`) dedupe their own *result*,
+  # matching standard SQL:1999 set semantics (lang_spec.md §5.4's own
+  # table only calls this out explicitly for `union`/`union all`, but
+  # `INTERSECT`/`EXCEPT` are conventionally non-`ALL`, deduping set
+  # operations too, the same way a bare `INTERSECT` differs from SQL's
+  # own `INTERSECT ALL`). Row membership for `intersect`/`except` uses
+  # ordinary `MapSet` structural equality (`==` on the whole row map) --
+  # correct for every value type except the one gap this module's own
+  # pre-existing `distinct` dedup already has, undocumented until now:
+  # two `%DateTime{}`/`%NaiveDateTime{}` values representing the same
+  # instant at different parsed precision aren't `==` (`term_order/2`'s
+  # own comment has the fuller "confirmed empirically" story for why
+  # *ordering* needed special handling; *equality* has the identical
+  # underlying problem, just never surfaced until rows started getting
+  # compared to each other directly here). Not fixed here -- same
+  # "found, not solved" posture every other already-acknowledged gap in
+  # this module already has.
+  defp combine_rows(:union, left, right), do: Enum.uniq(left ++ right)
+  defp combine_rows(:union_all, left, right), do: left ++ right
+
+  defp combine_rows(:intersect, left, right) do
+    right_set = MapSet.new(right)
+    left |> Enum.filter(&MapSet.member?(right_set, &1)) |> Enum.uniq()
+  end
+
+  defp combine_rows(:except, left, right) do
+    right_set = MapSet.new(right)
+    left |> Enum.reject(&MapSet.member?(right_set, &1)) |> Enum.uniq()
+  end
 
   @spec run(Query.t(), scope(), params(), %{String.t() => Query.t()}, module(), term()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
@@ -223,16 +342,25 @@ defmodule ScryCore.Executor do
   # they'd come from a real source. `with_bindings` passes through
   # unchanged into the recursive call, the same way `params` already
   # does, since it's equally document-global, not scope-dependent.
-  # Falls through to the real `fetch/2` for any multi-segment source (a
-  # `WITH` name is always a single bare identifier, lang_spec §9's own
-  # grammar) or a single-segment one that isn't a declared binding --
-  # deliberately not an error: there's no distinguishing sigil the way a
-  # `FRAGMENT` spread's own `...` has, so an unrecognized bare name is
-  # just assumed to be a real source (`Query`'s own moduledoc).
+  # `run_any/6`, not `run/6` directly -- the grammar can't currently
+  # produce a `%CombinedQuery{}` as a `WITH` binding's own value
+  # (`ScryCore.CombinedQuery`'s own moduledoc has the scoping reasoning),
+  # but keeping this dispatch generic costs nothing and avoids a latent
+  # `FunctionClauseError` waiting for whenever that scope boundary is
+  # revisited. Falls through to the real `fetch/2` for any multi-segment
+  # source (a `WITH` name is always a single bare identifier, lang_spec
+  # §9's own grammar) or a single-segment one that isn't a declared
+  # binding -- deliberately not an error: there's no distinguishing
+  # sigil the way a `FRAGMENT` spread's own `...` has, so an
+  # unrecognized bare name is just assumed to be a real source (`Query`'s
+  # own moduledoc).
   defp fetch_rows(%Query{source: [name]}, scope, params, with_bindings, engine_module, conn) do
     case Map.fetch(with_bindings, name) do
-      {:ok, bound_query} -> run(bound_query, scope, params, with_bindings, engine_module, conn)
-      :error -> engine_module.fetch(conn, [name])
+      {:ok, bound_query} ->
+        run_any(bound_query, scope, params, with_bindings, engine_module, conn)
+
+      :error ->
+        engine_module.fetch(conn, [name])
     end
   end
 

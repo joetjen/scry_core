@@ -246,6 +246,38 @@ defmodule ScryCore.Actions do
     end
   end
 
+  # `combined_select`'s own handler already returns either a real
+  # %ScryCore.Query{} (no combinator used) or a %ScryCore.CombinedQuery{}
+  # (one or more used) -- no extra wrapping needed here, the same
+  # reasoning body_item's own `select` clause already relies on.
+  def handle_rule(:combined_select, %{head: head_cap, combinator_tail: tail_caps}, ctx) do
+    with {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, tails, ctx} <- eval_list(:combinator_tail, tail_caps, ctx) do
+      {:ok, fold_combinators(head, tails), ctx}
+    end
+  end
+
+  # Returns its own `{op, right}` piece, not a folded `%CombinedQuery{}`
+  # -- `combinator_tail` has no idea what `head`/the running accumulator
+  # is, only `combined_select`'s own handler (`fold_combinators/2`)
+  # does, the exact same left-to-right fold shape `expression`'s own
+  # `additive_tail` already uses for `+`/`-` chains.
+  def handle_rule(:combinator_tail, %{union: _union_cap, all: all_cap, right: right_cap}, ctx) do
+    with {:ok, all_text, ctx} <- all_cap.eval.(ctx),
+         {:ok, right, ctx} <- right_cap.eval.(ctx) do
+      op = if all_text == "", do: :union, else: :union_all
+      {:ok, {op, right}, ctx}
+    end
+  end
+
+  def handle_rule(:combinator_tail, %{intersect: _intersect_cap, right: right_cap}, ctx) do
+    with {:ok, right, ctx} <- right_cap.eval.(ctx), do: {:ok, {:intersect, right}, ctx}
+  end
+
+  def handle_rule(:combinator_tail, %{except: _except_cap, right: right_cap}, ctx) do
+    with {:ok, right, ctx} <- right_cap.eval.(ctx), do: {:ok, {:except, right}, ctx}
+  end
+
   # The real root (priv/grammar.aether's own `@root document`/`document`
   # comments have the full reasoning). `fragment_decl`/`with_decl` are
   # both bare/unrenamed and `*`-repeated, so each always has its own key
@@ -262,6 +294,13 @@ defmodule ScryCore.Actions do
   # cycle is a property of the bindings alone) -- ordered before
   # `FragmentResolver` for no real reason beyond it being the cheaper,
   # `select`-independent check to fail on first.
+  #
+  # `select_cap` (really `combined_select`, renamed -- see
+  # priv/grammar.aether's own `document` comment) may itself evaluate to
+  # either a %Query{} or a %CombinedQuery{} -- `ScryCore.FragmentResolver
+  # .resolve/2` already dispatches on both (its own moduledoc), and
+  # `with_bindings` attaches to whichever type comes back, since either
+  # can legitimately be the top-level result of a document.
   def handle_rule(
         :document,
         %{fragment_decl: frag_caps, with_decl: with_caps, select: select_cap},
@@ -272,10 +311,16 @@ defmodule ScryCore.Actions do
          {:ok, withs, ctx} <- eval_list(:with_decl, with_caps, ctx),
          {:ok, with_bindings} <- build_name_map(withs, :duplicate_with),
          :ok <- ScryCore.WithCycleCheck.check(with_bindings),
-         {:ok, query, ctx} <- select_cap.eval.(ctx) do
-      case ScryCore.FragmentResolver.resolve(query, fragments) do
-        {:ok, %Query{} = resolved} -> {:ok, %Query{resolved | with_bindings: with_bindings}, ctx}
-        {:error, _} = err -> err
+         {:ok, result, ctx} <- select_cap.eval.(ctx) do
+      case ScryCore.FragmentResolver.resolve(result, fragments) do
+        {:ok, %Query{} = resolved} ->
+          {:ok, %Query{resolved | with_bindings: with_bindings}, ctx}
+
+        {:ok, %ScryCore.CombinedQuery{} = resolved} ->
+          {:ok, %ScryCore.CombinedQuery{resolved | with_bindings: with_bindings}, ctx}
+
+        {:error, _} = err ->
+          err
       end
     end
   end
@@ -596,6 +641,21 @@ defmodule ScryCore.Actions do
   # can't reuse that helper directly.
   defp fold_arith(left, tails) do
     Enum.reduce(tails, left, fn {op, right}, acc -> {:arith, op, acc, right} end)
+  end
+
+  # Same left-to-right fold shape as `fold_arith/2` above, but building
+  # `%ScryCore.CombinedQuery{}` nodes instead of `{:arith, ...}` tuples --
+  # `A UNION B EXCEPT C` folds to `%CombinedQuery{op: :except, left:
+  # %CombinedQuery{op: :union, left: A, right: B}, right: C}`, exactly
+  # `(A UNION B) EXCEPT C`, the correct left-associative grouping
+  # (`priv/grammar.aether`'s own `combined_select` comment has the fuller
+  # "why not naive right-recursion" reasoning). A `tails == []` fold
+  # (no combinator used at all) returns `left` completely unchanged --
+  # still a plain `%Query{}`, never wrapped.
+  defp fold_combinators(left, tails) do
+    Enum.reduce(tails, left, fn {op, right}, acc ->
+      %ScryCore.CombinedQuery{op: op, left: acc, right: right}
+    end)
   end
 
   defp unescape(text), do: unescape(text, [])

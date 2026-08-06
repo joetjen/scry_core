@@ -41,21 +41,38 @@ defmodule ScryCore.FragmentResolver do
   `SELECT` with its own spreads, or spread a second `FRAGMENT`, and
   either is expanded exactly the same way a top-level query's own body
   is, recursively.
+
+  A document's own top-level result may be a `%ScryCore.CombinedQuery{}`
+  instead of a plain `%Query{}` (lang_spec §5.4's `UNION`/`INTERSECT`/
+  `EXCEPT`, `ScryCore.CombinedQuery`'s own moduledoc) -- `resolve/2`'s
+  own second clause recurses into both `left`/`right` (each independently
+  either shape), so a `FRAGMENT` spread works identically on *either*
+  side of a combinator, not just inside a plain query.
   """
 
-  alias ScryCore.Query
+  alias ScryCore.{CombinedQuery, Query}
 
   @typedoc "Raw FRAGMENT declarations, name => (possibly spread-containing) body-item list."
   @type fragments :: %{String.t() => [Query.body_item() | {:spread, String.t()}]}
 
   @doc """
-  Resolves every `{:spread, name}` placeholder in `query`'s own body
-  (recursively, including inside any nested `SELECT`) against `fragments`.
+  Resolves every `{:spread, name}` placeholder in `query_or_combined`'s
+  own body (recursively, including inside any nested `SELECT`, and, for
+  a `%CombinedQuery{}`, on both sides of the combinator) against
+  `fragments`.
   """
-  @spec resolve(Query.t(), fragments()) :: {:ok, Query.t()} | {:error, term()}
+  @spec resolve(Query.t() | CombinedQuery.t(), fragments()) ::
+          {:ok, Query.t() | CombinedQuery.t()} | {:error, term()}
   def resolve(%Query{} = query, fragments) do
     with {:ok, select, _resolved} <- expand_items(query.select, fragments, [], %{}) do
       {:ok, %Query{query | select: select}}
+    end
+  end
+
+  def resolve(%CombinedQuery{} = combined, fragments) do
+    with {:ok, left} <- resolve(combined.left, fragments),
+         {:ok, right} <- resolve(combined.right, fragments) do
+      {:ok, %CombinedQuery{combined | left: left, right: right}}
     end
   end
 

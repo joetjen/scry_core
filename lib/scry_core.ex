@@ -17,34 +17,39 @@ defmodule ScryCore do
   exists to avoid.
   """
 
-  alias ScryCore.Query
+  alias ScryCore.{CombinedQuery, Query}
 
   @doc """
-  Parses `source` (Scry query text) into a `%ScryCore.Query{}`, using
-  core's own grammar and `ScryCore.Actions`. Core-only -- no kind's
-  grammar fragment is merged in (`ScryCore.GrammarCompose` exists, but
-  nothing calls it here yet), so a query using a kind-specific
-  extension point parses only as far as core's own "always fails"
-  default for it allows.
+  Parses `source` (Scry query text) into a `%ScryCore.Query{}` (or a
+  `%ScryCore.CombinedQuery{}`, if `source`'s own top level uses `UNION`/
+  `UNION ALL`/`INTERSECT`/`EXCEPT`, lang_spec §5.4), using core's own
+  grammar and `ScryCore.Actions`. Core-only -- no kind's grammar
+  fragment is merged in (`ScryCore.GrammarCompose` exists, but nothing
+  calls it here yet), so a query using a kind-specific extension point
+  parses only as far as core's own "always fails" default for it
+  allows.
 
   `source` may be zero or more top-level `FRAGMENT` declarations, zero
-  or more top-level `WITH` declarations, then exactly one `SELECT`
-  (lang_spec §5.11/§9, `priv/grammar.aether`'s own `document` rule); any
-  `...<fragment-name>` spread inside the `SELECT`'s own body is already
-  fully resolved (`ScryCore.FragmentResolver`) by the time this returns
-  -- the returned `%ScryCore.Query{}` never contains a spread
-  placeholder, only real `Query.body_item()` shapes, indistinguishable
-  from having written the fragment's own fields out by hand at that
-  position. `WITH` bindings are *not* resolved here the same way --
-  each stays a real `%ScryCore.Query{}` of its own, collected into the
-  returned query's own `with_bindings` field and only ever executed
-  later, by `ScryCore.Executor`, whenever something actually references
-  the bound name as a source (`ScryCore.WithCycleCheck` still runs here,
-  though -- a `WITH` binding that (directly or transitively) references
-  itself is rejected before this function ever returns, not left to
-  loop forever the first time `ScryCore.Executor.run/3` tries it).
+  or more top-level `WITH` declarations, then exactly one `SELECT` --
+  optionally chained with one or more `UNION`/`UNION ALL`/`INTERSECT`/
+  `EXCEPT`ed `SELECT`s (lang_spec §5.4/§5.11/§9, `priv/grammar.aether`'s
+  own `document`/`combined_select` rules); any `...<fragment-name>`
+  spread anywhere in that final result's own body (either side of a
+  combinator included) is already fully resolved
+  (`ScryCore.FragmentResolver`) by the time this returns -- the returned
+  value never contains a spread placeholder, only real
+  `Query.body_item()` shapes, indistinguishable from having written the
+  fragment's own fields out by hand at that position. `WITH` bindings
+  are *not* resolved here the same way -- each stays a real
+  `%ScryCore.Query{}` of its own, collected into the returned value's
+  own `with_bindings` field and only ever executed later, by
+  `ScryCore.Executor`, whenever something actually references the bound
+  name as a source (`ScryCore.WithCycleCheck` still runs here, though --
+  a `WITH` binding that (directly or transitively) references itself is
+  rejected before this function ever returns, not left to loop forever
+  the first time `ScryCore.Executor.run/3` tries it).
   """
-  @spec parse(String.t()) :: {:ok, Query.t()} | {:error, term()}
+  @spec parse(String.t()) :: {:ok, Query.t() | CombinedQuery.t()} | {:error, term()}
   def parse(source) when is_binary(source) do
     with {:ok, grammar} <- ScryCore.Grammar.compile() do
       Grammar.VM.run(grammar, source, ScryCore.Actions, nil)

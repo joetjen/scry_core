@@ -1,7 +1,7 @@
 defmodule ScryCore.ExecutorTest do
   use ExUnit.Case, async: true
 
-  alias ScryCore.{Executor, Query, Rational}
+  alias ScryCore.{CombinedQuery, Executor, Query, Rational}
 
   # A minimal fixture, not the real static engine (that's
   # scry_test_engine_core, a separate package -- scry_core can't
@@ -83,6 +83,14 @@ defmodule ScryCore.ExecutorTest do
     %{"price" => Rational.new(3, 2), "quantity" => 2}
   ]
 
+  # For UNION/INTERSECT/EXCEPT: Alice appears twice in team_a (tests
+  # dedup collapsing an in-source duplicate, not just a cross-source
+  # one); Bob is the one name in both teams (INTERSECT's own "in both"
+  # case); Carol is team_b-only (proves EXCEPT keeps only team_a's own
+  # rows, not anything from the right side).
+  @team_a [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Alice"}]
+  @team_b [%{"name" => "Bob"}, %{"name" => "Carol"}]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -92,7 +100,9 @@ defmodule ScryCore.ExecutorTest do
     ["customers"] => @customers,
     ["customer_orders"] => @customer_orders,
     ["order_items"] => @order_items,
-    ["line_items"] => @line_items
+    ["line_items"] => @line_items,
+    ["team_a"] => @team_a,
+    ["team_b"] => @team_b
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -1068,6 +1078,88 @@ defmodule ScryCore.ExecutorTest do
                %{"name" => "Bob", "own_orders" => []},
                %{"name" => "Carol", "own_orders" => [%{"id" => 102}]}
              ]
+    end
+  end
+
+  describe "query combinators (UNION / UNION ALL / INTERSECT / EXCEPT)" do
+    defp combined(op, left, right), do: %CombinedQuery{op: op, left: left, right: right}
+
+    @team_a_query %Query{source: ["team_a"], select: [{:field, ["name"]}]}
+    @team_b_query %Query{source: ["team_b"], select: [{:field, ["name"]}]}
+
+    test "UNION concatenates and dedupes, including an in-source duplicate" do
+      assert {:ok, rows} = run(combined(:union, @team_a_query, @team_b_query))
+
+      assert rows == [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}]
+    end
+
+    test "UNION ALL concatenates without deduping" do
+      assert {:ok, rows} = run(combined(:union_all, @team_a_query, @team_b_query))
+
+      assert rows == [
+               %{"name" => "Alice"},
+               %{"name" => "Bob"},
+               %{"name" => "Alice"},
+               %{"name" => "Bob"},
+               %{"name" => "Carol"}
+             ]
+    end
+
+    test "INTERSECT keeps only rows present in both, deduped" do
+      assert {:ok, rows} = run(combined(:intersect, @team_a_query, @team_b_query))
+      assert rows == [%{"name" => "Bob"}]
+    end
+
+    test "EXCEPT keeps only left-side rows absent from the right, deduped" do
+      assert {:ok, rows} = run(combined(:except, @team_a_query, @team_b_query))
+      assert rows == [%{"name" => "Alice"}]
+    end
+
+    test "each side applies its own WHERE/ORDER BY/LIMIT independently before combining" do
+      left = %Query{
+        source: ["team_a"],
+        wheres: [{:cmp, :not_eq, ["name"], "Bob"}],
+        select: [{:field, ["name"]}]
+      }
+
+      right = %Query{source: ["team_b"], limit: 1, select: [{:field, ["name"]}]}
+
+      assert {:ok, rows} = run(combined(:union, left, right))
+      # left: Alice only (Bob filtered out, its own duplicate deduped
+      # away too); right: Bob only (LIMIT 1, fetch order Bob, Carol).
+      assert rows == [%{"name" => "Alice"}, %{"name" => "Bob"}]
+    end
+
+    test "an error on either side propagates, not silently dropped" do
+      bad = %Query{source: ["nonexistent"], select: []}
+
+      assert {:error, {:no_such_source, ["nonexistent"]}} =
+               run(combined(:union, @team_a_query, bad))
+
+      assert {:error, {:no_such_source, ["nonexistent"]}} =
+               run(combined(:union, bad, @team_a_query))
+    end
+
+    test "a 3-way chain composes correctly: (A UNION B) EXCEPT B" do
+      chain = combined(:except, combined(:union, @team_a_query, @team_b_query), @team_b_query)
+      assert {:ok, rows} = run(chain)
+      assert rows == [%{"name" => "Alice"}]
+    end
+
+    test "a WITH binding whose own value is a %CombinedQuery{} still resolves via run_any/6" do
+      # Not reachable through the parser today (WITH's own grammar
+      # rule stays plain `select`, ScryCore.CombinedQuery's own
+      # moduledoc has the reasoning) -- this constructs the shape by
+      # hand to verify ScryCore.Executor's own dispatch stays generic
+      # regardless, not just by inspection of the code.
+      query = %Query{
+        source: ["merged"],
+        select: [{:field, ["name"]}],
+        with_bindings: %{"merged" => combined(:union, @team_a_query, @team_b_query)}
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}]
     end
   end
 end
