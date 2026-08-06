@@ -43,11 +43,22 @@ defmodule ScryCore.ExecutorTest do
     %{"name" => "standup", "at" => ~N[2026-01-01 09:00:00.500000]}
   ]
 
+  # Fetch order (A, B, C, D) deliberately doesn't match sort order by
+  # either field -- lets a stability/tie-breaking test tell a real sort
+  # apart from an accidental one.
+  @accounts [
+    %{"name" => "A", "tier" => "gold", "score" => 3},
+    %{"name" => "B", "tier" => "silver", "score" => 1},
+    %{"name" => "C", "tier" => "gold", "score" => 2},
+    %{"name" => "D", "tier" => "silver", "score" => 4}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
     ["products"] => @products,
-    ["events"] => @events
+    ["events"] => @events,
+    ["accounts"] => @accounts
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -205,5 +216,114 @@ defmodule ScryCore.ExecutorTest do
     }
 
     assert {:ok, [%{"name" => "standup"}]} = run(query)
+  end
+
+  test "order_by, ascending and descending" do
+    asc = %Query{
+      source: ["accounts"],
+      order_bys: [{["score"], :asc}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(asc)
+    assert Enum.map(rows, & &1["name"]) == ["B", "C", "A", "D"]
+
+    desc = %Query{
+      source: ["accounts"],
+      order_bys: [{["score"], :desc}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(desc)
+    assert Enum.map(rows, & &1["name"]) == ["D", "A", "C", "B"]
+  end
+
+  test "order_by is a stable sort -- ties preserve original fetch order" do
+    query = %Query{
+      source: ["accounts"],
+      order_bys: [{["tier"], :asc}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    # gold (A, C) before silver (B, D) alphabetically by tier, and within
+    # each tier the original A/B/C/D fetch order survives untouched.
+    assert Enum.map(rows, & &1["name"]) == ["A", "C", "B", "D"]
+  end
+
+  test "order_by with a secondary key breaks ties from the first" do
+    query = %Query{
+      source: ["accounts"],
+      order_bys: [{["tier"], :asc}, {["score"], :desc}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["name"]) == ["A", "C", "D", "B"]
+  end
+
+  test "order_by evaluates against the source row, not the projected shape" do
+    # "score" is nowhere in `select` -- only resolvable at all if
+    # sorting happens before projection, against the source row.
+    query = %Query{
+      source: ["accounts"],
+      order_bys: [{["score"], :asc}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["name"]) == ["B", "C", "A", "D"]
+  end
+
+  test "distinct dedupes the projected shape, keeping the first occurrence" do
+    query = %Query{source: ["accounts"], distinct: true, select: [{:field, ["tier"]}]}
+
+    assert {:ok, rows} = run(query)
+    assert rows == [%{"tier" => "gold"}, %{"tier" => "silver"}]
+  end
+
+  test "distinct dedupes after order_by, so sort order decides which duplicate survives" do
+    query = %Query{
+      source: ["accounts"],
+      order_bys: [{["score"], :desc}],
+      distinct: true,
+      select: [{:field, ["tier"]}]
+    }
+
+    # Sorted desc by score first: D(4,silver), A(3,gold), C(2,gold), B(1,silver)
+    # -- then deduped on the projected {"tier" => _} shape, keeping each
+    # tier's first appearance in *that* order: silver (from D) before gold
+    # (from A).
+    assert {:ok, rows} = run(query)
+    assert rows == [%{"tier" => "silver"}, %{"tier" => "gold"}]
+  end
+
+  test "limit alone" do
+    query = %Query{source: ["accounts"], limit: 2, select: [{:field, ["name"]}]}
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["name"]) == ["A", "B"]
+  end
+
+  test "limit with offset" do
+    query = %Query{source: ["accounts"], limit: 2, offset: 1, select: [{:field, ["name"]}]}
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["name"]) == ["B", "C"]
+  end
+
+  test "an offset past the end of the result set yields no rows" do
+    query = %Query{source: ["accounts"], offset: 10, select: [{:field, ["name"]}]}
+    assert {:ok, []} = run(query)
+  end
+
+  test "limit, order_by, and distinct compose together" do
+    query = %Query{
+      source: ["accounts"],
+      order_bys: [{["score"], :asc}],
+      limit: 2,
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["name"]) == ["B", "C"]
   end
 end
