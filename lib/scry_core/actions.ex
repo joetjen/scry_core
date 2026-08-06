@@ -206,6 +206,13 @@ defmodule ScryCore.Actions do
   # reasoning as select's own clause above.
   def handle_rule(:body_item, %{field_body_item: cap}, ctx), do: cap.eval.(ctx)
 
+  def handle_rule(:field_body_item, %{alias: alias_cap, expr: expr_cap}, ctx) do
+    with {:ok, alias_name, ctx} <- alias_cap.eval.(ctx),
+         {:ok, expr, ctx} <- expr_cap.eval.(ctx) do
+      {:ok, {:computed, alias_name, expr}, ctx}
+    end
+  end
+
   def handle_rule(:field_body_item, %{field: field_cap} = captures, ctx) do
     with {:ok, path, ctx} <- field_cap.eval.(ctx),
          {:ok, condition, ctx} <- maybe_eval(captures, :if_clause, ctx) do
@@ -222,6 +229,76 @@ defmodule ScryCore.Actions do
   # `param` out from between the two captures (single-capture
   # passthrough doesn't apply here, since there are two).
   def handle_rule(:if_clause, %{param: param_cap}, ctx), do: param_cap.eval.(ctx)
+
+  # `additive_tail`/`mult_tail` (both `*`-repeated) always produce their
+  # own key, an empty list when there were zero repetitions -- unlike a
+  # `?`-optional *rule* reference, which produces no key at all when
+  # absent (confirmed empirically, priv/grammar.aether's own `power`
+  # comment has the fuller story). No `maybe_eval`/absence check needed
+  # here because of that: `eval_list` already handles "zero or more"
+  # uniformly, the same helper `path`'s own `tail` already relies on.
+  def handle_rule(:expression, %{left: left_cap, additive_tail: tail_caps}, ctx) do
+    with {:ok, left, ctx} <- left_cap.eval.(ctx),
+         {:ok, tails, ctx} <- eval_list(:additive_tail, tail_caps, ctx) do
+      {:ok, fold_arith(left, tails), ctx}
+    end
+  end
+
+  # Returns its own `{op, right}` piece, not a folded `{:arith, ...}`
+  # tuple -- `additive_tail` has no idea what `left`/the running
+  # accumulator is, only `expression`'s own handler (`fold_arith/2`)
+  # does, the same left-to-right fold shape `eval_chain/5` already uses
+  # for `disjunction`/`conjunction`, just carrying its own operator per
+  # repetition instead of one fixed one.
+  def handle_rule(:additive_tail, %{op: op_cap, right: right_cap}, ctx) do
+    with {:ok, op_text, ctx} <- op_cap.eval.(ctx),
+         {:ok, right, ctx} <- right_cap.eval.(ctx) do
+      {:ok, {arith_op_from_text(op_text), right}, ctx}
+    end
+  end
+
+  def handle_rule(:multiplicative, %{left: left_cap, mult_tail: tail_caps}, ctx) do
+    with {:ok, left, ctx} <- left_cap.eval.(ctx),
+         {:ok, tails, ctx} <- eval_list(:mult_tail, tail_caps, ctx) do
+      {:ok, fold_arith(left, tails), ctx}
+    end
+  end
+
+  def handle_rule(:mult_tail, %{op: op_cap, right: right_cap}, ctx) do
+    with {:ok, op_text, ctx} <- op_cap.eval.(ctx),
+         {:ok, right, ctx} <- right_cap.eval.(ctx) do
+      {:ok, {arith_op_from_text(op_text), right}, ctx}
+    end
+  end
+
+  # `exp` present vs. absent are two genuinely different capture sets
+  # (`%{base:, exp:}` vs. just `%{base:}`), the same clause-order
+  # disambiguation `comparison`'s own alternatives already use below --
+  # not `maybe_eval`, since there's nothing else in this rule's own
+  # captures to fall back on if it were absent.
+  def handle_rule(:power, %{base: base_cap, exp: exp_cap}, ctx) do
+    with {:ok, base, ctx} <- base_cap.eval.(ctx),
+         {:ok, exponent, ctx} <- exp_cap.eval.(ctx) do
+      {:ok, {:arith, :pow, base, exponent}, ctx}
+    end
+  end
+
+  def handle_rule(:power, %{base: base_cap}, ctx), do: base_cap.eval.(ctx)
+
+  # `literal`'s own resolved value flows straight into the expression
+  # AST unchanged (a plain value, or already one of `expr()`'s own
+  # placeholder tags like `{:param, name}` -- ATOM/PARAM's own
+  # handle_token clauses already produce exactly these). `path` gets
+  # wrapped `{:field, path}` here, the same tag a comparison's own
+  # right-hand side already uses for the identical concept (path naming
+  # a field, to be resolved against a row at execution time).
+  def handle_rule(:primary, %{literal: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:primary, %{path: cap}, ctx) do
+    with {:ok, path, ctx} <- cap.eval.(ctx), do: {:ok, {:field, path}, ctx}
+  end
+
+  def handle_rule(:primary, %{inner: cap}, ctx), do: cap.eval.(ctx)
 
   def handle_rule(:body_list, %{head: head_cap, tail: tail_caps}, ctx) do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),
@@ -367,6 +444,19 @@ defmodule ScryCore.Actions do
   defp op_from_text("<="), do: :le
   defp op_from_text(">="), do: :ge
   defp op_from_text("~"), do: :match
+
+  defp arith_op_from_text("+"), do: :add
+  defp arith_op_from_text("-"), do: :sub
+  defp arith_op_from_text("*"), do: :mul
+  defp arith_op_from_text("/"), do: :div
+
+  # Left-to-right fold over `{op, right}` pairs -- the same shape
+  # `eval_chain/5` already folds for `disjunction`/`conjunction`, just
+  # with a per-repetition operator instead of one fixed one, so it
+  # can't reuse that helper directly.
+  defp fold_arith(left, tails) do
+    Enum.reduce(tails, left, fn {op, right}, acc -> {:arith, op, acc, right} end)
+  end
 
   defp unescape(text), do: unescape(text, [])
 

@@ -500,4 +500,67 @@ line two""" { name }))
   } do
     assert {:error, _} = run(g, ~s(SELECT users { some-field }))
   end
+
+  test "a computed field: alias: expression, the worked example from lang_spec.md §9", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders { subtotal: price * quantity }))
+
+    assert q.select == [
+             {:computed, "subtotal", {:arith, :mul, {:field, ["price"]}, {:field, ["quantity"]}}}
+           ]
+  end
+
+  test "arithmetic operator precedence: * binds tighter than +", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: 2 + 3 * 4 }))
+    assert q.select == [{:computed, "x", {:arith, :add, 2, {:arith, :mul, 3, 4}}}]
+  end
+
+  test "parentheses override precedence", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S[SELECT t { x: (2 + 3) * 4 }])
+    assert q.select == [{:computed, "x", {:arith, :mul, {:arith, :add, 2, 3}, 4}}]
+  end
+
+  test "additive chains are left-associative", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: 1 + 2 - 3 }))
+    assert q.select == [{:computed, "x", {:arith, :sub, {:arith, :add, 1, 2}, 3}}]
+  end
+
+  test "** is right-associative", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: 2 ** 3 ** 2 }))
+    assert q.select == [{:computed, "x", {:arith, :pow, 2, {:arith, :pow, 3, 2}}}]
+  end
+
+  test "an aliased plain field (no arithmetic) is still a valid expression", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders { total: price }))
+    assert q.select == [{:computed, "total", {:field, ["price"]}}]
+  end
+
+  test "a computed field can mix a param and a literal", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders { discounted: price - $discount }))
+
+    assert q.select == [
+             {:computed, "discounted", {:arith, :sub, {:field, ["price"]}, {:param, "discount"}}}
+           ]
+  end
+
+  test "a plain field body item is unaffected by computed-field support", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders { id, subtotal: price * quantity }))
+
+    assert q.select == [
+             {:field, ["id"]},
+             {:computed, "subtotal", {:arith, :mul, {:field, ["price"]}, {:field, ["quantity"]}}}
+           ]
+  end
+
+  test "no space after the alias colon reads as an atom, not alias+expression -- a real, documented lexical constraint",
+       %{grammar: g} do
+    # Confirmed empirically (scratch grammar) before documenting: `:`
+    # immediately followed by an identifier character always loses to
+    # ATOM's longer maximal-munch match. `subtotal:price` therefore
+    # parses as two adjacent things, not `subtotal: price` -- this
+    # specific case fails outright since two bare literals in a row
+    # aren't valid body-list syntax either.
+    assert {:error, _} = run(g, ~s(SELECT orders { subtotal:price }))
+  end
 end

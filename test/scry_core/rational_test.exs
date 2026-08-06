@@ -75,6 +75,99 @@ defmodule ScryCore.RationalTest do
     end
   end
 
+  describe "add/2, sub/2, mul/2, div/2" do
+    test "matches ordinary arithmetic for whole numbers" do
+      assert Rational.add(2, 3) == 5
+      assert Rational.sub(5, 3) == 2
+      assert Rational.mul(4, 5) == 20
+      assert Rational.div(10, 5) == 2
+    end
+
+    test "1/2 + 1/3 = 5/6" do
+      assert Rational.add(Rational.new(1, 2), Rational.new(1, 3)) == Rational.new(5, 6)
+    end
+
+    test "div/2 raises for a zero divisor, integer or rational" do
+      assert_raise ArithmeticError, fn -> Rational.div(1, 0) end
+      assert_raise ArithmeticError, fn -> Rational.div(1, Rational.new(0, 5)) end
+    end
+
+    property "a + b - b == a (subtraction exactly undoes addition)" do
+      check all(
+              n1 <- integer(),
+              d1 <- integer(),
+              d1 != 0,
+              n2 <- integer(),
+              d2 <- integer(),
+              d2 != 0
+            ) do
+        a = Rational.new(n1, d1)
+        b = Rational.new(n2, d2)
+        assert Rational.sub(Rational.add(a, b), b) == a
+      end
+    end
+
+    property "multiplication is commutative" do
+      check all(
+              n1 <- integer(),
+              d1 <- integer(),
+              d1 != 0,
+              n2 <- integer(),
+              d2 <- integer(),
+              d2 != 0
+            ) do
+        a = Rational.new(n1, d1)
+        b = Rational.new(n2, d2)
+        assert Rational.mul(a, b) == Rational.mul(b, a)
+      end
+    end
+
+    property "a * b / b == a for nonzero b (division exactly undoes multiplication)" do
+      check all(
+              n1 <- integer(),
+              d1 <- integer(),
+              d1 != 0,
+              n2 <- integer(),
+              n2 != 0,
+              d2 <- integer(),
+              d2 != 0
+            ) do
+        a = Rational.new(n1, d1)
+        b = Rational.new(n2, d2)
+        assert Rational.div(Rational.mul(a, b), b) == a
+      end
+    end
+  end
+
+  describe "pow/2" do
+    test "matches repeated multiplication for small positive exponents" do
+      assert Rational.pow(2, 3) == 8
+      assert Rational.pow(Rational.new(1, 2), 3) == Rational.new(1, 8)
+    end
+
+    test "zero exponent is always 1" do
+      assert Rational.pow(5, 0) == 1
+      assert Rational.pow(Rational.new(3, 7), 0) == 1
+    end
+
+    test "a negative exponent is the reciprocal of the positive one" do
+      assert Rational.pow(2, -2) == Rational.new(1, 4)
+      assert Rational.pow(Rational.new(2, 3), -1) == Rational.new(3, 2)
+    end
+
+    property "pow(a, n) for small positive n matches repeated mul/2" do
+      check all(
+              numerator <- integer(-10..10),
+              denominator <- integer(1..10),
+              exponent <- integer(1..6)
+            ) do
+        a = Rational.new(numerator, denominator)
+        expected = Enum.reduce(1..(exponent - 1)//1, a, fn _, acc -> Rational.mul(acc, a) end)
+        assert Rational.pow(a, exponent) == expected
+      end
+    end
+  end
+
   # Independent of ScryCore.Rational's own implementation -- restates
   # cross-multiplication from scratch against the *original* (unreduced)
   # pairs, not anything Rational.new/2 or Rational.compare/2 computed,

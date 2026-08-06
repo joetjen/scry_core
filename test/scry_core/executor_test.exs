@@ -78,6 +78,11 @@ defmodule ScryCore.ExecutorTest do
     %{"id" => 1002, "order_id" => 102, "customer_id" => 3, "sku" => "C"}
   ]
 
+  @line_items [
+    %{"price" => 3, "quantity" => 4},
+    %{"price" => Rational.new(3, 2), "quantity" => 2}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -86,7 +91,8 @@ defmodule ScryCore.ExecutorTest do
     ["accounts"] => @accounts,
     ["customers"] => @customers,
     ["customer_orders"] => @customer_orders,
-    ["order_items"] => @order_items
+    ["order_items"] => @order_items,
+    ["line_items"] => @line_items
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -603,5 +609,89 @@ defmodule ScryCore.ExecutorTest do
     }
 
     assert_raise ArgumentError, ~r/includeAge/, fn -> run(query) end
+  end
+
+  test "a computed field: price * quantity, integer result" do
+    query = %Query{
+      source: ["line_items"],
+      select: [
+        {:computed, "subtotal", {:arith, :mul, {:field, ["price"]}, {:field, ["quantity"]}}}
+      ]
+    }
+
+    assert {:ok, [%{"subtotal" => 12}, %{"subtotal" => 3}]} = run(query)
+  end
+
+  test "a computed field stays exact when the result isn't a whole number" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "half_price", {:arith, :div, {:field, ["price"]}, 2}}]
+    }
+
+    assert {:ok, [%{"half_price" => half1}, %{"half_price" => half2}]} = run(query)
+    assert half1 == Rational.new(3, 2)
+    assert half2 == Rational.new(3, 4)
+  end
+
+  test "a computed field can reference an external parameter" do
+    query = %Query{
+      source: ["line_items"],
+      select: [
+        {:computed, "discounted", {:arith, :sub, {:field, ["price"]}, {:param, "discount"}}}
+      ]
+    }
+
+    assert {:ok, [%{"discounted" => 1}, %{"discounted" => discounted2}]} =
+             run(query, %{"discount" => 2})
+
+    assert discounted2 == Rational.new(-1, 2)
+  end
+
+  test "a computed field composes with correlation, reaching an enclosing row" do
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["id"], :asc}],
+      select: [
+        {:field, ["name"]},
+        %Query{
+          source: ["customer_orders"],
+          wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+          select: [{:computed, "with_tax", {:arith, :mul, {:field, ["total"]}, {:param, "rate"}}}]
+        }
+      ]
+    }
+
+    assert {:ok, rows} = run(query, %{"rate" => Rational.new(11, 10)})
+
+    assert [
+             %{"name" => "Alice", "customer_orders" => alice_orders},
+             %{"name" => "Bob", "customer_orders" => []},
+             %{"name" => "Carol", "customer_orders" => carol_orders}
+           ] = rows
+
+    assert alice_orders == [
+             %{"with_tax" => Rational.new(55, 1)},
+             %{"with_tax" => Rational.new(165, 2)}
+           ]
+
+    assert carol_orders == [%{"with_tax" => Rational.new(22, 1)}]
+  end
+
+  test "division by zero in a computed field raises, same as the literal path" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "bad", {:arith, :div, {:field, ["price"]}, 0}}]
+    }
+
+    assert_raise ArithmeticError, fn -> run(query) end
+  end
+
+  test "a non-integer exponent in a computed field raises a clear error" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "bad", {:arith, :pow, 2, Rational.new(1, 2)}}]
+    }
+
+    assert_raise ArgumentError, ~r/exponent must be an integer/, fn -> run(query) end
   end
 end

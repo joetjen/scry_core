@@ -339,7 +339,27 @@ defmodule ScryCore.Executor do
     end
   end
 
+  # Recurses through both operands via this same function -- an
+  # arithmetic expression is a tree of `{:field, ...}`/`{:param,
+  # ...}`/nested `{:arith, ...}`/plain-literal leaves (`Query.expr/0`),
+  # and every one of those shapes is already exactly what `resolve_rhs`
+  # handles. Always routed through `ScryCore.Rational`'s own functions,
+  # never Kernel `+ - * /` directly, so a chain of operations stays
+  # exact throughout (lang_spec.md §4: "arithmetic never drops to float
+  # internally") instead of only the leaves being exact.
+  defp resolve_rhs({:arith, op, left_expr, right_expr}, row, scope, params) do
+    left = resolve_rhs(left_expr, row, scope, params)
+    right = resolve_rhs(right_expr, row, scope, params)
+    arith(op, left, right)
+  end
+
   defp resolve_rhs(literal, _row, _scope, _params), do: literal
+
+  defp arith(:add, a, b), do: Rational.add(a, b)
+  defp arith(:sub, a, b), do: Rational.sub(a, b)
+  defp arith(:mul, a, b), do: Rational.mul(a, b)
+  defp arith(:div, a, b), do: Rational.div(a, b)
+  defp arith(:pow, a, b), do: Rational.pow(a, b)
 
   defp project_all(rows, select_items, own_name, scope, params, engine_module, conn) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
@@ -380,6 +400,23 @@ defmodule ScryCore.Executor do
 
   defp project_item({:field, path}, row, _own_name, scope, _params, _engine_module, _conn) do
     {:ok, List.last(path), get_path(row, scope, path)}
+  end
+
+  # lang_spec.md §9's "Computed fields" (`<alias>: <expression>`) --
+  # `resolve_rhs/4` already knows how to evaluate the whole `expr()`
+  # tree (it's the same function a comparison's own right-hand side
+  # goes through), scope-aware, so a computed field can reference an
+  # enclosing row exactly like a correlated `where` predicate can.
+  defp project_item(
+         {:computed, alias_name, expr},
+         row,
+         _own_name,
+         scope,
+         params,
+         _engine_module,
+         _conn
+       ) do
+    {:ok, alias_name, resolve_rhs(expr, row, scope, params)}
   end
 
   # `nil`/`false` are the only falsy values (Scry's own "no implicit

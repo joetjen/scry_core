@@ -239,6 +239,19 @@ LBRACK := "["
 RBRACK := "]"
 COMMA  := ","
 DOT    := "."
+COLON  := ":"
+
+; Arithmetic (lang_spec §5.10, §9's "Computed fields"). `POW` (`**`)
+; declared before `STAR` (`*`) for readability only -- maximal munch
+; already picks `POW` over two separate `STAR` matches at the same
+; position regardless of declaration order, the same way `LE`/`GT`
+; above don't actually depend on their own ordering either.
+PLUS  := "+"
+MINUS := "-"
+STAR  := "*"
+POW   := "**"
+LPAREN := "("
+RPAREN := ")"
 
 ; `[]` (an empty character class) matches no character, ever -- the
 ; "always fails" default an extension point needs when nothing has
@@ -397,6 +410,43 @@ path := head:field_name (DOT tail:field_name)*
 
 field_name := IDENT | ESCAPED_IDENT
 
+; Arithmetic expressions (lang_spec §5.10, §9's "Computed fields") --
+; standard precedence climbing, low to high: additive (`+ -`) <
+; multiplicative (`* /`) < power (`**`, right-associative) < primary.
+; No function calls yet (`sum(...)` etc., §5.8) -- those are aggregate
+; functions tied to `group by`/`having`, neither executed anywhere in
+; this codebase yet either, so there's nothing real to call them
+; against; a separate, later increment.
+;
+; Each binary level uses a *dedicated* tail rule (`additive_tail`,
+; `mult_tail`), not an inline `(op:(...) right:...)*` group -- found
+; empirically to matter, not a style preference: naming a choice group
+; (`op:(PLUS | MINUS)`) directly inside an inline *repeated* group
+; scrambles the captures (the per-repetition `op`/`right` correlation
+; is lost entirely; `PLUS`/`MINUS` end up as separate, flat,
+; disconnected lists at the outer rule's own level instead). Wrapping
+; each repeated element in its own named rule sidesteps this
+; completely -- confirmed with a scratch grammar before committing to
+; either shape, the same discipline every other capture-shape finding
+; in this file already followed. `additive_tail*`/`mult_tail*` are
+; left unrenamed for the usual reason (`select_ep1a?`'s own comment):
+; renaming a repeated rule reference produces the same kind of spurious
+; extra capture a renamed *optional* one does, confirmed to extend to
+; `*` here too, not just `?`.
+expression := left:multiplicative additive_tail*
+additive_tail := op:(PLUS | MINUS) right:multiplicative
+
+multiplicative := left:power mult_tail*
+mult_tail := op:(STAR | SLASH) right:power
+
+; Right-associative by construction: `exp:power` recurses into another
+; `power`, not `primary`, so `2 ** 3 ** 2` parses as `2 ** (3 ** 2)`,
+; matching every other language's own `**`/`^` convention -- verified
+; against a scratch grammar, not assumed from the shape alone.
+power := base:primary (POW exp:power)?
+
+primary := literal | path | LPAREN inner:expression RPAREN
+
 ; A body item is a nested SELECT (core-only, no extension needed --
 ; ordinary PEG recursion, same rule referencing itself indirectly
 ; through body_list), a kind-contributed construct (EP1(b)/(c)/(d)
@@ -411,11 +461,30 @@ field_name := IDENT | ESCAPED_IDENT
 ; select_ep1a's own alternatives follow).
 body_item := select | body_item_ep1 | field_body_item
 
-field_body_item := field:path if_clause?
+; `alias:field_name COLON ...` before the plain-field alternative --
+; both start with the same field_name/path-leading tokens, so ordered
+; backtracking (same convention as `rational` before bare `INTEGER`)
+; is what makes trying the more specific shape first safe: no `COLON`
+; immediately after the name fails this alternative and falls through
+; to the plain field, consuming nothing extra.
+;
+; A space (or any non-identifier character) is required right after
+; the colon for this to parse as intended -- confirmed empirically,
+; not a style nicety: `subtotal:price` (no space) tokenizes as
+; `IDENT("subtotal")` + `ATOM(":price")` instead, since maximal munch
+; always prefers ATOM's longer match over a bare COLON whenever `:` is
+; immediately followed by an identifier character. `subtotal: price`
+; (the worked example's own spacing, lang_spec §9) parses correctly.
+; Not something fixable at the grammar level -- it's the lexer having
+; already committed to the wrong token before the parser ever runs.
+field_body_item := alias:field_name COLON expr:expression
+                  | field:path if_clause?
 
 ; Always `$<param>` specifically (lang_spec §5.3: "`<field> IF
-; $<param>`"), not a general boolean expression -- there's no general
-; expression grammar to reference one from yet anyway.
+; $<param>`"), not a general expression -- lang_spec's own body-item
+; grammar (§6) lists `IF` only on a plain `<field>`, never on
+; `<alias>: <expression>`, even now that a general expression grammar
+; exists.
 if_clause := KW_IF param:PARAM
 
 ; core's EP1(b)/(c)/(d) body-item extension point -- the same

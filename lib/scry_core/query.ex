@@ -61,7 +61,25 @@ defmodule ScryCore.Query do
   row entirely (not a `nil`-filled key) when the resolved parameter is
   falsy (`nil`/`false` -- nothing else is), the GraphQL `@include`/
   `@skip` equivalent this construct is modeled on.
+
+  `{:computed, alias, expr}` (lang_spec.md §9: `<alias>: <expression>`,
+  e.g. `subtotal: price * quantity`) is a body item computed from an
+  `expr()` -- a small arithmetic AST (`+ - * ** /`, lang_spec.md §5.10)
+  over literals, `{:field, path}`, and `{:param, name}`, the same two
+  placeholder tags `predicate()` already uses, evaluated by
+  `ScryCore.Executor` against the current row (and, via `{:field,
+  ...}`, an enclosing row too, the same scope-chain correlation a
+  `where` predicate already gets). No function calls yet (`sum(...)`
+  etc., lang_spec.md §5.8) -- those are aggregate functions tied to
+  `group by`/`having`, and neither is executed anywhere in this
+  codebase yet either, so there's nothing real to call them against.
   """
+
+  @type expr ::
+          term()
+          | {:field, [String.t()]}
+          | {:param, String.t()}
+          | {:arith, :add | :sub | :mul | :div | :pow, expr(), expr()}
 
   @type predicate ::
           {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match, path :: [String.t()],
@@ -74,6 +92,7 @@ defmodule ScryCore.Query do
   @type body_item ::
           {:field, [String.t()]}
           | {:field, [String.t()], {:param, String.t()}}
+          | {:computed, String.t(), expr()}
           | t()
           | {:variant, term()}
 
