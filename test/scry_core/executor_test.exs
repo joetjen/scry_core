@@ -29,8 +29,8 @@ defmodule ScryCore.ExecutorTest do
   @orders [%{"id" => 1, "total" => 75}]
 
   @products [
-    %{"name" => "Widget", "price" => 3},
-    %{"name" => "Gadget", "price" => 4}
+    %{"name" => "Widget", "price" => 3, "cost" => 4},
+    %{"name" => "Gadget", "price" => 4, "cost" => 2}
   ]
 
   @events [
@@ -345,5 +345,26 @@ defmodule ScryCore.ExecutorTest do
     }
 
     assert {:ok, []} = run(query)
+  end
+
+  test "a field-to-field comparison filters by comparing two fields of the same row" do
+    query = %Query{
+      source: ["products"],
+      wheres: [{:cmp, :gt, ["price"], {:field, ["cost"]}}],
+      select: [{:field, ["name"]}]
+    }
+
+    # Widget: price 3, cost 4 (not >) -- Gadget: price 4, cost 2 (>)
+    assert {:ok, [%{"name" => "Gadget"}]} = run(query)
+  end
+
+  test "~ against a right-hand side that resolves to a non-regex raises" do
+    query = %Query{
+      source: ["products"],
+      wheres: [{:cmp, :match, ["name"], {:field, ["cost"]}}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert_raise FunctionClauseError, fn -> run(query) end
   end
 end

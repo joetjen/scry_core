@@ -317,7 +317,21 @@ negation    := neg:KW_NOT? expr:comparison
 ; *literal* uses (`literal`'s own alternatives below) -- `in [...]`
 ; never needed its own bracket-handling, `list` already covers a
 ; possibly-empty, comma-separated `literal` sequence in brackets.
+;
+; `right_field:path`, a second alternative distinguished from
+; `right:literal` by capture-key name alone -- the same proven pattern
+; that already tells this rule's own `in` alternative apart from the
+; literal one, not something new. Lexically unambiguous: every one of
+; `literal`'s own alternatives starts with a quote/digit/`[`/`:`/`@`/a
+; refined `KW_*` token, never a plain `IDENT`/`ESCAPED_IDENT` the way
+; `path` always does, so there's no PEG ambiguity between the two
+; `right*` alternatives, no ordering sensitivity either (lang_spec §5.9:
+; "Every comparison's right-hand side may be another field path, not
+; only a literal" -- `WHERE price > cost` compares two fields of the
+; same row; this is also the mechanism a nested SELECT uses to
+; correlate to an enclosing row, ScryCore.Executor's own moduledoc).
 comparison := left:path op:comp_op right:literal
+            | left:path op:comp_op right_field:path
             | left:path in:KW_IN items:list
 
 comp_op := LE | GE | NOT_EQ | EQ | LT | GT | MATCH

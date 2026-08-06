@@ -31,11 +31,19 @@ defmodule ScryCore.Query do
   unexamined by core the same way `variant` itself is. A nested query
   is `t()` directly, not wrapped in its own tag -- already
   self-describing via its struct, unlike the other two shapes.
+
+  `predicate()`'s own `{:field, path}` (lang_spec.md §5.9: a
+  comparison's right-hand side may be another field path, not just a
+  literal) reuses the exact same tag `body_item()` uses above --
+  structurally identical in both places (a path naming a field), just
+  a predicate operand here instead of an output-projection marker.
+  Worth knowing they're the same tag in two conceptually distinct
+  positions, not two coincidentally-identical ones.
   """
 
   @type predicate ::
           {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match, path :: [String.t()],
-           literal :: term()}
+           rhs :: term() | {:field, [String.t()]}}
           | {:in, path :: [String.t()], values :: [term()]}
           | {:and, predicate(), predicate()}
           | {:or, predicate(), predicate()}

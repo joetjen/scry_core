@@ -277,6 +277,18 @@ defmodule ScryCore.Actions do
     end
   end
 
+  # Field-to-field: `{:field, path}` on the right, reusing the same tag
+  # Query.body_item/0 uses for a projected field -- structurally
+  # identical in both positions (a path naming a field), just a
+  # predicate operand here instead of an output marker.
+  def handle_rule(:comparison, %{left: left_cap, op: op_cap, right_field: right_cap}, ctx) do
+    with {:ok, path, ctx} <- left_cap.eval.(ctx),
+         {:ok, op_text, ctx} <- op_cap.eval.(ctx),
+         {:ok, right_path, ctx} <- right_cap.eval.(ctx) do
+      {:ok, {:cmp, op_from_text(op_text), path, {:field, right_path}}, ctx}
+    end
+  end
+
   def handle_rule(:comparison, %{left: left_cap, items: items_cap}, ctx) do
     with {:ok, path, ctx} <- left_cap.eval.(ctx),
          {:ok, items, ctx} <- items_cap.eval.(ctx) do

@@ -436,4 +436,16 @@ line two""" { name }))
   test "a malformed regex sigil surfaces as a parse error, not a raise", %{grammar: g} do
     assert {:error, _} = run(g, ~s(SELECT users WHERE name ~ @r/[a-z/ { name }))
   end
+
+  test "a field-to-field comparison (right-hand side is a path, not a literal)", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT products WHERE price > cost { name }))
+    assert q.wheres == [{:cmp, :gt, ["price"], {:field, ["cost"]}}]
+  end
+
+  test "a field-to-field comparison with a multi-segment right-hand path", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT orders WHERE user_id = users.id { id }))
+
+    assert q.wheres == [{:cmp, :eq, ["user_id"], {:field, ["users", "id"]}}]
+  end
 end

@@ -116,19 +116,31 @@ defmodule ScryCore.Executor do
 
   defp matches_all?(row, wheres), do: Enum.all?(wheres, &eval_predicate(&1, row))
 
-  # Not an ordering comparison (`term_order/2`/`compare/3` don't apply
-  # here) -- a regex match against a string field, typically a `@r/.../ `
-  # sigil (lang_spec.md §5.9). No defensive `is_binary/1` guard: a
-  # non-string field value raises a plain `FunctionClauseError` from
-  # `Regex.match?/2` itself, the same "not specially hardened against a
-  # type mismatch" posture every other predicate here already has (e.g.
-  # `<`/`>` against mismatched types already "works" via Erlang's own
-  # total term order without erroring, just not usefully).
-  defp eval_predicate({:cmp, :match, path, %Regex{} = regex}, row),
-    do: Regex.match?(regex, get_path(row, path))
+  # `rhs` resolves first (either the literal value as-is, or -- new,
+  # lang_spec.md §5.9 -- another field's value via `{:field, path}`,
+  # the same tag `Query.body_item/0` uses for a projected field),
+  # *then* dispatches on what it resolved to. Collapsing what used to
+  # be two separate clauses (one `:match`-only, one everything-else)
+  # into one resolve-then-dispatch shape closes a real gap the old
+  # split would otherwise have reopened for `{:field, ...}`: `WHERE
+  # name ~ some_field` where `some_field` resolves to a non-regex would
+  # have hit the generic `compare/3` clause -> `ordering_result(:match,
+  # _)`, an undocumented `FunctionClauseError`, instead of the same
+  # (deliberate, documented) crash `Regex.match?/2` itself already
+  # gives for a non-string *left*-hand value. No defensive
+  # `is_binary/1`/`is_struct/2` guard here either -- the same "not
+  # specially hardened against a type mismatch" posture every other
+  # predicate in this module already has (e.g. `<`/`>` against
+  # mismatched types already "works" via Erlang's own total term order
+  # without erroring, just not usefully).
+  defp eval_predicate({:cmp, op, path, rhs}, row) do
+    left = get_path(row, path)
 
-  defp eval_predicate({:cmp, op, path, literal}, row),
-    do: compare(op, get_path(row, path), literal)
+    case resolve_rhs(rhs, row) do
+      %Regex{} = regex when op == :match -> Regex.match?(regex, left)
+      right -> compare(op, left, right)
+    end
+  end
 
   defp eval_predicate({:in, path, values}, row), do: get_path(row, path) in values
   defp eval_predicate({:and, l, r}, row), do: eval_predicate(l, row) and eval_predicate(r, row)
@@ -195,6 +207,9 @@ defmodule ScryCore.Executor do
 
   defp get_path(row, [key]), do: Map.get(row, key)
   defp get_path(row, [key | rest]), do: row |> Map.get(key, %{}) |> get_path(rest)
+
+  defp resolve_rhs({:field, path}, row), do: get_path(row, path)
+  defp resolve_rhs(literal, _row), do: literal
 
   defp project_all(rows, select_items, engine_module, conn) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
