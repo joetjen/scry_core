@@ -60,24 +60,19 @@ defmodule ScryCore.GrammarCompose do
 
   alias Ichor.Error
 
-  alias Grammar.IR.{
-    AndPred,
-    Any,
-    Capture,
-    CharClass,
-    Choice,
-    Custom,
-    CustomLexeme,
-    Indent,
-    Literal,
-    NotPred,
-    Opt,
-    Plus,
-    Rep,
-    RuleRef,
-    Seq,
-    Star
-  }
+  # The only Grammar.IR node type this module still needs to name
+  # directly -- strip_meta/1's own comment explains why the other 15
+  # node types this module used to alias/pattern-match by name (one
+  # `defp strip_meta(%NodeType{...})` clause each) no longer appear
+  # here at all: struct-literal syntax for any of them needs the target
+  # module's own definition at *compile* time, which breaks compiling
+  # scry_core as a dependency for anyone who never touches grammar
+  # composition. `Choice` survives only as a plain atom reference
+  # (`is_struct(choice, Choice)`, `struct(Choice, ...)`), never struct-
+  # literal syntax -- an `alias` directive itself is pure compile-time
+  # name substitution, needing no more from `Grammar.IR.Choice` than
+  # any other bare atom would.
+  alias Grammar.IR.Choice
 
   @doc """
   Merges `core` (an `%Aether.Grammar{}`, not yet run through
@@ -97,7 +92,8 @@ defmodule ScryCore.GrammarCompose do
   """
   @spec merge(Aether.Grammar.t(), Aether.Grammar.t()) ::
           {:ok, Aether.Grammar.t()} | {:error, Error.t()}
-  def merge(%Aether.Grammar{} = core, %Aether.Grammar{} = fragment) do
+  def merge(core, fragment)
+      when is_struct(core, Aether.Grammar) and is_struct(fragment, Aether.Grammar) do
     with :ok <- check_skip_match(core, fragment),
          {:ok, tokens} <- merge_maps(core.tokens, fragment.tokens, "token"),
          {:ok, rules} <- merge_maps(core.rules, fragment.rules, "rule", extension_points()) do
@@ -194,13 +190,13 @@ defmodule ScryCore.GrammarCompose do
   # (the same fragment merged twice, or two fragments that happen to
   # define the identical thing) rather than adding dead PEG alternatives
   # Grammar.Analysis's own duplicate-alternative lint would flag anyway.
-  defp union_rule(%Choice{exprs: existing} = choice, new_def) do
+  defp union_rule(choice, new_def) when is_struct(choice, Choice) do
     new_stripped = strip_meta(new_def)
 
-    if Enum.any?(existing, &(strip_meta(&1) == new_stripped)) do
+    if Enum.any?(choice.exprs, &(strip_meta(&1) == new_stripped)) do
       choice
     else
-      %{choice | exprs: existing ++ [new_def]}
+      %{choice | exprs: choice.exprs ++ [new_def]}
     end
   end
 
@@ -208,47 +204,42 @@ defmodule ScryCore.GrammarCompose do
     if strip_meta(existing_def) == strip_meta(new_def) do
       existing_def
     else
-      %Choice{exprs: [existing_def, new_def], meta: nil}
+      struct(Choice, exprs: [existing_def, new_def], meta: nil)
     end
   end
 
   # Every Grammar.IR node carries source-span metadata that naturally
   # differs between two files even when the matched shape is identical
-  # -- stripped before the equality check in merge_maps/3. Grammar.IR
-  # exposes children/1 for reading but nothing generic for rebuilding a
-  # node with new children, so this covers each of the 16 node types by
-  # hand rather than guessing at a shortcut.
-  defp strip_meta(%Seq{exprs: exprs}), do: %Seq{exprs: Enum.map(exprs, &strip_meta/1), meta: nil}
+  # -- stripped before the equality check in merge_maps/3. Generic
+  # (recurse into any struct/list-of-structs field, zero `:meta`, leave
+  # every other scalar field -- a module name, a rule name, `min`/`max`,
+  # a `CharClass`'s own `ranges`, ... -- untouched), *not* one hand-
+  # written clause per Grammar.IR node type as an earlier version of
+  # this had: `%Module{...}` struct-literal syntax (construction *or*
+  # pattern) requires the target module's own struct definition at
+  # *compile* time, which none of Grammar.IR's modules can be here --
+  # this file's own moduledoc/`merge/2`'s own doc explain why (`ichor`
+  # is a genuine compile-time dependency of *whoever calls* `merge/2`,
+  # never of `scry_core`'s own `lib/`, which has to compile cleanly
+  # even for a downstream package -- `scry_test_engine_core`, a real
+  # future adapter -- that never touches grammar composition at all).
+  # `struct/2`, `Map.from_struct/1`, `is_struct/1`, and a bare `term.
+  # __struct__` are all ordinary runtime-dispatched functions -- no
+  # compile-time struct knowledge needed for any of them, confirmed via
+  # a clean rebuild of a downstream consumer (this file's own earlier,
+  # exhaustive version failed exactly that check).
+  defp strip_meta(term) when is_struct(term) do
+    term
+    |> Map.from_struct()
+    |> Enum.into(%{}, fn
+      {:meta, _} -> {:meta, nil}
+      {key, value} -> {key, strip_meta(value)}
+    end)
+    |> then(&struct(term.__struct__, &1))
+  end
 
-  defp strip_meta(%Choice{exprs: exprs}),
-    do: %Choice{exprs: Enum.map(exprs, &strip_meta/1), meta: nil}
-
-  defp strip_meta(%Star{expr: expr}), do: %Star{expr: strip_meta(expr), meta: nil}
-  defp strip_meta(%Plus{expr: expr}), do: %Plus{expr: strip_meta(expr), meta: nil}
-  defp strip_meta(%Opt{expr: expr}), do: %Opt{expr: strip_meta(expr), meta: nil}
-
-  defp strip_meta(%Rep{expr: expr, min: min, max: max}),
-    do: %Rep{expr: strip_meta(expr), min: min, max: max, meta: nil}
-
-  defp strip_meta(%AndPred{expr: expr}), do: %AndPred{expr: strip_meta(expr), meta: nil}
-  defp strip_meta(%NotPred{expr: expr}), do: %NotPred{expr: strip_meta(expr), meta: nil}
-
-  defp strip_meta(%Indent{expr: expr, kind: kind}),
-    do: %Indent{expr: strip_meta(expr), kind: kind, meta: nil}
-
-  defp strip_meta(%Capture{name: name, expr: expr}),
-    do: %Capture{name: name, expr: strip_meta(expr), meta: nil}
-
-  defp strip_meta(%Literal{value: value}), do: %Literal{value: value, meta: nil}
-  defp strip_meta(%CharClass{ranges: ranges}), do: %CharClass{ranges: ranges, meta: nil}
-  defp strip_meta(%Any{}), do: %Any{meta: nil}
-  defp strip_meta(%RuleRef{name: name}), do: %RuleRef{name: name, meta: nil}
-
-  defp strip_meta(%Custom{module: m, function: f, deps: d, nullable: n, leading: l}),
-    do: %Custom{module: m, function: f, deps: d, nullable: n, leading: l, meta: nil}
-
-  defp strip_meta(%CustomLexeme{module: m, function: f, deps: d, nullable: n}),
-    do: %CustomLexeme{module: m, function: f, deps: d, nullable: n, meta: nil}
+  defp strip_meta(list) when is_list(list), do: Enum.map(list, &strip_meta/1)
+  defp strip_meta(other), do: other
 
   # Naive `core_order ++ fragment_order` would put every fragment token
   # after ALL of core's, including :IDENT -- meaning any fragment
