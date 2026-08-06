@@ -166,6 +166,99 @@ defmodule ScryCore.RationalTest do
         assert Rational.pow(a, exponent) == expected
       end
     end
+
+    test "a float base preserves its own inexactness through zero exponent, not silently exact" do
+      assert Rational.pow(2.0, 0) === 1.0
+    end
+  end
+
+  describe "to_float/1 and from_float/1" do
+    test "to_float converts an integer or a %Rational{} to an ordinary float" do
+      assert Rational.to_float(4) === 4.0
+      assert Rational.to_float(Rational.new(1, 4)) === 0.25
+    end
+
+    test "to_float is the identity on an already-inexact value" do
+      assert Rational.to_float(3.14) === 3.14
+    end
+
+    test "from_float recovers the exact IEEE-754 value of a float, always bounded" do
+      assert Rational.from_float(0.5) == Rational.new(1, 2)
+      assert Rational.from_float(2.0) == 2
+
+      # 3.14 has no exact decimal/binary-fraction equivalent -- this is
+      # the double's own exact bit-pattern value, not the "intended"
+      # 157/50 a DECIMAL literal's own handle_token would produce (a
+      # different, unrelated conversion path -- lang_spec.md §4's own
+      # "decimal literals parse directly to exact rationals" applies to
+      # *literal* text, not to converting an already-inexact float).
+      assert %Rational{} = Rational.from_float(3.14)
+    end
+
+    test "negative zero has no exact rational equivalent -- from_float(-0.0) is plain 0" do
+      assert Rational.from_float(-0.0) === 0
+    end
+
+    # `==`, not `===` -- `-0.0` and `0.0` are bit-distinct IEEE-754
+    # values but the same real number (the rationals have no such thing
+    # as a signed zero), so `from_float(-0.0)` correctly produces exact
+    # `0`, and `to_float(0)` correctly produces `0.0`, not `-0.0` --
+    # `==` accepts that equivalence, confirmed empirically (a genuine
+    # edge case caught by the property test itself) rather than assumed.
+    property "from_float/1 then to_float/1 round-trips exactly for any float" do
+      check all(f <- float()) do
+        assert Rational.to_float(Rational.from_float(f)) == f
+      end
+    end
+  end
+
+  describe "contagion -- mixing exact and inexact yields inexact" do
+    test "add/sub/mul/div each return a float when either operand is a float" do
+      assert Rational.add(3, 1.5) === 4.5
+      assert Rational.sub(1.5, 1) === 0.5
+      assert Rational.mul(2, 1.5) === 3.0
+      assert Rational.div(3.0, 2) === 1.5
+    end
+
+    test "contagion applies with a %Rational{} operand too, not just a plain integer" do
+      assert Rational.add(Rational.new(1, 2), 1.0) === 1.5
+      assert Rational.mul(Rational.new(1, 4), 4.0) === 1.0
+    end
+
+    test "float + float stays a float, ordinary Kernel arithmetic" do
+      assert Rational.add(1.5, 2.5) === 4.0
+    end
+
+    test "div raises ArithmeticError for a zero float divisor, the same class of error new/2 already raises for an exact zero denominator" do
+      assert_raise ArithmeticError, fn -> Rational.div(1.0, 0.0) end
+    end
+
+    property "add/sub/mul/div always return a float() when either operand is a float()" do
+      check all(
+              numerator <- integer(-100..100),
+              denominator <- integer(1..100),
+              f <- float()
+            ) do
+        exact = Rational.new(numerator, denominator)
+
+        assert is_float(Rational.add(exact, f))
+        assert is_float(Rational.sub(exact, f))
+        assert is_float(Rational.mul(exact, f))
+      end
+    end
+  end
+
+  describe "compare/2 with a float argument" do
+    test "compares a float exactly against an integer or %Rational{}, not via lossy float comparison" do
+      assert Rational.compare(0.5, Rational.new(1, 2)) == :eq
+      assert Rational.compare(1.5, 1) == :gt
+      assert Rational.compare(1, 1.5) == :lt
+    end
+
+    test "float vs float still compares correctly" do
+      assert Rational.compare(1.0, 2.0) == :lt
+      assert Rational.compare(2.0, 2.0) == :eq
+    end
   end
 
   # Independent of ScryCore.Rational's own implementation -- restates

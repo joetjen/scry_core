@@ -15,12 +15,31 @@ defmodule ScryCore.Rational do
   `new/2`'s own construct-and-reduce, so the closure and collapse-to-
   integer properties `new/2` already documents apply automatically to
   every arithmetic result too, not separately re-derived per operator.
-  Still deliberately incomplete: `sqrt`'s per-input exactness recovery
-  and float-on-ingest conversion (lang_spec.md §4's "Inexact (float)
-  coexistence" model) aren't here -- nothing in this codebase evaluates
-  `sqrt` or ingests row data through a conversion step yet, so there's
-  nothing real to build either against. That's future work, not an
-  oversight.
+
+  **Inexact (float) coexistence (lang_spec.md §4).** `to_float/1`/
+  `from_float/1` are the two conversion directions -- `from_float/1` via
+  `Float.ratio/1` (stdlib), the exact rational value of an IEEE-754
+  double, always exists and always bounded (a fixed-width mantissa has a
+  fixed-size exact rational form), per lang_spec's own "conversion on
+  ingest" framing. `add/2`/`sub/2`/`mul/2`/`div/2`/`pow/2` each gain a
+  leading clause for "either operand is already a native `float()`" --
+  lang_spec's own **contagion** rule, *"mixing exact and inexact in one
+  operation yields inexact"*: the *other* operand converts to a float
+  too (`to_float/1`), the whole operation happens in ordinary Kernel
+  float arithmetic, and the result is a plain `float()`, never routed
+  through `new/2` (which would silently make an inexact result exact
+  again -- exactly what contagion forbids). `compare/2` is deliberately
+  *not* contagion the same way -- a float argument there converts to
+  *its own* exact value (`from_float/1`) before the existing exact
+  cross-multiplication comparison, since a comparison result isn't a
+  "value" contagion has anything to say about, and exact comparison is
+  strictly more correct than comparing two lossy floats would be.
+
+  Still deliberately incomplete: `sqrt`'s own per-input exactness
+  recovery (lang_spec.md §4: exact only when both parts of a reduced
+  `p/q` are perfect squares, inexact otherwise) isn't here -- nothing in
+  this codebase evaluates `sqrt` yet, so there's nothing real to build
+  that against. That's future work, not an oversight.
   """
 
   # `div/2` is this module's own exact-rational division (lang_spec
@@ -61,11 +80,36 @@ defmodule ScryCore.Rational do
   end
 
   @doc """
-  Exact three-way comparison between any mix of `t()` and plain
-  `integer()` -- cross-multiplication (`an * bd` vs `bn * ad`), never a
-  float conversion, so it stays exact regardless of magnitude.
+  The exact rational value of a native `float()` (lang_spec.md §4:
+  "conversion on ingest") -- `Float.ratio/1` (stdlib) always succeeds,
+  always bounded, since an IEEE-754 double's fixed-width mantissa has a
+  fixed-size exact rational form.
   """
-  @spec compare(integer() | t(), integer() | t()) :: :lt | :eq | :gt
+  @spec from_float(float()) :: integer() | t()
+  def from_float(f) when is_float(f) do
+    {numerator, denominator} = Float.ratio(f)
+    new(numerator, denominator)
+  end
+
+  @doc "The inexact `float()` value of an exact `t()`/`integer()` -- ordinary lossy division."
+  @spec to_float(integer() | t() | float()) :: float()
+  def to_float(f) when is_float(f), do: f
+  def to_float(%__MODULE__{numerator: n, denominator: d}), do: n / d
+  def to_float(n) when is_integer(n), do: n / 1
+
+  @doc """
+  Three-way comparison between any mix of `t()`, plain `integer()`, and
+  `float()`. A `float()` argument converts to *its own* exact value
+  first (`from_float/1`) -- comparison is deliberately not contagion the
+  way arithmetic below is (see this module's own moduledoc) -- so the
+  comparison itself always stays exact, cross-multiplication (`an * bd`
+  vs `bn * ad`), never lossy float comparison.
+  """
+  @spec compare(integer() | t() | float(), integer() | t() | float()) :: :lt | :eq | :gt
+  def compare(a, b) when is_float(a) or is_float(b) do
+    compare(exactify(a), exactify(b))
+  end
+
   def compare(a, b) do
     {an, ad} = parts(a)
     {bn, bd} = parts(b)
@@ -77,24 +121,36 @@ defmodule ScryCore.Rational do
     end
   end
 
-  @doc "Exact addition, closed over the rationals -- `an/ad + bn/bd = (an*bd + bn*ad) / (ad*bd)`."
-  @spec add(integer() | t(), integer() | t()) :: integer() | t()
+  @doc """
+  Addition. Exact and closed over the rationals for exact inputs
+  (`an/ad + bn/bd = (an*bd + bn*ad) / (ad*bd)`) -- but contagion
+  (lang_spec.md §4, this module's own moduledoc) applies the moment
+  either operand is already an inexact `float()`: the result is a plain
+  `float()` then, not routed through `new/2`.
+  """
+  @spec add(integer() | t() | float(), integer() | t() | float()) :: integer() | t() | float()
+  def add(a, b) when is_float(a) or is_float(b), do: to_float(a) + to_float(b)
+
   def add(a, b) do
     {an, ad} = parts(a)
     {bn, bd} = parts(b)
     new(an * bd + bn * ad, ad * bd)
   end
 
-  @doc "Exact subtraction, closed over the rationals."
-  @spec sub(integer() | t(), integer() | t()) :: integer() | t()
+  @doc "Subtraction -- same contagion rule as `add/2`."
+  @spec sub(integer() | t() | float(), integer() | t() | float()) :: integer() | t() | float()
+  def sub(a, b) when is_float(a) or is_float(b), do: to_float(a) - to_float(b)
+
   def sub(a, b) do
     {an, ad} = parts(a)
     {bn, bd} = parts(b)
     new(an * bd - bn * ad, ad * bd)
   end
 
-  @doc "Exact multiplication, closed over the rationals."
-  @spec mul(integer() | t(), integer() | t()) :: integer() | t()
+  @doc "Multiplication -- same contagion rule as `add/2`."
+  @spec mul(integer() | t() | float(), integer() | t() | float()) :: integer() | t() | float()
+  def mul(a, b) when is_float(a) or is_float(b), do: to_float(a) * to_float(b)
+
   def mul(a, b) do
     {an, ad} = parts(a)
     {bn, bd} = parts(b)
@@ -102,28 +158,42 @@ defmodule ScryCore.Rational do
   end
 
   @doc """
-  Exact division, closed over the rationals (lang_spec.md §5.10: "`/` =
-  exact rational division"). Raises `ArithmeticError` for a zero
-  divisor, via the same `new/2` zero-denominator guard every other
-  construction path already goes through -- not a separate check here.
+  Division (lang_spec.md §5.10: "`/` = exact rational division") -- same
+  contagion rule as `add/2`. Raises `ArithmeticError` for a zero
+  divisor, via the same `new/2` zero-denominator guard every other exact
+  construction path already goes through (a zero float divisor instead
+  raises Kernel's own `ArithmeticError` for `/0.0`, the same class of
+  error for the same reason) -- not a separate check here either way.
   """
-  @spec div(integer() | t(), integer() | t()) :: integer() | t()
+  @spec div(integer() | t() | float(), integer() | t() | float()) :: integer() | t() | float()
+  def div(a, b) when is_float(a) or is_float(b), do: to_float(a) / to_float(b)
+
   def div(a, b) do
     {an, ad} = parts(a)
     {bn, bd} = parts(b)
     new(an * bd, ad * bn)
   end
 
+  defp exactify(f) when is_float(f), do: from_float(f)
+  defp exactify(x), do: x
+
   @doc """
-  Exact exponentiation with an **integer** exponent, positive, negative,
-  or zero (lang_spec.md §5.10: "`**`(integer exponent)... closed over
-  the rationals" -- the rationals aren't closed under an arbitrary
-  rational exponent, e.g. `sqrt`, which is exactly why the exponent is
+  Exponentiation with an **integer** exponent, positive, negative, or
+  zero (lang_spec.md §5.10: "`**`(integer exponent)... closed over the
+  rationals" -- the rationals aren't closed under an arbitrary rational
+  exponent, e.g. `sqrt`, which is exactly why the exponent is
   constrained to integers here, not a limitation of this function
-  alone). A negative exponent is the reciprocal of the positive one; any
-  nonzero base to the power `0` is `1`, the ordinary convention.
+  alone; unrelated to contagion -- a `float()` base is just as
+  constrained). A negative exponent is the reciprocal of the positive
+  one; any nonzero base to the power `0` is `1` (or `1.0`, for a
+  `float()` base -- preserving contagion downstream, not silently
+  collapsing an inexact value back to an exact one). Positive/negative
+  exponents already inherit contagion for free through `mul/2`/`div/2`
+  below (a `float()` base makes every intermediate product a `float()`
+  too), so only the `0` case needs its own explicit branch.
   """
-  @spec pow(integer() | t(), integer()) :: integer() | t()
+  @spec pow(integer() | t() | float(), integer()) :: integer() | t() | float()
+  def pow(base, 0) when is_float(base), do: 1.0
   def pow(_base, 0), do: 1
 
   def pow(base, exponent) when is_integer(exponent) and exponent > 0 do

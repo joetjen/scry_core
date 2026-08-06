@@ -198,6 +198,36 @@ defmodule ScryCore.Executor do
   keeps calling `run/6` directly, unchanged; only `run/4`'s own public
   entry and `fetch_rows/6`'s `WITH`-resolution clause go through
   `run_any/6`.
+
+  **Explicit casts (lang_spec.md §5.8, `string`/`int`/`exact`/
+  `inexact`).** A real, non-aggregate function call -- valid per-row,
+  anywhere any other `expr()` is, unlike `sum`/`avg`/`count`/`min`/`max`
+  (`@aggregate_names`), which only ever mean anything across a group's
+  own member rows. `aggregate_query?/1`'s own call-detection
+  (`*_has_aggregate_call?`) checks specifically for `@aggregate_names`,
+  not "any call" -- narrowed for exactly this reason: before casts
+  existed, *any* call forced grouped execution, since no non-aggregate
+  call existed yet to tell apart from an aggregate one; left unnarrowed,
+  an ordinary `SELECT products { p: string(price) }` would have wrongly
+  collapsed into one flat-aggregate-shaped row instead of projecting one
+  row per product. `apply_cast/2` is the shared dispatch, called from
+  `resolve_rhs/4`/`resolve_predicate_lhs/4` (the per-row path) and
+  `resolve_group_rhs/4`/`resolve_group_lhs/4` (the grouped path) alike,
+  each already having resolved a cast's own arguments through *that call
+  site's own* resolver first -- so a cast wrapping an aggregate
+  (`string(sum(total))`) or a grouped field both work correctly for
+  free, via ordinary recursion, not special-cased.
+
+  `inexact(x)` is the one place a real native `float()` ever enters this
+  whole pipeline -- `ScryCore.Rational`'s own moduledoc has the
+  contagion/comparison rules that follow from that (mixing exact and
+  inexact in one arithmetic operation yields inexact; comparison instead
+  converts a float to its own exact value first, never the reverse).
+  `term_order/2`'s two `%Rational{}`-specific guards widen to accept a
+  `float()` argument accordingly -- closing a gap this module's own
+  comment used to flag as real-but-unimplemented ("a native float there
+  isn't yet covered"), now that `inexact(...)` is what actually produces
+  one.
   """
 
   alias ScryCore.{CombinedQuery, EngineBehaviour, Query, Rational}
@@ -453,48 +483,72 @@ defmodule ScryCore.Executor do
     |> Enum.map(&Enum.reverse(Map.fetch!(groups, &1)))
   end
 
+  # lang_spec.md §5.8's real aggregates -- the only names that ever
+  # trigger grouped execution below. A *cast* (`string`/`int`/`exact`/
+  # `inexact`) is a real, non-aggregate function call and must NOT
+  # trigger it: an ordinary per-row `SELECT products { p: string(price)
+  # }` needs to stay on the per-row path (`run_plain/6`) and produce one
+  # row per product, not collapse into a single flat-aggregate-shaped
+  # row the way this detection used to treat *any* call as a signal for
+  # (a real, since-fixed bug -- found while adding casts, not present
+  # before them, since no non-aggregate call existed to expose it).
+  @aggregate_names ["sum", "avg", "count", "min", "max"]
+
+  # lang_spec.md §5.8's 4 explicit casts -- valid per-row (unlike
+  # `@aggregate_names`, which only ever mean something across a group's
+  # own member rows), dispatched via `apply_cast/2`.
+  @cast_names ["string", "int", "exact", "inexact"]
+
   # A query needs grouped execution when it either has a real `GROUP BY`,
-  # or uses a function call anywhere in its own `select`/`havings` --
-  # *any* call, not just the 5 real aggregates this module actually
-  # executes (`eval_aggregate/5`'s own comment has the reasoning: an
-  # unsupported/unknown function name still needs to land in the grouped
-  # path to get a clear error there, rather than silently falling through
-  # to `run_plain/6`'s per-row `resolve_rhs/4`, which has no clause for
-  # `{:call, ...}` at all and would crash with an opaque
-  # `FunctionClauseError` instead).
+  # or calls one of `@aggregate_names` anywhere in its own `select`/
+  # `havings`. A call to anything else (a cast, or a genuinely unknown
+  # name) does *not* trigger this -- `resolve_rhs/4`/`resolve_predicate_
+  # lhs/3` below handle those directly on the per-row path now, with
+  # their own clear errors for an unknown name.
   defp aggregate_query?(query),
     do:
-      query.group_bys != [] or select_has_call?(query.select) or havings_have_call?(query.havings)
+      query.group_bys != [] or select_has_aggregate_call?(query.select) or
+        havings_have_aggregate_call?(query.havings)
 
-  defp select_has_call?(items), do: Enum.any?(items, &body_item_has_call?/1)
+  defp select_has_aggregate_call?(items), do: Enum.any?(items, &body_item_has_aggregate_call?/1)
 
-  defp body_item_has_call?({:computed, _alias, expr}), do: expr_has_call?(expr)
-  defp body_item_has_call?(_other), do: false
+  defp body_item_has_aggregate_call?({:computed, _alias, expr}),
+    do: expr_has_aggregate_call?(expr)
 
-  defp havings_have_call?(havings), do: Enum.any?(havings, &predicate_has_call?/1)
+  defp body_item_has_aggregate_call?(_other), do: false
 
-  defp predicate_has_call?({:cmp, _op, lhs, rhs}), do: lhs_has_call?(lhs) or expr_has_call?(rhs)
+  defp havings_have_aggregate_call?(havings),
+    do: Enum.any?(havings, &predicate_has_aggregate_call?/1)
 
-  defp predicate_has_call?({:in, lhs, values}),
-    do: lhs_has_call?(lhs) or Enum.any?(values, &expr_has_call?/1)
+  defp predicate_has_aggregate_call?({:cmp, _op, lhs, rhs}),
+    do: lhs_has_aggregate_call?(lhs) or expr_has_aggregate_call?(rhs)
 
-  defp predicate_has_call?({:and, l, r}), do: predicate_has_call?(l) or predicate_has_call?(r)
-  defp predicate_has_call?({:or, l, r}), do: predicate_has_call?(l) or predicate_has_call?(r)
-  defp predicate_has_call?({:not, p}), do: predicate_has_call?(p)
+  defp predicate_has_aggregate_call?({:in, lhs, values}),
+    do: lhs_has_aggregate_call?(lhs) or Enum.any?(values, &expr_has_aggregate_call?/1)
 
-  defp lhs_has_call?({:call, _name, _args}), do: true
-  defp lhs_has_call?(path) when is_list(path), do: false
+  defp predicate_has_aggregate_call?({:and, l, r}),
+    do: predicate_has_aggregate_call?(l) or predicate_has_aggregate_call?(r)
 
-  defp expr_has_call?({:call, _name, _args}), do: true
-  defp expr_has_call?({:arith, _op, l, r}), do: expr_has_call?(l) or expr_has_call?(r)
+  defp predicate_has_aggregate_call?({:or, l, r}),
+    do: predicate_has_aggregate_call?(l) or predicate_has_aggregate_call?(r)
 
-  defp expr_has_call?({:when, clauses, else_expr}) do
+  defp predicate_has_aggregate_call?({:not, p}), do: predicate_has_aggregate_call?(p)
+
+  defp lhs_has_aggregate_call?({:call, name, _args}), do: name in @aggregate_names
+  defp lhs_has_aggregate_call?(path) when is_list(path), do: false
+
+  defp expr_has_aggregate_call?({:call, name, _args}), do: name in @aggregate_names
+
+  defp expr_has_aggregate_call?({:arith, _op, l, r}),
+    do: expr_has_aggregate_call?(l) or expr_has_aggregate_call?(r)
+
+  defp expr_has_aggregate_call?({:when, clauses, else_expr}) do
     Enum.any?(clauses, fn {predicate, expr} ->
-      predicate_has_call?(predicate) or expr_has_call?(expr)
-    end) or expr_has_call?(else_expr)
+      predicate_has_aggregate_call?(predicate) or expr_has_aggregate_call?(expr)
+    end) or expr_has_aggregate_call?(else_expr)
   end
 
-  defp expr_has_call?(_other), do: false
+  defp expr_has_aggregate_call?(_other), do: false
 
   # Sorts *source* rows (`get_path/3` against the same row shape `where`
   # filters against), before projection -- not the projected output.
@@ -558,7 +612,7 @@ defmodule ScryCore.Executor do
   # mismatched types already "works" via Erlang's own total term order
   # without erroring, just not usefully).
   defp eval_predicate({:cmp, op, lhs, rhs}, row, scope, params) do
-    left = resolve_predicate_lhs(lhs, row, scope)
+    left = resolve_predicate_lhs(lhs, row, scope, params)
 
     case resolve_rhs(rhs, row, scope, params) do
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
@@ -570,7 +624,7 @@ defmodule ScryCore.Executor do
   # side is -- `in [$a, $b]`/`in [orders.status]` work for exactly the
   # same reason `= $a`/`= orders.status` do, not a separate mechanism.
   defp eval_predicate({:in, lhs, values}, row, scope, params) do
-    resolve_predicate_lhs(lhs, row, scope) in Enum.map(
+    resolve_predicate_lhs(lhs, row, scope, params) in Enum.map(
       values,
       &resolve_rhs(&1, row, scope, params)
     )
@@ -587,40 +641,50 @@ defmodule ScryCore.Executor do
 
   # `predicate()`'s own lhs is `[String.t()] | {:call, ...}`
   # (`ScryCore.Query`'s own moduledoc) -- a bare path resolves exactly as
-  # it always has. A call is a real, purpose-written error here, not a
-  # crash: `Query.expr()`'s own `{:call, ...}` only has real execution
+  # it always has. An aggregate call (`@aggregate_names`) is a real,
+  # purpose-written error here, not a crash: it only has real execution
   # semantics inside a grouped/aggregate context (`resolve_group_lhs/4`,
   # `run_grouped/7`), which this function -- `matches_all?/4`'s own
   # per-row `WHERE`/`WHEN` predicate evaluation -- never is. Without this
   # clause, `WHEN sum(x) > 1 THEN ...` used per-row would instead hit
   # `get_path/3`'s own missing clause for a 2-tuple path and raise an
   # opaque `FunctionClauseError` with no indication of what actually went
-  # wrong.
-  defp resolve_predicate_lhs({:call, name, _args}, _row, _scope) do
+  # wrong. A *cast* (`string`/`int`/`exact`/`inexact`) is a genuinely
+  # different case -- it's valid per-row, same as any other expression --
+  # so its own args resolve via `resolve_rhs/4` (this row, ordinary
+  # correlation/param resolution) and the cast applies to the result.
+  defp resolve_predicate_lhs({:call, name, _args}, _row, _scope, _params)
+       when name in @aggregate_names do
     raise ArgumentError,
           "#{name}(...) is an aggregate function -- only valid inside GROUP BY/HAVING or a " <>
             "flat-aggregate SELECT (lang_spec.md §5.2/§5.8), not an ordinary per-row predicate"
   end
 
-  defp resolve_predicate_lhs(path, row, scope) when is_list(path), do: get_path(row, scope, path)
+  defp resolve_predicate_lhs({:call, name, args}, row, scope, params) do
+    apply_cast(name, Enum.map(args, &resolve_rhs(&1, row, scope, params)))
+  end
+
+  defp resolve_predicate_lhs(path, row, scope, _params) when is_list(path),
+    do: get_path(row, scope, path)
 
   defp compare(op, a, b), do: ordering_result(op, term_order(a, b))
 
-  # `%Rational{}`/integer are compared exactly (cross-multiplication via
-  # Rational.compare/2, ScryCore.Rational's own moduledoc) rather than
-  # through Kernel's `< >`, which order structs by their raw field
-  # values -- structurally consistent, but not numerically meaningful
-  # for two arbitrary rationals (e.g. comparing 1/2 against 2/3 by field
-  # order is not the same as comparing their magnitudes). A row's own
-  # field value is plain data straight from an engine's `fetch/2`, so it
-  # only ever needs this treatment when it's already an integer -- a
-  # native float there isn't yet covered (lang_spec.md §4's "conversion
-  # on ingest" model has no adapter-facing hook yet, a real, separate
-  # gap, not something this clause papers over).
-  defp term_order(%Rational{} = a, b) when is_integer(b) or is_struct(b, Rational),
+  # `%Rational{}`/integer/`float()` are compared exactly (cross-
+  # multiplication via Rational.compare/2, ScryCore.Rational's own
+  # moduledoc -- a `float()` argument there converts to *its own* exact
+  # value first, never the reverse) rather than through Kernel's `< >`,
+  # which order structs by their raw field values -- structurally
+  # consistent, but not numerically meaningful for two arbitrary
+  # rationals (e.g. comparing 1/2 against 2/3 by field order is not the
+  # same as comparing their magnitudes). The `is_float(b)` half of this
+  # closes a gap this comment used to flag as real-but-unfixed ("a
+  # native float there isn't yet covered") -- an `inexact(...)` cast is
+  # what actually introduces one now.
+  defp term_order(%Rational{} = a, b) when is_integer(b) or is_struct(b, Rational) or is_float(b),
     do: Rational.compare(a, b)
 
-  defp term_order(a, %Rational{} = b) when is_integer(a), do: Rational.compare(a, b)
+  defp term_order(a, %Rational{} = b) when is_integer(a) or is_float(a),
+    do: Rational.compare(a, b)
 
   # Same problem, a different struct: `%DateTime{}`/`%NaiveDateTime{}`
   # store a microsecond field as a `{value, precision}` tuple, so two
@@ -710,7 +774,11 @@ defmodule ScryCore.Executor do
   # handles. Always routed through `ScryCore.Rational`'s own functions,
   # never Kernel `+ - * /` directly, so a chain of operations stays
   # exact throughout (lang_spec.md §4: "arithmetic never drops to float
-  # internally") instead of only the leaves being exact.
+  # internally") *unless* an `inexact(...)` cast put a real `float()`
+  # somewhere in the tree -- `Rational`'s own contagion rule then
+  # applies automatically, from that point on, since every operator
+  # routes through the same functions either way (`ScryCore.Rational`'s
+  # own moduledoc).
   defp resolve_rhs({:arith, op, left_expr, right_expr}, row, scope, params) do
     left = resolve_rhs(left_expr, row, scope, params)
     right = resolve_rhs(right_expr, row, scope, params)
@@ -732,6 +800,24 @@ defmodule ScryCore.Executor do
       {_predicate, then_expr} -> resolve_rhs(then_expr, row, scope, params)
       nil -> resolve_rhs(else_expr, row, scope, params)
     end
+  end
+
+  # An aggregate call is a real, purpose-written error here (the same
+  # message `resolve_predicate_lhs/4`'s own equivalent clause gives) --
+  # `sum`/etc. only mean something across a group's member rows, which
+  # this function -- resolving an expression against one already-fetched
+  # row -- never has access to. A *cast* resolves its own args against
+  # this same row/scope/params (ordinary recursion through this same
+  # function) and applies via `apply_cast/2`, the same dispatch
+  # `resolve_group_rhs/4` below shares.
+  defp resolve_rhs({:call, name, _args}, _row, _scope, _params) when name in @aggregate_names do
+    raise ArgumentError,
+          "#{name}(...) is an aggregate function -- only valid inside GROUP BY/HAVING or a " <>
+            "flat-aggregate SELECT (lang_spec.md §5.2/§5.8), not an ordinary per-row expression"
+  end
+
+  defp resolve_rhs({:call, name, args}, row, scope, params) do
+    apply_cast(name, Enum.map(args, &resolve_rhs(&1, row, scope, params)))
   end
 
   defp resolve_rhs(literal, _row, _scope, _params), do: literal
@@ -789,14 +875,33 @@ defmodule ScryCore.Executor do
   defp eval_group_predicate({:not, p}, member_rows, scope, params),
     do: not eval_group_predicate(p, member_rows, scope, params)
 
-  defp resolve_group_lhs({:call, name, args}, member_rows, scope, params),
-    do: eval_aggregate(name, args, member_rows, scope, params)
+  # `name in @aggregate_names` -- a real aggregate reduces across
+  # `member_rows` (`eval_aggregate/5`, unchanged); anything else (a
+  # cast) resolves its own args the *group*-aware way (recursion through
+  # this same function, so a cast wrapping an aggregate or a grouped
+  # field both work for free -- `string(sum(total))` resolves `sum
+  # (total)` via the aggregate branch, `string(region)` resolves
+  # `region` against the representative row, either way ending up as a
+  # single already-resolved value `apply_cast/2` then applies to) and
+  # applies via the same `apply_cast/2` the per-row path shares.
+  defp resolve_group_lhs({:call, name, args}, member_rows, scope, params) do
+    if name in @aggregate_names do
+      eval_aggregate(name, args, member_rows, scope, params)
+    else
+      apply_cast(name, Enum.map(args, &resolve_group_rhs(&1, member_rows, scope, params)))
+    end
+  end
 
   defp resolve_group_lhs(path, member_rows, scope, _params) when is_list(path),
     do: get_path(representative(member_rows), scope, path)
 
-  defp resolve_group_rhs({:call, name, args}, member_rows, scope, params),
-    do: eval_aggregate(name, args, member_rows, scope, params)
+  defp resolve_group_rhs({:call, name, args}, member_rows, scope, params) do
+    if name in @aggregate_names do
+      eval_aggregate(name, args, member_rows, scope, params)
+    else
+      apply_cast(name, Enum.map(args, &resolve_group_rhs(&1, member_rows, scope, params)))
+    end
+  end
 
   defp resolve_group_rhs({:field, path}, member_rows, scope, _params),
     do: get_path(representative(member_rows), scope, path)
@@ -840,8 +945,14 @@ defmodule ScryCore.Executor do
   # `{:error, _}` -- a caller-fixable, runtime-discovered problem, not a
   # data-shaped one this module's `{:error, _}`-threading pipeline
   # (`project`/`project_all`) is built around.
-  defp eval_aggregate(name, [arg], member_rows, scope, params)
-       when name in ["sum", "avg", "count", "min", "max"] do
+  # `name in @aggregate_names` is guaranteed by every call site
+  # (`resolve_group_lhs/4`/`resolve_group_rhs/4` above only ever call
+  # this once they've already checked) -- no catch-all "unknown
+  # function" clause here the way an earlier version of this function
+  # had one; a genuinely unknown name is `apply_cast/2`'s own concern
+  # now, not reachable here at all, so there's nothing left to validate
+  # defensively against.
+  defp eval_aggregate(name, [arg], member_rows, scope, params) do
     values = Enum.map(member_rows, &resolve_rhs(arg, &1, scope, params))
 
     if Enum.any?(values, &is_nil/1) do
@@ -854,13 +965,8 @@ defmodule ScryCore.Executor do
     apply_aggregate(name, values)
   end
 
-  defp eval_aggregate(name, args, _member_rows, _scope, _params)
-       when name in ["sum", "avg", "count", "min", "max"] do
+  defp eval_aggregate(name, args, _member_rows, _scope, _params) do
     raise ArgumentError, "aggregate #{name}/1 expects exactly one argument, got #{length(args)}"
-  end
-
-  defp eval_aggregate(name, _args, _member_rows, _scope, _params) do
-    raise ArgumentError, "unknown or unsupported function: #{inspect(name)}"
   end
 
   # Empty-group results match real SQL, not one blanket default:
@@ -891,6 +997,88 @@ defmodule ScryCore.Executor do
   # already avoids for ordinary comparisons.
   defp pick_min(a, b), do: if(term_order(a, b) == :lt, do: a, else: b)
   defp pick_max(a, b), do: if(term_order(a, b) == :gt, do: a, else: b)
+
+  # lang_spec.md §5.8's other 4 built-in functions -- "Explicit casts --
+  # always explicit, never implicit." Reached from `resolve_rhs/4`,
+  # `resolve_predicate_lhs/4`, `resolve_group_lhs/4`, and
+  # `resolve_group_rhs/4` alike, always with `args` already resolved via
+  # *that call site's own* resolver -- a cast never resolves its own
+  # arguments itself, so `string(sum(total))`/`string(region)` both just
+  # work, the exact same recursive composition `{:arith, ...}`/`{:when,
+  # ...}` already get for free elsewhere in this module.
+  defp apply_cast("string", [value]), do: cast_to_string(value)
+  defp apply_cast("int", [value]), do: cast_to_int(value)
+  defp apply_cast("exact", [value]), do: cast_to_exact(value)
+  defp apply_cast("inexact", [value]), do: Rational.to_float(value)
+
+  defp apply_cast(name, args) when name in @cast_names do
+    raise ArgumentError, "cast #{name}/1 expects exactly one argument, got #{length(args)}"
+  end
+
+  defp apply_cast(name, _args) do
+    raise ArgumentError, "unknown or unsupported function: #{inspect(name)}"
+  end
+
+  # Scry's own concrete value universe (`ScryCore.Actions`' own
+  # `handle_token` clauses are the exhaustive list of what a literal can
+  # ever produce; a row field can be any of these plus whatever an
+  # engine's own `fetch/2` returns, assumed to already be one of them) --
+  # not arbitrary Elixir terms. A value outside it raises a clear error
+  # rather than silently falling back to `inspect/1`-shaped text nobody
+  # asked for. `%Rational{}` renders as `numerator/denominator` -- the
+  # same shape it'd be *written* as a literal, not a lossy decimal
+  # (`1/3` has no terminating decimal at all) -- and `Date`/`DateTime`/
+  # `NaiveDateTime` round-trip through the exact ISO 8601 shape
+  # `ScryCore.Actions`' own `handle_token(:DATE, ...)` parsed them from.
+  defp cast_to_string(n) when is_integer(n), do: Integer.to_string(n)
+  defp cast_to_string(%Rational{numerator: n, denominator: d}), do: "#{n}/#{d}"
+  defp cast_to_string(f) when is_float(f), do: Float.to_string(f)
+  defp cast_to_string(s) when is_binary(s), do: s
+  defp cast_to_string(true), do: "true"
+  defp cast_to_string(false), do: "false"
+  defp cast_to_string(nil), do: "nil"
+  defp cast_to_string(%Date{} = d), do: Date.to_iso8601(d)
+  defp cast_to_string(%DateTime{} = d), do: DateTime.to_iso8601(d)
+  defp cast_to_string(%NaiveDateTime{} = d), do: NaiveDateTime.to_iso8601(d)
+  defp cast_to_string({:atom, name}), do: name
+
+  defp cast_to_string(other) do
+    raise ArgumentError, "string(...) does not support this value: #{inspect(other)}"
+  end
+
+  # Truncates toward zero (the ordinary "int cast" convention, not
+  # `floor`) -- exact integer division on a `%Rational{}`'s own parts
+  # (`Kernel.div/2`, which already truncates toward zero for a negative
+  # dividend, not just a positive one), never a lossy `trunc/1` on a
+  # computed float, so this stays correct for arbitrarily large
+  # numerators/denominators.
+  defp cast_to_int(n) when is_integer(n), do: n
+  defp cast_to_int(%Rational{numerator: n, denominator: d}), do: Kernel.div(n, d)
+  defp cast_to_int(f) when is_float(f), do: trunc(f)
+
+  defp cast_to_int(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> n
+      _ -> raise ArgumentError, "int(...) could not parse #{inspect(s)} as an integer"
+    end
+  end
+
+  defp cast_to_int(other) do
+    raise ArgumentError, "int(...) does not support this value: #{inspect(other)}"
+  end
+
+  # `exact(...)` is idempotent over anything already exact (lang_spec.md
+  # §4's own numeric tower has no separate "int" vs "rational" exact
+  # type to convert *between* -- `new/2` already collapses a whole
+  # denominator to a plain integer); only a real `float()` has anything
+  # to actually convert (`Rational.from_float/1`).
+  defp cast_to_exact(n) when is_integer(n), do: n
+  defp cast_to_exact(%Rational{} = r), do: r
+  defp cast_to_exact(f) when is_float(f), do: Rational.from_float(f)
+
+  defp cast_to_exact(other) do
+    raise ArgumentError, "exact(...) does not support this value: #{inspect(other)}"
+  end
 
   defp project_all(
          rows,

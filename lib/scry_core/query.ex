@@ -66,12 +66,18 @@ defmodule ScryCore.Query do
   e.g. `subtotal: price * quantity`) is a body item computed from an
   `expr()` -- a small arithmetic AST (`+ - * ** /`, lang_spec.md §5.10)
   over literals, `{:field, path}`, `{:param, name}`, and `{:call, name,
-  args}` (lang_spec.md §5.8's built-in functions -- `sum`/`avg`/`count`/
-  `min`/`max` are the only 5 names `ScryCore.Executor.eval_aggregate/5`
-  actually executes, tied to `group by`/`having`, §5.2), evaluated by
+  args}` (lang_spec.md §5.8's built-in functions), evaluated by
   `ScryCore.Executor` against the current row (and, via `{:field,
   ...}`, an enclosing row too, the same scope-chain correlation a
-  `where` predicate already gets).
+  `where` predicate already gets). `{:call, ...}` splits two ways there:
+  `sum`/`avg`/`count`/`min`/`max` (`ScryCore.Executor.eval_aggregate/5`)
+  only mean anything across a group's own member rows (tied to `group
+  by`/`having`, §5.2), while `string`/`int`/`exact`/`inexact`
+  (`ScryCore.Executor`'s own `apply_cast/2`) are ordinary per-row
+  expressions, valid anywhere any other `expr()` is -- `inexact(...)` is
+  also the one place a real native `float()` ever enters this whole
+  type; every other numeric shape (`integer()`/`ScryCore.Rational.t()`)
+  stays exact.
 
   A body item may also be written `...<fragment-name>` in query text
   (lang_spec.md §5.11/§9, GraphQL-style reusable shape) -- but that never
@@ -121,16 +127,18 @@ defmodule ScryCore.Query do
   ALL` (§5.4) to mean anything at all, and neither combinator is
   implemented anywhere in this codebase yet.
 
-  `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8: `sum`/`avg`/
-  `count`/`min`/`max`, the fixed built-in-function surface -- casts/
-  `json`/window functions/`count(distinct ...)` deferred) is
-  deliberately not restricted to a known-aggregate `name` at this type's
-  own level, the same way `:variant` isn't restricted to a known kind --
-  the grammar (and this type) accept any `identifier(args)` call
-  (lang_spec §5.8's own framing: "anything else ... is either an EP2
-  namespaced extension call, or ... `logic`'s EP2 bare call"), and it's
-  `ScryCore.Executor.eval_aggregate/5` that decides, at execution time,
-  which names it actually knows how to run.
+  `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8, the fixed
+  built-in-function surface -- `sum`/`avg`/`count`/`min`/`max` and
+  `string`/`int`/`exact`/`inexact` are the 9 names actually executable
+  today; `json`/window functions/`count(distinct ...)` still deferred)
+  is deliberately not restricted to a known `name` at this type's own
+  level, the same way `:variant` isn't restricted to a known kind -- the
+  grammar (and this type) accept any `identifier(args)` call (lang_spec
+  §5.8's own framing: "anything else ... is either an EP2 namespaced
+  extension call, or ... `logic`'s EP2 bare call"), and it's
+  `ScryCore.Executor` that decides, at execution time, which names it
+  actually knows how to run (`eval_aggregate/5` for the 5 aggregates,
+  `apply_cast/2` for the 4 casts).
 
   `predicate()`'s own left-hand side (`{:cmp, op, lhs, rhs}`/`{:in, lhs,
   values}`) widens from a bare `path :: [String.t()]` to `[String.t()]

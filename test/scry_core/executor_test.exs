@@ -1162,4 +1162,162 @@ defmodule ScryCore.ExecutorTest do
       assert rows == [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}]
     end
   end
+
+  describe "explicit casts (string / int / exact / inexact)" do
+    # @products: Widget price 3 cost 4, Gadget price 4 cost 2 -- reused
+    # from the top-level fixtures.
+
+    test "a cast in a computed field is an ordinary per-row expression -- one row per source row" do
+      # The load-bearing regression check: a call used to unconditionally
+      # force grouped/flat-aggregate execution, which would have wrongly
+      # collapsed this into a single row.
+      query = %Query{
+        source: ["products"],
+        select: [{:field, ["name"]}, {:computed, "p", {:call, "string", [{:field, ["price"]}]}}]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"name" => "Widget", "p" => "3"},
+               %{"name" => "Gadget", "p" => "4"}
+             ]
+    end
+
+    test "string/1 over its own representative value domain" do
+      assert cast("string", 5) == "5"
+      assert cast("string", Rational.new(3, 4)) == "3/4"
+      assert cast("string", 2.5) == "2.5"
+      assert cast("string", "already a string") == "already a string"
+      assert cast("string", true) == "true"
+      assert cast("string", false) == "false"
+      assert cast("string", nil) == "nil"
+      assert cast("string", ~D[2026-01-01]) == "2026-01-01"
+      assert cast("string", {:atom, "active"}) == "active"
+    end
+
+    test "string/1 raises for an unsupported value type" do
+      assert_raise ArgumentError, ~r/string\(\.\.\.\) does not support/, fn ->
+        cast("string", [1, 2, 3])
+      end
+    end
+
+    test "int/1 truncates toward zero, exactly, for a %Rational{} or a float" do
+      assert cast("int", 5) == 5
+      assert cast("int", Rational.new(7, 2)) == 3
+      assert cast("int", Rational.new(-7, 2)) == -3
+      assert cast("int", 3.9) == 3
+      assert cast("int", -3.9) == -3
+      assert cast("int", "42") == 42
+    end
+
+    test "int/1 raises for a non-integer string or an unsupported type" do
+      assert_raise ArgumentError, ~r/could not parse/, fn -> cast("int", "not a number") end
+      assert_raise ArgumentError, ~r/does not support/, fn -> cast("int", true) end
+    end
+
+    test "exact/1 is identity over already-exact values, converts a float" do
+      assert cast("exact", 5) == 5
+      assert cast("exact", Rational.new(1, 2)) == Rational.new(1, 2)
+      assert cast("exact", 0.5) == Rational.new(1, 2)
+    end
+
+    test "exact/1 raises for an unsupported type" do
+      assert_raise ArgumentError, ~r/does not support/, fn -> cast("exact", "5") end
+    end
+
+    test "inexact/1 converts an integer or %Rational{} to a float" do
+      assert cast("inexact", 4) === 4.0
+      assert cast("inexact", Rational.new(1, 4)) === 0.25
+    end
+
+    test "inexact(...) contagion reaches real arithmetic end to end, not just Rational's own unit tests" do
+      query = %Query{
+        source: ["products"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "half", {:arith, :div, {:call, "inexact", [{:field, ["price"]}]}, 2}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"name" => "Widget", "half" => 1.5},
+               %{"name" => "Gadget", "half" => 2.0}
+             ]
+    end
+
+    test "comparing a cast-produced float against an ordinary exact row value works via term_order" do
+      query = %Query{
+        source: ["products"],
+        wheres: [{:cmp, :gt, {:call, "inexact", [{:field, ["price"]}]}, Rational.new(7, 2)}],
+        select: [{:field, ["name"]}]
+      }
+
+      assert {:ok, [%{"name" => "Gadget"}]} = run(query)
+    end
+
+    test "a cast wrapping an aggregate inside a grouped query composes via the shared resolver" do
+      query = %Query{
+        source: ["products"],
+        group_bys: [["name"]],
+        select: [
+          {:field, ["name"]},
+          {:computed, "total", {:call, "string", [{:call, "sum", [{:field, ["price"]}]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"name" => "Widget", "total" => "3"},
+               %{"name" => "Gadget", "total" => "4"}
+             ]
+    end
+
+    test "an aggregate referenced from an ordinary per-row WHERE (never grouped) still raises the clear error" do
+      # WHERE isn't checked by aggregate_query? at all (matches SQL's own
+      # "WHERE can't reference aggregates" rule), so this is genuinely
+      # per-row -- the real path that should hit the rejection, not the
+      # (different, correct) flat-aggregate collapse a bare aggregate in
+      # `select` itself would trigger instead.
+      query = %Query{
+        source: ["products"],
+        wheres: [{:cmp, :gt, {:call, "sum", [{:field, ["price"]}]}, 1}],
+        select: [{:field, ["name"]}]
+      }
+
+      assert_raise ArgumentError, ~r/only valid inside GROUP BY\/HAVING/, fn -> run(query) end
+    end
+
+    test "an unknown function name still raises a clear error" do
+      query = %Query{
+        source: ["products"],
+        select: [{:computed, "x", {:call, "foo", [{:field, ["price"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/unknown or unsupported function/, fn -> run(query) end
+    end
+
+    test "a cast called with the wrong number of arguments raises" do
+      query = %Query{
+        source: ["products"],
+        select: [{:computed, "x", {:call, "string", [{:field, ["price"]}, {:field, ["cost"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/expects exactly one argument/, fn -> run(query) end
+    end
+
+    defp cast(name, value) do
+      query = %Query{
+        source: ["products"],
+        limit: 1,
+        select: [{:computed, "x", {:call, name, [value]}}]
+      }
+
+      {:ok, [%{"x" => result}]} = run(query)
+      result
+    end
+  end
 end
