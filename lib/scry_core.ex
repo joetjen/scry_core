@@ -26,6 +26,15 @@ defmodule ScryCore do
   nothing calls it here yet), so a query using a kind-specific
   extension point parses only as far as core's own "always fails"
   default for it allows.
+
+  `source` may be zero or more top-level `FRAGMENT` declarations
+  followed by exactly one `SELECT` (lang_spec §5.11/§9,
+  `priv/grammar.aether`'s own `document` rule); any `...<fragment-name>`
+  spread inside the `SELECT`'s own body is already fully resolved
+  (`ScryCore.FragmentResolver`) by the time this returns -- the returned
+  `%ScryCore.Query{}` never contains a spread placeholder, only real
+  `Query.body_item()` shapes, indistinguishable from having written the
+  fragment's own fields out by hand at that position.
   """
   @spec parse(String.t()) :: {:ok, Query.t()} | {:error, term()}
   def parse(source) when is_binary(source) do

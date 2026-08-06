@@ -108,6 +108,20 @@ defmodule ScryCore.GrammarComposeTest do
     grammar
   end
 
+  # `@root document` now (priv/grammar.aether's own `document` comment) --
+  # every real query text parses as `fragment_decl* select`, not `select`
+  # alone. None of the tests below are actually about FRAGMENT/`document`
+  # itself (that's ScryCore.FragmentResolverTest's job); they're
+  # exercising GrammarCompose/extension-point mechanics that all happen
+  # to live inside `select`, so this just unwraps the one extra layer of
+  # node the new root always wraps around it, uniformly.
+  defp parse_select!(grammar, source) do
+    {:ok, %Ichor.Node{rule: :document, captures: %{select: select_node}}} =
+      Grammar.VM.run(grammar, source, NoActions, nil)
+
+    select_node
+  end
+
   describe "core alone" do
     test "parses cleanly and passes Grammar.Analysis -- a zero-kind build must still compile" do
       core = parse!(@core_source, "priv/grammar.aether")
@@ -125,8 +139,8 @@ defmodule ScryCore.GrammarComposeTest do
       core = parse!(@core_source, "priv/grammar.aether")
       {:ok, analyzed} = Grammar.Analysis.run(core)
 
-      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
-               Grammar.VM.run(analyzed, ~s(SELECT metric { name }), NoActions, nil)
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(analyzed, ~s(SELECT metric { name }))
 
       refute Map.has_key?(captures, :select_ep1a)
 
@@ -150,8 +164,8 @@ defmodule ScryCore.GrammarComposeTest do
     test "parses a query exercising both core and the extension point", %{merged: merged} do
       {:ok, analyzed} = Grammar.Analysis.run(merged)
 
-      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
-               Grammar.VM.run(analyzed, ~s(SELECT metric last 5 { name }), NoActions, nil)
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(analyzed, ~s(SELECT metric last 5 { name }))
 
       assert %Ichor.Node{rule: :path, captures: %{head: "metric"}} = captures.source
       assert %Ichor.Node{rule: :select_ep1a, captures: ep1a} = captures.select_ep1a
@@ -164,8 +178,8 @@ defmodule ScryCore.GrammarComposeTest do
     } do
       {:ok, analyzed} = Grammar.Analysis.run(merged)
 
-      assert {:ok, %Ichor.Node{rule: :select}} =
-               Grammar.VM.run(analyzed, ~s(select metric LAST 5 { name }), NoActions, nil)
+      assert %Ichor.Node{rule: :select} =
+               parse_select!(analyzed, ~s(select metric LAST 5 { name }))
     end
   end
 
@@ -182,14 +196,14 @@ defmodule ScryCore.GrammarComposeTest do
     end
 
     test "both kinds' alternatives work, independently, in the same build", %{grammar: g} do
-      assert {:ok, %Ichor.Node{rule: :select, captures: last_captures}} =
-               Grammar.VM.run(g, ~s(SELECT metric last 5 { name }), NoActions, nil)
+      assert %Ichor.Node{rule: :select, captures: last_captures} =
+               parse_select!(g, ~s(SELECT metric last 5 { name }))
 
       assert %Ichor.Node{rule: :select_ep1a, captures: %{value: "5"}} =
                last_captures.select_ep1a
 
-      assert {:ok, %Ichor.Node{rule: :select, captures: deep_captures}} =
-               Grammar.VM.run(g, ~s(SELECT metric deep { name }), NoActions, nil)
+      assert %Ichor.Node{rule: :select, captures: deep_captures} =
+               parse_select!(g, ~s(SELECT metric deep { name }))
 
       # Unwrapped to the raw text, not a %Ichor.Node{} -- select_ep1a's
       # document-like alternative has exactly one capture (KW_DEEP
@@ -201,8 +215,8 @@ defmodule ScryCore.GrammarComposeTest do
     end
 
     test "the position is still absent, not ambiguous, when neither is used", %{grammar: g} do
-      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
-               Grammar.VM.run(g, ~s(SELECT metric { name }), NoActions, nil)
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(g, ~s(SELECT metric { name }))
 
       refute Map.has_key?(captures, :select_ep1a)
     end
@@ -218,8 +232,8 @@ defmodule ScryCore.GrammarComposeTest do
     end
 
     test "the block construct itself parses as a body item", %{grammar: g} do
-      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
-               Grammar.VM.run(g, ~s(SELECT users { name, via knows { id } }), NoActions, nil)
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(g, ~s(SELECT users { name, via knows { id } }))
 
       assert %Ichor.Node{rule: :body_list, captures: body} = captures.body
       # `tail` sits under `*` (a repeated capture), so it's always a
@@ -231,13 +245,8 @@ defmodule ScryCore.GrammarComposeTest do
     test "the fragment's own body recurses back into core's body_list, not a copy of it", %{
       grammar: g
     } do
-      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
-               Grammar.VM.run(
-                 g,
-                 ~s(SELECT users { via knows { id, name } }),
-                 NoActions,
-                 nil
-               )
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(g, ~s(SELECT users { via knows { id, name } }))
 
       %Ichor.Node{rule: :body_list, captures: %{head: via_item}} = captures.body
       %Ichor.Node{rule: :body_item_ep1, captures: via} = via_item
@@ -247,8 +256,8 @@ defmodule ScryCore.GrammarComposeTest do
     end
 
     test "still falls back to a plain field when the construct isn't used", %{grammar: g} do
-      assert {:ok, %Ichor.Node{rule: :select, captures: captures}} =
-               Grammar.VM.run(g, ~s(SELECT users { name }), NoActions, nil)
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(g, ~s(SELECT users { name }))
 
       assert %Ichor.Node{rule: :body_list, captures: %{head: %Ichor.Node{rule: :path}}} =
                captures.body

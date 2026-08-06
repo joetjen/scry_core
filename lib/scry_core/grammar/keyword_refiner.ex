@@ -36,7 +36,8 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "if" => :KW_IF,
     "when" => :KW_WHEN,
     "then" => :KW_THEN,
-    "else" => :KW_ELSE
+    "else" => :KW_ELSE,
+    "fragment" => :KW_FRAGMENT
   }
 
   @impl true

@@ -53,7 +53,7 @@
 ; composition gets tested (ScryCore.GrammarCompose + its test suite).
 
 @grammar "scry_core"
-@root select
+@root document
 @case_insensitive
 @skip TRIVIA
 
@@ -91,7 +91,7 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_NIL, KW_TRUE, KW_FALSE,
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
           KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED, KW_IF,
-          KW_WHEN, KW_THEN, KW_ELSE)
+          KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -254,6 +254,15 @@ POW   := "**"
 LPAREN := "("
 RPAREN := ")"
 
+; Fragment spread (lang_spec §5.11/§9): `...<fragment-name>` inside a
+; body list. Three literal dots, strictly longer than any single `DOT`
+; match at the same position -- maximal munch prefers this token the
+; same way `POW` beats two separate `STAR` matches above, so no
+; declaration-order sensitivity against `DOT` either (confirmed with a
+; scratch grammar before relying on it, not assumed to carry over from
+; the `POW`/`STAR` case just because the shape looks similar).
+SPREAD := "..."
+
 ; `[]` (an empty character class) matches no character, ever -- the
 ; "always fails" default an extension point needs when nothing has
 ; contributed to it (see `select_ep1a` below). Deliberately not a
@@ -265,6 +274,35 @@ RPAREN := ")"
 NEVER := []
 
 ; ---- grammar ----
+
+; The real root now (`@root document` above) -- a query text is zero or
+; more top-level `FRAGMENT` declarations followed by exactly one `select`
+; (lang_spec §6/§9: `WITH`/`TYPE` are the other two top-level
+; block-openers §6 names, still deferred, not needed for `FRAGMENT` to
+; work). `fragment_decl*` bare and unrenamed, same established reason
+; every other repeated/optional rule reference in this file is left
+; unrenamed -- confirmed empirically (scratch grammar) to behave exactly
+; like `additive_tail*`/`when_clause+` here too: always produces its own
+; capture key, `[]` when zero `FRAGMENT`s are present, so `select`'s own
+; existing single-query callers (every test written before this feature)
+; parse identically through the new root -- provably a no-op for any
+; query text with no top-level `FRAGMENT`.
+;
+; A `FRAGMENT`'s own `...spread` references are resolved by
+; `ScryCore.FragmentResolver`, not here or in `ScryCore.Actions` --
+; that's a whole-document concern (a spread can reference a `FRAGMENT`
+; declared *after* it, and a `FRAGMENT` can itself spread another one),
+; not expressible as this rule walks bottom-up during an ordinary single
+; pass. `document`'s own handler is what invokes it, once both
+; `fragment_decl` and `select` have already been evaluated into real
+; terms (`ScryCore.Actions`' own moduledoc has the fuller story).
+document := fragment_decl* select
+
+; `<body-item> ...` (lang_spec §6's own template) reuses `body_list`
+; directly -- a FRAGMENT's body is exactly as expressive as a SELECT's
+; own (it can itself nest a SELECT, or spread another FRAGMENT), so no
+; separate body grammar is needed here.
+fragment_decl := KW_FRAGMENT name:field_name LBRACE body:body_list RBRACE
 
 ; Modifiers appear in lang_spec.md §5.2/§6's own fixed order, mirroring
 ; evaluation order front to back: an EP1(a) modifier (narrows/reshapes
@@ -476,15 +514,25 @@ when_clause := KW_WHEN cond:predicate KW_THEN then_expr:expression
 ; ordinary PEG recursion, same rule referencing itself indirectly
 ; through body_list), a kind-contributed construct (EP1(b)/(c)/(d)
 ; body-item shapes -- a block-opening construct, a scoped pseudo-field,
-; or a bare value pseudo-field; lang_spec §2's impl_spec companion),
-; or a plain field path, optionally suffixed `IF $<param>` (lang_spec
-; §5.3/§9: conditional field inclusion, GraphQL `@include`/`@skip`
-; equivalent) -- tried in that order (most specific leading token
-; first, generic fallback last; PEG's first-match-wins doesn't
-; actually need the ordering here, since all three start with
-; structurally distinct tokens, but it's the same defensive convention
-; select_ep1a's own alternatives follow).
-body_item := select | body_item_ep1 | field_body_item
+; or a bare value pseudo-field; lang_spec §2's impl_spec companion), a
+; fragment spread (lang_spec §5.11/§9: `...<fragment-name>`), or a plain
+; field path, optionally suffixed `IF $<param>` (lang_spec §5.3/§9:
+; conditional field inclusion, GraphQL `@include`/`@skip` equivalent) --
+; tried in that order (most specific leading token first, generic
+; fallback last; PEG's first-match-wins doesn't actually need the
+; ordering here, since all four start with structurally distinct
+; tokens, but it's the same defensive convention select_ep1a's own
+; alternatives follow).
+body_item := select | body_item_ep1 | spread | field_body_item
+
+; `{:spread, name}` (`ScryCore.Actions`' own handle_rule) is a
+; placeholder, not a real body-item shape -- `ScryCore.FragmentResolver`
+; replaces every one with the named FRAGMENT's own (already-resolved)
+; body-item list before `ScryCore.parse/1` ever returns, so it never
+; reaches `Query.body_item()`'s own public type. See `document`'s own
+; comment above for why resolution can't happen locally, right here,
+; the way every other body-item shape resolves itself.
+spread := SPREAD name:field_name
 
 ; `alias:field_name COLON ...` before the plain-field alternative --
 ; both start with the same field_name/path-leading tokens, so ordered
@@ -521,4 +569,19 @@ if_clause := KW_IF param:PARAM
 ; contribute simultaneously.
 body_item_ep1 := NEVER
 
+; Two real, found-not-fixed gaps against lang_spec §6's own comma rule
+; ("required when two items share a physical line, optional -- a line
+; break suffices -- when each item is on its own line"): (1) `COMMA` is
+; unconditionally required here, on every line break or not -- this
+; Phase 1 grammar has no "or a line break" alternative yet, so e.g.
+; `{ name\n email }` (no comma) fails to parse, only `{ name,\n email }`
+; or `{ name, email }` do; (2) trailing trivia after the *final* `RBRACE`
+; of a top-level query isn't consumed either -- `SELECT x { y }\n` (one
+; trailing newline) fails the same "did not expect more input here" way,
+; since `@skip`-splicing only ever happens *between* a rule's own
+; tokens, never automatically after the root rule's last one. Found
+; while writing this feature's own multi-line test fixtures (not
+; something FRAGMENT introduces -- `select` alone had the identical gap
+; before `document` became the root, just untested until now); fixing
+; either is a real, separate increment, not folded into this one.
 body_list := head:body_item (COMMA tail:body_item)*

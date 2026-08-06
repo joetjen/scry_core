@@ -206,6 +206,58 @@ defmodule ScryCore.Actions do
   # reasoning as select's own clause above.
   def handle_rule(:body_item, %{field_body_item: cap}, ctx), do: cap.eval.(ctx)
 
+  # spread's own handler already returns the fully-tagged {:spread, name}
+  # placeholder (lang_spec §5.11/§9) -- same reasoning as every other
+  # body_item alternative above, no extra wrapping needed.
+  def handle_rule(:body_item, %{spread: cap}, ctx), do: cap.eval.(ctx)
+
+  # `{:spread, name}` -- a placeholder `ScryCore.FragmentResolver`
+  # resolves after `document`'s own handler has both this query's fully
+  # -built %Query{} *and* every FRAGMENT declaration's own body list to
+  # splice in; see priv/grammar.aether's own `spread` comment for why
+  # that can't happen locally, here, the way every other body_item shape
+  # resolves itself during this same bottom-up pass.
+  def handle_rule(:spread, %{name: name_cap}, ctx) do
+    with {:ok, name, ctx} <- name_cap.eval.(ctx), do: {:ok, {:spread, name}, ctx}
+  end
+
+  # A plain `{name, body_items}` pair, not a %Query{} or any other
+  # tagged shape -- a FRAGMENT is a reusable *body list*, never executed
+  # or projected on its own (lang_spec §9: "reusable shape, vs. `with`'s
+  # reusable data"). `document`'s own handler collects every one of
+  # these into the name => body_items map ScryCore.FragmentResolver
+  # needs; nothing about a fragment_decl's own shape survives past that.
+  def handle_rule(:fragment_decl, %{name: name_cap, body: body_cap}, ctx) do
+    with {:ok, name, ctx} <- name_cap.eval.(ctx),
+         {:ok, body, ctx} <- body_cap.eval.(ctx) do
+      {:ok, {name, body}, ctx}
+    end
+  end
+
+  # The real root (priv/grammar.aether's own `@root document`/`document`
+  # comments have the full reasoning). `fragment_decl` is bare/unrenamed
+  # and `*`-repeated, so it always has its own key -- `[]`, not a missing
+  # one, when no FRAGMENT is present (confirmed empirically, same finding
+  # as `additive_tail`/`when_clause` elsewhere in this module), so no
+  # `maybe_eval` is needed here the way an *optional* rule reference
+  # would need.
+  #
+  # Duplicate FRAGMENT names are a real, reportable compile error here
+  # (`Map.new/2` would otherwise silently let the second declaration win)
+  # -- checked before ever handing the map to ScryCore.FragmentResolver,
+  # which assumes it's already a real name => body_items map with no
+  # ambiguity in it.
+  def handle_rule(:document, %{fragment_decl: frag_caps, select: select_cap}, ctx) do
+    with {:ok, frags, ctx} <- eval_list(:fragment_decl, frag_caps, ctx),
+         {:ok, fragments} <- build_fragment_map(frags),
+         {:ok, query, ctx} <- select_cap.eval.(ctx) do
+      case ScryCore.FragmentResolver.resolve(query, fragments) do
+        {:ok, resolved} -> {:ok, resolved, ctx}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
   def handle_rule(:field_body_item, %{alias: alias_cap, expr: expr_cap}, ctx) do
     with {:ok, alias_name, ctx} <- alias_cap.eval.(ctx),
          {:ok, expr, ctx} <- expr_cap.eval.(ctx) do
@@ -461,6 +513,20 @@ defmodule ScryCore.Actions do
          {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
       {:ok, [head | tail], ctx}
     end
+  end
+
+  # `document`'s own handler's helper -- `Map.new/2` would otherwise
+  # silently let a second `FRAGMENT` declaration with the same name win,
+  # with no error at all; this makes that a real, reportable compile
+  # error instead, before ScryCore.FragmentResolver ever sees the map.
+  defp build_fragment_map(frags) do
+    Enum.reduce_while(frags, {:ok, %{}}, fn {name, body}, {:ok, acc} ->
+      if Map.has_key?(acc, name) do
+        {:halt, {:error, {:duplicate_fragment, name}}}
+      else
+        {:cont, {:ok, Map.put(acc, name, body)}}
+      end
+    end)
   end
 
   defp op_from_text("="), do: :eq

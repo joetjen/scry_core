@@ -626,4 +626,83 @@ line two""" { name }))
               {:arith, :mul, {:field, ["price"]}, {:when, [{{:cmp, :eq, ["vip"], true}, 1}], 2}}}
            ]
   end
+
+  test "a query with no top-level FRAGMENT still parses through the document root unchanged", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name }))
+    assert q.select == [{:field, ["name"]}]
+  end
+
+  test "FRAGMENT + ...spread, the worked example from lang_spec.md §9", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(FRAGMENT userSummary { id, name } SELECT users { ...userSummary, email })
+             )
+
+    assert q.select == [{:field, ["id"]}, {:field, ["name"]}, {:field, ["email"]}]
+  end
+
+  test "a fragment spreading another fragment, resolved transitively", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(FRAGMENT base { id } FRAGMENT userSummary { ...base, name } SELECT users { ...userSummary })
+             )
+
+    assert q.select == [{:field, ["id"]}, {:field, ["name"]}]
+  end
+
+  test "a spread inside a nested SELECT's own body", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(FRAGMENT orderFields { id, total } SELECT users { name, SELECT orders { ...orderFields } })
+             )
+
+    assert q.select == [
+             {:field, ["name"]},
+             %Query{source: ["orders"], select: [{:field, ["id"]}, {:field, ["total"]}]}
+           ]
+  end
+
+  test "spreading an undefined fragment is a compile error", %{grammar: g} do
+    assert {:error, {:undefined_fragment, "doesNotExist"}} =
+             run(g, ~s(SELECT users { ...doesNotExist }))
+  end
+
+  test "two FRAGMENTs sharing a name is a compile error, not silent last-write-wins", %{
+    grammar: g
+  } do
+    assert {:error, {:duplicate_fragment, "f"}} =
+             run(g, ~s(FRAGMENT f { id } FRAGMENT f { name } SELECT users { ...f }))
+  end
+
+  test "a fragment spreading itself, directly, is a compile error", %{grammar: g} do
+    assert {:error, {:fragment_cycle, ["a", "a"]}} =
+             run(g, ~s(FRAGMENT a { ...a } SELECT users { ...a }))
+  end
+
+  test "a fragment cycle through another fragment is a compile error", %{grammar: g} do
+    assert {:error, {:fragment_cycle, ["a", "b", "a"]}} =
+             run(g, ~s(FRAGMENT a { ...b } FRAGMENT b { ...a } SELECT users { ...a }))
+  end
+
+  test "a fragment spread alongside a plain field and a nested SELECT, order preserved", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(FRAGMENT ids { id, uuid } SELECT users { name, ...ids, SELECT orders { total } })
+             )
+
+    assert q.select == [
+             {:field, ["name"]},
+             {:field, ["id"]},
+             {:field, ["uuid"]},
+             %Query{source: ["orders"], select: [{:field, ["total"]}]}
+           ]
+  end
 end

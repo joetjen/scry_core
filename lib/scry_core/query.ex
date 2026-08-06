@@ -74,6 +74,17 @@ defmodule ScryCore.Query do
   `group by`/`having`, and neither is executed anywhere in this
   codebase yet either, so there's nothing real to call them against.
 
+  A body item may also be written `...<fragment-name>` in query text
+  (lang_spec.md §5.11/§9, GraphQL-style reusable shape) -- but that never
+  appears as a shape in `body_item()` itself. `ScryCore.Actions` parses
+  it to a transient `{:spread, name}` placeholder that
+  `ScryCore.FragmentResolver` (invoked from `handle_rule(:document,
+  ...)`, the real grammar root -- see `priv/grammar.aether`'s own
+  `document` rule) always fully expands, in place, before `ScryCore.
+  parse/1` ever returns -- one `t()` this module's own callers ever see
+  has no notion of fragments at all, only the real body items a spread's
+  own target fragment expanded into.
+
   `expr()`'s own `{:when, clauses, else_expr}` (lang_spec.md §5.6/§9:
   `WHEN <predicate> THEN <expr> [...] ELSE <expr>`, "inline, not a
   block") reuses `predicate()` directly for each clause's own
