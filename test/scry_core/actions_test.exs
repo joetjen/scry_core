@@ -1038,4 +1038,56 @@ line two""" { name }))
     assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: sum(price).foo }])
     assert q.select == [{:computed, "x", {:dot, {:call, "sum", [{:field, ["price"]}]}, ["foo"]}}]
   end
+
+  test "in accepts a literal on the left and a plain field path as a computed list, the lang_spec.md §7 worked example",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders WHERE "urgent" in metadata.tags { id }])
+
+    assert q.wheres == [{:in, {:literal, "urgent"}, {:field, ["metadata", "tags"]}}]
+  end
+
+  test "in accepts a literal on the left and a bare call as a computed list", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders WHERE "urgent" in json(tags) { id }])
+    assert q.wheres == [{:in, {:literal, "urgent"}, {:call, "json", [{:field, ["tags"]}]}}]
+  end
+
+  test "in accepts a literal on the left and a call narrowed by a dot-path as a computed list",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders WHERE "urgent" in json(metadata).tags { id }])
+
+    assert q.wheres == [
+             {:in, {:literal, "urgent"},
+              {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["tags"]}}
+           ]
+  end
+
+  test "in accepts a field on the left against a computed list too, not just a literal", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders WHERE status in json(metadata).valid_statuses { id }])
+
+    assert q.wheres == [
+             {:in, ["status"],
+              {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["valid_statuses"]}}
+           ]
+  end
+
+  test "a literal bracketed list is still unaffected (items, not items_expr)", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users WHERE status in ["active", "pending"] { name }))
+
+    assert q.wheres == [{:in, ["status"], ["active", "pending"]}]
+  end
+
+  test "a literal on the left of in against a literal bracketed list is unaffected too", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s|SELECT users WHERE "active" in ["active", "pending"] { name }|)
+
+    assert q.wheres == [{:in, {:literal, "active"}, ["active", "pending"]}]
+  end
 end

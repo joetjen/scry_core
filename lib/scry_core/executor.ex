@@ -278,16 +278,18 @@ defmodule ScryCore.Executor do
   .ExecutorTest`), not assumed to carry over just because the shape
   looks similar.
 
-  Not fixed here, found while testing: lang_spec.md §7's own "List-
-  valued subfields work with `in`" (`WHERE "urgent" in metadata.tags`)
-  needs `in`'s own right-hand side to accept a field/call-derived list,
-  not only a bracketed list *literal* (`comparison`'s own `in:KW_IN
-  items:list` alternative, `priv/grammar.aether`) -- a real, separate
-  gap, unrelated to `json(...)` itself (whose own primary worked
-  example, equality/dot-access, works correctly end to end); `json(
-  ...)`'s own bare value is still usable directly wherever an ordinary
-  `expr()` is, including as an `{:in, ...}` predicate's *left*-hand side
-  (`x in [...]`), just not yet as the list on the right.
+  Found while testing (above), fixed in a later increment: lang_spec.md
+  §7's own "List-valued subfields work with `in`" (`WHERE "urgent" in
+  metadata.tags`) needed `in`'s own right-hand side to accept a field/
+  call-derived list, not only a bracketed list *literal*. `comparison`'s
+  own grammar now has `in:KW_IN items_expr:(call_with_path | call |
+  path)` alongside the original `items:list` alternative, and `in`'s own
+  *left*-hand side gained a fourth shape (`in_lhs`'s own `lhs_literal`)
+  for lang_spec's exact worked example, a literal on `in`'s left -- see
+  `priv/grammar.aether`'s own `comparison`/`in_lhs` comments, `Query`'s
+  own `{:in, lhs, values}` moduledoc paragraphs, and this module's own
+  `eval_predicate/4`/`eval_group_predicate/4`/`resolve_predicate_lhs/4`/
+  `resolve_group_lhs/4` clauses below for the full mechanics.
   """
 
   alias ScryCore.{CombinedQuery, EngineBehaviour, Query, Rational}
@@ -586,8 +588,17 @@ defmodule ScryCore.Executor do
   defp predicate_has_aggregate_call?({:cmp, _op, lhs, rhs}),
     do: lhs_has_aggregate_call?(lhs) or expr_has_aggregate_call?(rhs)
 
-  defp predicate_has_aggregate_call?({:in, lhs, values}),
+  # `values` is either a real Elixir list (a literal `[...]`, each
+  # element checked individually) or a single tagged expr() expected to
+  # resolve to the whole list (`Query`'s own `{:in, lhs, values}`
+  # moduledoc paragraph) -- `is_list/1` tells the two apart the same way
+  # `ScryCore.Actions.wrap_field_path/1` and `eval_predicate/4`'s own
+  # `{:in, ...}` clause below both do.
+  defp predicate_has_aggregate_call?({:in, lhs, values}) when is_list(values),
     do: lhs_has_aggregate_call?(lhs) or Enum.any?(values, &expr_has_aggregate_call?/1)
+
+  defp predicate_has_aggregate_call?({:in, lhs, list_expr}),
+    do: lhs_has_aggregate_call?(lhs) or expr_has_aggregate_call?(list_expr)
 
   defp predicate_has_aggregate_call?({:and, l, r}),
     do: predicate_has_aggregate_call?(l) or predicate_has_aggregate_call?(r)
@@ -617,6 +628,10 @@ defmodule ScryCore.Executor do
   defp lhs_has_aggregate_call?({:dot, base, _path}), do: expr_has_aggregate_call?(base)
 
   defp lhs_has_aggregate_call?(path) when is_list(path), do: false
+
+  # `in`'s own literal-on-the-left shape -- a literal value never
+  # contains a call.
+  defp lhs_has_aggregate_call?({:literal, _value}), do: false
 
   defp expr_has_aggregate_call?({:call, name, args}),
     do: name in @aggregate_names or Enum.any?(args, &expr_has_aggregate_call?/1)
@@ -720,11 +735,32 @@ defmodule ScryCore.Executor do
   # Each element resolved the same way a comparison's own right-hand
   # side is -- `in [$a, $b]`/`in [orders.status]` work for exactly the
   # same reason `= $a`/`= orders.status` do, not a separate mechanism.
-  defp eval_predicate({:in, lhs, values}, row, scope, params) do
+  defp eval_predicate({:in, lhs, values}, row, scope, params) when is_list(values) do
     resolve_predicate_lhs(lhs, row, scope, params) in Enum.map(
       values,
       &resolve_rhs(&1, row, scope, params)
     )
+  end
+
+  # `values` is a single expr() expected to resolve, as a whole, to the
+  # list to check membership against (`Query`'s own `{:in, ...}`
+  # moduledoc paragraph -- `in metadata.tags`/`in json(metadata).tags`,
+  # lang_spec §7's own worked example). Resolved via `resolve_rhs/4`,
+  # the same resolver a comparison's own right-hand side already uses --
+  # `{:field, ...}`/`{:call, ...}`/`{:dot, ...}` are all resolvable
+  # there already, nothing new needed on that side. A clear error, not
+  # `Enum.member?/2`'s own opaque `Protocol.UndefinedError`, when the
+  # resolved value isn't actually a list (e.g. `in json(metadata).name`
+  # where `.name` is a string) -- the same "clear domain error, not a
+  # foreign crash" posture `apply_cast/2`'s own error clauses already
+  # have.
+  defp eval_predicate({:in, lhs, list_expr}, row, scope, params) do
+    left = resolve_predicate_lhs(lhs, row, scope, params)
+
+    case resolve_rhs(list_expr, row, scope, params) do
+      list when is_list(list) -> left in list
+      other -> raise ArgumentError, "in ... expects a list value, got: #{inspect(other)}"
+    end
   end
 
   defp eval_predicate({:and, l, r}, row, scope, params),
@@ -774,6 +810,13 @@ defmodule ScryCore.Executor do
 
   defp resolve_predicate_lhs(path, row, scope, _params) when is_list(path),
     do: get_path(row, scope, path)
+
+  # `in`'s own literal-on-the-left shape (`Query`'s own `{:in, lhs, ...}`
+  # moduledoc paragraph, `"urgent" in metadata.tags`) -- the value is
+  # already resolved at parse time, nothing left to look up against the
+  # row. Never reached for `:cmp`'s own `lhs` (only `in_lhs`'s own
+  # grammar alternative ever produces this tag).
+  defp resolve_predicate_lhs({:literal, value}, _row, _scope, _params), do: value
 
   defp compare(op, a, b), do: ordering_result(op, term_order(a, b))
 
@@ -987,9 +1030,21 @@ defmodule ScryCore.Executor do
     end
   end
 
-  defp eval_group_predicate({:in, lhs, values}, member_rows, scope, params) do
+  defp eval_group_predicate({:in, lhs, values}, member_rows, scope, params)
+       when is_list(values) do
     left = resolve_group_lhs(lhs, member_rows, scope, params)
     left in Enum.map(values, &resolve_group_rhs(&1, member_rows, scope, params))
+  end
+
+  # Mirrors `eval_predicate/4`'s own single-expr `{:in, ...}` clause,
+  # one level up -- `list_expr` resolved the group-aware way.
+  defp eval_group_predicate({:in, lhs, list_expr}, member_rows, scope, params) do
+    left = resolve_group_lhs(lhs, member_rows, scope, params)
+
+    case resolve_group_rhs(list_expr, member_rows, scope, params) do
+      list when is_list(list) -> left in list
+      other -> raise ArgumentError, "in ... expects a list value, got: #{inspect(other)}"
+    end
   end
 
   defp eval_group_predicate({:and, l, r}, member_rows, scope, params),
@@ -1033,6 +1088,9 @@ defmodule ScryCore.Executor do
 
   defp resolve_group_lhs(path, member_rows, scope, _params) when is_list(path),
     do: get_path(representative(member_rows), scope, path)
+
+  # Mirrors `resolve_predicate_lhs/4`'s own `{:literal, ...}` clause.
+  defp resolve_group_lhs({:literal, value}, _member_rows, _scope, _params), do: value
 
   defp resolve_group_rhs({:call, name, args}, member_rows, scope, params) do
     if name in @aggregate_names do

@@ -590,11 +590,66 @@ negation    := neg:KW_NOT? expr:comparison
 ; "red"`) is what makes a call's own *result* reachable via an ordinary
 ; dot-path afterward -- see `call_with_path`'s own comment near `call`
 ; below for the fuller reasoning.
+; `in`'s own right-hand side also accepts a *computed* list -- a plain
+; field path, a bare call, or a call narrowed by a dot-path -- not just
+; a bracketed list literal. Found while testing `json(<field>).path`
+; (this file's own `call_with_path` comment): lang_spec §7's own worked
+; example, `WHERE "urgent" in metadata.tags`, plus the analogous
+; `WHERE "urgent" in json(metadata).tags` for a JSON-typed field,
+; neither parsed at all before this -- `items:list` only ever matched a
+; literal `[...]`. Three new alternatives under a *different* capture
+; key (`items_expr`, not `items`) rather than widening `list` itself:
+; `list` stays exactly what a list *literal* is (still needed for
+; `x in [1, 2, 3]`), and `items_expr`'s own three sub-alternatives are
+; ordered `call_with_path | call | path`, the same proven-safe order
+; `predicate_lhs` (below) already uses for the exact same three shapes,
+; confirmed again here with a scratch grammar before committing to it
+; (a plain path like `metadata` and a call like `json(metadata)` are
+; only lexically distinguishable by whether `(` follows, so trying the
+; more specific shapes first and letting backtracking fall through is
+; required, not incidental). `ScryCore.Actions`' own handler tells the
+; four `in` alternatives apart by capture-key name alone (`items` vs
+; `items_expr`), the same "different alternatives, different capture
+; keys" convention `right`/`right_field` above already established --
+; confirmed the parser dispatches to the right one for all four shapes
+; via the same scratch grammar. `ScryCore.Executor`'s own `{:in, lhs,
+; values}` predicate tag is what actually resolves either shape at
+; execution time (a real Elixir list of elements vs a single expr()
+; expected to resolve to the whole list) -- see its own moduledoc.
+;
+; `left:in_lhs`, not `left:predicate_lhs`, on all four `in` alternatives
+; specifically -- lang_spec §7's own worked example (quoted verbatim
+; above) has a *literal* on `in`'s own left, `"urgent" in metadata.tags`,
+; not a field/call; `predicate_lhs` alone can never produce that.
+; `in_lhs` (below) is `predicate_lhs`'s own three shapes plus a fourth,
+; `literal` -- deliberately scoped to `in` alone, not applied to `=`/`>`/
+; etc.'s own `left:predicate_lhs` above, since no worked example needs a
+; literal on *those* operators' left side (`"x" = status` has no real
+; use lang_spec calls for; `HAVING sum(total) > 200` is the one that
+; matters there, already covered). `literal`'s own `list` alternative
+; (`[1, 2] in ...`) is real overlap risk here: both a plain field path
+; and a literal list literal are, once resolved, an ordinary Elixir
+; list -- `ScryCore.Executor.resolve_predicate_lhs/4`'s existing
+; catch-all clause already treats *any* plain list it receives as field-
+; path segments to walk into the row, so a raw `[1, 2]` literal handed
+; to it unwrapped would be silently misinterpreted as a two-segment
+; field path, not a value -- wrong, not just uncaught. `in_lhs`'s own
+; `lhs_literal:literal` alternative is wrapped `{:literal, value}` by
+; `ScryCore.Actions` specifically to prevent that collision (a 2-tuple
+; never matches the existing bare-list/`{:call, ...}`/`{:dot, ...}`
+; clauses), confirmed via the same scratch grammar as the `items_expr`
+; finding above -- `predicate_lhs`'s own three shapes stay completely
+; unwrapped, unaffected, exactly as before.
 comparison := left:predicate_lhs op:comp_op right:literal
             | left:predicate_lhs op:comp_op right_field:path
-            | left:predicate_lhs in:KW_IN items:list
+            | left:in_lhs in:KW_IN items:list
+            | left:in_lhs in:KW_IN items_expr:call_with_path
+            | left:in_lhs in:KW_IN items_expr:call
+            | left:in_lhs in:KW_IN items_expr:path
 
 predicate_lhs := call_with_path | call | path
+
+in_lhs := lhs_expr:call_with_path | lhs_expr:call | lhs_expr:path | lhs_literal:literal
 
 comp_op := LE | GE | NOT_EQ | EQ | LT | GT | MATCH
 

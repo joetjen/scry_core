@@ -180,6 +180,37 @@ defmodule ScryCore.Query do
   right-hand side is *not* widened the same way (`HAVING sum(a) >
   avg(b)`, a call on *both* sides, stays unsupported) -- the one
   concrete need is call-on-the-left-only.
+
+  `{:in, lhs, values}`'s own `values` widens a second way, independent
+  of the `lhs` widening above: from *only* `[term() | {:param, ...}]`
+  (a literal bracketed list, resolved element by element) to *also*
+  accept a single `{:field, [String.t()]} | {:call, String.t(),
+  [expr()]} | {:dot, expr(), [String.t()]}` -- one expr() expected to
+  resolve, as a whole, to the list to check membership against. Found
+  while testing `json(<field>).path`: lang_spec §7's own worked example,
+  `WHERE "urgent" in metadata.tags`, never parsed before this, since
+  `in`'s own grammar alternative only ever matched a bracketed `[...]`
+  literal. `ScryCore.Executor.eval_predicate/4`'s own `{:in, ...}`
+  clause dispatches on `is_list(values)` to tell the two shapes apart --
+  the existing literal-list case is always a real Elixir list; the new
+  computed-list case is always a tagged tuple, never a list, so the two
+  can never be confused for one another.
+
+  `{:in, lhs, values}`'s own `lhs` widens a *third* way, specific to
+  `:in` alone (not shared with `:cmp`'s own `lhs`): it also accepts
+  `{:literal, term()}`, a bare literal value wrapped for the same
+  disambiguation reason `values`' own computed-list case needed
+  wrapping. lang_spec §7's own worked example quoted above has a
+  *literal* on `in`'s own left, `"urgent" in metadata.tags`, not a
+  field -- `[String.t()] | {:call, ...} | {:dot, ...}` alone can never
+  produce that. Not shared with `:cmp` (`"x" = status` has no worked
+  example calling for it; `HAVING sum(total) > 200` is the one that
+  does, already covered by the other two `lhs` shapes). The wrapping
+  specifically prevents a literal *list* (`[1, 2] in ...`) from being
+  silently misread as a two-segment field path by the same resolver
+  that already treats any plain list it receives as one --
+  `ScryCore.Executor.resolve_predicate_lhs/4`'s own comment has the
+  full reasoning.
   """
 
   @type expr ::
@@ -197,8 +228,16 @@ defmodule ScryCore.Query do
            lhs :: [String.t()] | {:call, String.t(), [expr()]} | {:dot, expr(), [String.t()]},
            rhs :: term() | {:field, [String.t()]} | {:param, String.t()}}
           | {:in,
-             lhs :: [String.t()] | {:call, String.t(), [expr()]} | {:dot, expr(), [String.t()]},
-             values :: [term() | {:param, String.t()}]}
+             lhs ::
+               [String.t()]
+               | {:call, String.t(), [expr()]}
+               | {:dot, expr(), [String.t()]}
+               | {:literal, term()},
+             values ::
+               [term() | {:param, String.t()}]
+               | {:field, [String.t()]}
+               | {:call, String.t(), [expr()]}
+               | {:dot, expr(), [String.t()]}}
           | {:and, predicate(), predicate()}
           | {:or, predicate(), predicate()}
           | {:not, predicate()}

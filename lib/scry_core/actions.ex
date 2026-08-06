@@ -614,6 +614,38 @@ defmodule ScryCore.Actions do
     end
   end
 
+  # `in`'s own computed-list alternatives (grammar's own `comparison`
+  # comment) -- `items_expr` resolves to a bare `[String.t()]` when
+  # `path` matched (same shape `predicate_lhs`'s own passthrough
+  # produces), or an already-tagged `{:call, ...}`/`{:dot, ...}` when
+  # `call`/`call_with_path` matched. Only the bare-path shape needs
+  # wrapping as `{:field, path}` to be a resolvable expr() -- the other
+  # two already are one, distinguished from a plain path by not being a
+  # list at all (a path is always `[String.t(), ...]`; `{:call, ...}`/
+  # `{:dot, ...}` are tuples), so `is_list/1` alone disambiguates safely.
+  def handle_rule(:comparison, %{left: left_cap, items_expr: items_cap}, ctx) do
+    with {:ok, path, ctx} <- left_cap.eval.(ctx),
+         {:ok, list_expr, ctx} <- items_cap.eval.(ctx) do
+      {:ok, {:in, path, wrap_field_path(list_expr)}, ctx}
+    end
+  end
+
+  # `in`'s own left-hand side (grammar's own `in_lhs` comment) --
+  # `lhs_expr` (call_with_path/call/path) passes through completely
+  # unwrapped, exactly what `predicate_lhs` alone already produced
+  # before this; `lhs_literal` is wrapped `{:literal, value}` so
+  # `ScryCore.Executor.resolve_predicate_lhs/4` can never mistake a
+  # literal list value (`[1, 2] in ...`) for a plain field path -- see
+  # the grammar's own comment for why that collision is real, not
+  # theoretical.
+  def handle_rule(:in_lhs, %{lhs_expr: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:in_lhs, %{lhs_literal: cap}, ctx) do
+    with {:ok, value, ctx} <- cap.eval.(ctx) do
+      {:ok, {:literal, value}, ctx}
+    end
+  end
+
   def handle_rule(:list, captures, ctx) do
     with {:ok, items, ctx} <- maybe_eval(captures, :literal_list, ctx) do
       {:ok, absent_to([], items), ctx}
@@ -786,6 +818,14 @@ defmodule ScryCore.Actions do
   # `maybe_eval/3`'s own :absent sentinel, resolved to a real default.
   defp absent_to(default, :absent), do: default
   defp absent_to(_default, value), do: value
+
+  # `comparison`'s own `items_expr:path` alternative resolves to a bare
+  # `[String.t()]` (a path's own default passthrough) -- everywhere
+  # else in `Query.expr()` a path needs `{:field, ...}` wrapping to be
+  # resolvable, so this does exactly that; `{:call, ...}`/`{:dot, ...}`
+  # are already correctly tagged and pass through unchanged.
+  defp wrap_field_path(path) when is_list(path), do: {:field, path}
+  defp wrap_field_path(already_tagged), do: already_tagged
 
   # Reuses Ichor.Actions.eval_all/2 (already correct for both a single
   # capture and a repeated-under-*/+ list of them) rather than

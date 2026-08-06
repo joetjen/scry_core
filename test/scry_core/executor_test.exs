@@ -99,6 +99,19 @@ defmodule ScryCore.ExecutorTest do
     %{"id" => 2, "metadata" => ~s({"color":"blue","tags":["sale"]})}
   ]
 
+  # For `in`-with-a-computed-list: `metadata` is a genuine nested map
+  # here (unlike @tickets' own JSON-encoded *string*), the direct
+  # lang_spec.md §7 shape -- `metadata.tags` is already a list-valued
+  # subfield, no `json()` unwrapping needed. Card 2 has no "urgent" tag
+  # at all (tests the negative case); card 3's own `tags` is an empty
+  # list (tests membership against a genuinely empty computed list,
+  # not just a non-matching one).
+  @cards [
+    %{"id" => 1, "metadata" => %{"tags" => ["urgent", "new"]}},
+    %{"id" => 2, "metadata" => %{"tags" => ["sale"]}},
+    %{"id" => 3, "metadata" => %{"tags" => []}}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -111,7 +124,8 @@ defmodule ScryCore.ExecutorTest do
     ["line_items"] => @line_items,
     ["team_a"] => @team_a,
     ["team_b"] => @team_b,
-    ["tickets"] => @tickets
+    ["tickets"] => @tickets,
+    ["cards"] => @cards
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -1509,6 +1523,93 @@ defmodule ScryCore.ExecutorTest do
       }
 
       assert_raise BadMapError, ~r/"145"/, fn -> run(query) end
+    end
+  end
+
+  describe "in against a computed list (lang_spec.md §7)" do
+    test "a literal on the left against a plain field path -- the lang_spec.md §7 worked example" do
+      query = %Query{
+        source: ["cards"],
+        wheres: [{:in, {:literal, "urgent"}, {:field, ["metadata", "tags"]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, [%{"id" => 1}]} = run(query)
+    end
+
+    test "no match against the computed list is excluded, not raised" do
+      query = %Query{
+        source: ["cards"],
+        wheres: [{:in, {:literal, "urgent"}, {:field, ["metadata", "tags"]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, rows} = run(query)
+      refute Enum.any?(rows, &(&1["id"] in [2, 3]))
+    end
+
+    test "a field on the left against a computed list too, not just a literal" do
+      query = %Query{
+        source: ["users"],
+        wheres: [{:in, ["status"], {:field, ["status_allowlist"]}}],
+        select: [{:field, ["name"]}]
+      }
+
+      data =
+        Map.put(@data, ["users"], [
+          %{"name" => "Alice", "status" => "active", "status_allowlist" => ["active"]},
+          %{"name" => "Bob", "status" => "pending", "status_allowlist" => ["active"]}
+        ])
+
+      assert {:ok, [%{"name" => "Alice"}]} = Executor.run(query, FakeEngine, data)
+    end
+
+    test "a call narrowed by a dot-path as the computed list -- json(<field>).path composes with in" do
+      query = %Query{
+        source: ["tickets"],
+        wheres: [
+          {:in, {:literal, "urgent"}, {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["tags"]}}
+        ],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, [%{"id" => 1}]} = run(query)
+    end
+
+    test "a bare call as the computed list, when the call itself returns a list" do
+      data = Map.put(@data, ["tickets"], [%{"id" => 1, "metadata" => ~s(["urgent","new"])}])
+
+      query = %Query{
+        source: ["tickets"],
+        wheres: [{:in, {:literal, "urgent"}, {:call, "json", [{:field, ["metadata"]}]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, [%{"id" => 1}]} = Executor.run(query, FakeEngine, data)
+    end
+
+    test "a resolved value that isn't a list raises a clear error, not Enum.member?'s own crash" do
+      query = %Query{
+        source: ["tickets"],
+        wheres: [
+          {:in, {:literal, "urgent"},
+           {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["color"]}}
+        ],
+        select: [{:field, ["id"]}]
+      }
+
+      assert_raise ArgumentError, ~r/in \.\.\. expects a list value/, fn -> run(query) end
+    end
+
+    test "a HAVING using a computed list against a group's own representative row" do
+      query = %Query{
+        source: ["cards"],
+        group_bys: [["id"]],
+        havings: [{:in, {:literal, "urgent"}, {:field, ["metadata", "tags"]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, [%{"id" => 1}]} = run(query)
     end
   end
 end
