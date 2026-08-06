@@ -463,6 +463,15 @@ defmodule ScryCore.Actions do
     end
   end
 
+  # `count(distinct …)` (lang_spec §5.8) -- `call_arg`'s own second
+  # alternative (bare `expression`, no `DISTINCT`) needs no clause here
+  # at all, the same default single-capture passthrough `field_name :=
+  # IDENT | ESCAPED_IDENT` already relies on; only the `DISTINCT`-
+  # prefixed shape needs wrapping.
+  def handle_rule(:call_arg, %{distinct: _distinct_cap, expr: expr_cap}, ctx) do
+    with {:ok, expr, ctx} <- expr_cap.eval.(ctx), do: {:ok, {:distinct, expr}, ctx}
+  end
+
   # `when_clause` (`+`-repeated) always produces at least one element --
   # the grammar itself enforces "at least one WHEN...THEN", not a check
   # here (priv/grammar.aether's own `when_expr` comment). No absence

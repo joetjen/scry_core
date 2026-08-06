@@ -228,6 +228,35 @@ defmodule ScryCore.Executor do
   comment used to flag as real-but-unimplemented ("a native float there
   isn't yet covered"), now that `inexact(...)` is what actually produces
   one.
+
+  `*_has_aggregate_call?`'s own `{:call, ...}` clauses recurse into a
+  call's own `args`, not just check its outer `name` -- found as a real,
+  pre-existing gap while implementing `count(distinct ...)` below (not
+  present before a cast could nest an aggregate inside it): without the
+  recursion, `SELECT products { total: string(sum(price)) }` -- no
+  explicit `GROUP BY` -- never triggered grouped/flat-aggregate execution
+  at all, since `string` itself isn't in `@aggregate_names`, and instead
+  hit the per-row rejection error `sum(...)` alone already has for a
+  genuinely per-row context. Fixed, not just documented -- the "work
+  correctly for free" claim two paragraphs up was true for *resolving* a
+  nested aggregate's arguments, but detection needed the same recursion
+  applied to it independently.
+
+  **`count(distinct ...)` (lang_spec.md §5.8, "Distinct-value count").**
+  `{:distinct, expr}` (`Query.expr()`'s own moduledoc) is deduped
+  (`Enum.uniq/1`) after the same nil hard-error every other aggregate
+  operand already gets, then counted -- `eval_aggregate/5`'s own two new
+  clauses intercept it as `count`'s *specific* single-argument shape,
+  declared before the generic single-argument clause (`[{:distinct,
+  arg}]` would otherwise also structurally match `[arg]`, silently
+  treating the whole tuple as `sum`/`avg`/etc.'s own literal argument
+  value). `DISTINCT` is syntactically permitted on any call's argument at
+  the grammar level (`priv/grammar.aether`'s own `call_arg`), not just
+  `count`'s -- `sum(distinct x)` parses, then raises a real, clear error
+  at execution time (the same "grammar stays permissive, execution
+  rejects misuse" posture an unknown function name already has), same
+  for a cast (`string(distinct x)`) via `resolve_rhs/4`/
+  `resolve_group_rhs/4`'s own new `{:distinct, _}` rejection clauses.
   """
 
   alias ScryCore.{CombinedQuery, EngineBehaviour, Query, Rational}
@@ -534,10 +563,31 @@ defmodule ScryCore.Executor do
 
   defp predicate_has_aggregate_call?({:not, p}), do: predicate_has_aggregate_call?(p)
 
-  defp lhs_has_aggregate_call?({:call, name, _args}), do: name in @aggregate_names
+  # Recurses into `args` too, not just the call's own outer `name` -- a
+  # *cast* wrapping an aggregate (`string(sum(price))`) needs the same
+  # "route to grouped/flat-aggregate execution" trigger a bare `sum(
+  # price)` already gets, since `sum`'s own args still only mean
+  # anything across a group's member rows either way. Found as a real,
+  # pre-existing gap (not present before casts existed to nest an
+  # aggregate inside) while implementing `count(distinct ...)` --
+  # confirmed empirically before fixing: `SELECT products { total:
+  # string(sum(price)) }`, no explicit `GROUP BY`, used to raise "not an
+  # ordinary per-row expression" instead of correctly collapsing to one
+  # flat-aggregate row.
+  defp lhs_has_aggregate_call?({:call, name, args}),
+    do: name in @aggregate_names or Enum.any?(args, &expr_has_aggregate_call?/1)
+
   defp lhs_has_aggregate_call?(path) when is_list(path), do: false
 
-  defp expr_has_aggregate_call?({:call, name, _args}), do: name in @aggregate_names
+  defp expr_has_aggregate_call?({:call, name, args}),
+    do: name in @aggregate_names or Enum.any?(args, &expr_has_aggregate_call?/1)
+
+  # `{:distinct, expr}` (lang_spec.md §5.8's `count(distinct ...)`) is
+  # itself always an element of some call's own `args` (`priv/
+  # grammar.aether`'s own `call_arg`) -- the clause above's own
+  # `Enum.any?(args, &expr_has_aggregate_call?/1)` already reaches this,
+  # recursing one level further into the wrapped expression itself.
+  defp expr_has_aggregate_call?({:distinct, expr}), do: expr_has_aggregate_call?(expr)
 
   defp expr_has_aggregate_call?({:arith, _op, l, r}),
     do: expr_has_aggregate_call?(l) or expr_has_aggregate_call?(r)
@@ -820,6 +870,21 @@ defmodule ScryCore.Executor do
     apply_cast(name, Enum.map(args, &resolve_rhs(&1, row, scope, params)))
   end
 
+  # `{:distinct, expr}` (lang_spec.md §5.8: `count(distinct ...)`) can
+  # only ever appear as an element of some call's own `args`
+  # (`priv/grammar.aether`'s own `call_arg` -- there's no other
+  # production reaching this shape) -- `eval_aggregate/5` already
+  # intercepts it as `count`'s own single argument before this function
+  # ever sees it there. Reaching this clause means it showed up as an
+  # arg to something *else* (a cast, e.g. `string(distinct price)`, or a
+  # wrong-arity/non-`count` aggregate `resolve_rhs({:call, ...})` above
+  # already resolves args for) -- a real, clear error, not silently
+  # treating the whole `{:distinct, expr}` tuple as an opaque literal
+  # value the way falling through to the catch-all below would.
+  defp resolve_rhs({:distinct, _expr}, _row, _scope, _params) do
+    raise ArgumentError, "distinct is only valid inside count(distinct ...), not any other call"
+  end
+
   defp resolve_rhs(literal, _row, _scope, _params), do: literal
 
   defp arith(:add, a, b), do: Rational.add(a, b)
@@ -928,6 +993,14 @@ defmodule ScryCore.Executor do
     end
   end
 
+  # Same reasoning as `resolve_rhs/4`'s own equivalent clause -- reaching
+  # this means `{:distinct, expr}` showed up somewhere other than
+  # `count`'s own single argument, which `eval_aggregate/5` already
+  # intercepts before this function ever sees it there.
+  defp resolve_group_rhs({:distinct, _expr}, _member_rows, _scope, _params) do
+    raise ArgumentError, "distinct is only valid inside count(distinct ...), not any other call"
+  end
+
   defp resolve_group_rhs(literal, _member_rows, _scope, _params), do: literal
 
   defp representative([]), do: %{}
@@ -952,6 +1025,40 @@ defmodule ScryCore.Executor do
   # had one; a genuinely unknown name is `apply_cast/2`'s own concern
   # now, not reachable here at all, so there's nothing left to validate
   # defensively against.
+  # `count(distinct ...)` (lang_spec.md §5.8) -- deduped *after* the same
+  # nil hard-error every other aggregate already gets (no carve-out;
+  # `Enum.uniq/1` itself would happily let a single `nil` through
+  # otherwise, silently treating "no value" as one more distinct value
+  # to count, which the spec's own "no silent nil-skipping" line already
+  # forbids for aggregates generally). Declared *before* the generic
+  # `[arg]` clause below -- `[{:distinct, arg}]` would otherwise also
+  # structurally match `[arg]` (a single-element list is a single-element
+  # list), silently treating the whole `{:distinct, ...}` tuple as
+  # `sum`/`avg`/etc.'s own literal argument value instead of dispatching
+  # here.
+  defp eval_aggregate("count", [{:distinct, arg}], member_rows, scope, params) do
+    values = Enum.map(member_rows, &resolve_rhs(arg, &1, scope, params))
+
+    if Enum.any?(values, &is_nil/1) do
+      raise ArgumentError,
+            "aggregate count(distinct ...) encountered a nil value -- lang_spec.md's own " <>
+              "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
+              "nil-skipping); filter it out explicitly first"
+    end
+
+    values |> Enum.uniq() |> length()
+  end
+
+  # `distinct` only means anything for `count` (lang_spec.md §5.8 lists
+  # it nowhere else) -- `sum(distinct x)`/`avg(distinct x)`/etc. are
+  # syntactically reachable (`priv/grammar.aether`'s own `call_arg`
+  # comment: the grammar stays permissive, execution rejects misuse) but
+  # a real, clear error here, not silently treated as `sum`'s own literal
+  # argument.
+  defp eval_aggregate(name, [{:distinct, _arg}], _member_rows, _scope, _params) do
+    raise ArgumentError, "distinct is only valid inside count(distinct ...), not #{name}(...)"
+  end
+
   defp eval_aggregate(name, [arg], member_rows, scope, params) do
     values = Enum.map(member_rows, &resolve_rhs(arg, &1, scope, params))
 

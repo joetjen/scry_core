@@ -969,4 +969,38 @@ line two""" { name }))
     assert {:error, _} =
              run(g, ~s[SELECT users { name, SELECT a { id } UNION SELECT b { id } }])
   end
+
+  test "count(distinct ...) parses to a {:distinct, expr} wrapped argument", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders { c: count(distinct customer_id) }])
+
+    assert q.select == [
+             {:computed, "c", {:call, "count", [{:distinct, {:field, ["customer_id"]}}]}}
+           ]
+  end
+
+  test "an ordinary count(...) with no distinct is completely unaffected", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { c: count(id) }])
+    assert q.select == [{:computed, "c", {:call, "count", [{:field, ["id"]}]}}]
+  end
+
+  test "a multi-arg call with no distinct on any argument still parses unchanged", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: sum(price, tax) }])
+
+    assert q.select == [
+             {:computed, "x", {:call, "sum", [{:field, ["price"]}, {:field, ["tax"]}]}}
+           ]
+  end
+
+  test "distinct is syntactically permitted on any call's argument, not just count's", %{
+    grammar: g
+  } do
+    # Grammar stays permissive (execution rejects misuse, see
+    # ScryCore.ExecutorTest) -- confirms `sum(distinct x)` at least
+    # *parses*, matching priv/grammar.aether's own `call_arg` comment.
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: sum(distinct price) }])
+    assert q.select == [{:computed, "x", {:call, "sum", [{:distinct, {:field, ["price"]}}]}}]
+  end
 end

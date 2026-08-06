@@ -1320,4 +1320,94 @@ defmodule ScryCore.ExecutorTest do
       result
     end
   end
+
+  describe "count(distinct ...)" do
+    # @customer_orders: customer_id 1 has two orders (100, 101),
+    # customer_id 3 has one (102) -- distinct customer_ids = {1, 3}.
+
+    test "a flat count(distinct ...), no explicit GROUP BY" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [
+          {:computed, "distinct_customers",
+           {:call, "count", [{:distinct, {:field, ["customer_id"]}}]}}
+        ]
+      }
+
+      assert {:ok, [%{"distinct_customers" => 2}]} = run(query)
+    end
+
+    test "a grouped count(distinct ...)" do
+      query = %Query{
+        source: ["order_items"],
+        group_bys: [["order_id"]],
+        select: [
+          {:field, ["order_id"]},
+          {:computed, "skus", {:call, "count", [{:distinct, {:field, ["sku"]}}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert length(rows) == 3
+      assert Enum.all?(rows, &(&1["skus"] == 1))
+    end
+
+    test "an ordinary (non-distinct) count is completely unaffected" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "n", {:call, "count", [{:field, ["id"]}]}}]
+      }
+
+      assert {:ok, [%{"n" => 3}]} = run(query)
+    end
+
+    test "a cast wrapping an aggregate is detected without an explicit GROUP BY (regression)" do
+      # Found while implementing count(distinct ...): the aggregate-
+      # detection family used to only check a call's own outer name, not
+      # recurse into its args, so a cast wrapping an aggregate
+      # (string(count(distinct ...)), or even just string(sum(x))) never
+      # triggered grouped/flat-aggregate execution at all without an
+      # explicit GROUP BY, and instead hit the per-row rejection error.
+      query = %Query{
+        source: ["customer_orders"],
+        select: [
+          {:computed, "total",
+           {:call, "string", [{:call, "count", [{:distinct, {:field, ["customer_id"]}}]}]}}
+        ]
+      }
+
+      assert {:ok, [%{"total" => "2"}]} = run(query)
+    end
+
+    test "distinct hard-errors on a nil value, same as every other aggregate" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "x", {:call, "count", [{:distinct, {:field, ["missing"]}}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/encountered a nil value/, fn -> run(query) end
+    end
+
+    test "distinct on sum/avg/min/max raises a clear error, not silently treated as a literal" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "x", {:call, "sum", [{:distinct, {:field, ["total"]}}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/distinct is only valid inside count\(distinct/, fn ->
+        run(query)
+      end
+    end
+
+    test "distinct on a cast raises a clear error" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "x", {:call, "string", [{:distinct, {:field, ["total"]}}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/distinct is only valid inside count\(distinct/, fn ->
+        run(query)
+      end
+    end
+  end
 end

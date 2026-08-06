@@ -672,20 +672,36 @@ primary := literal | call | path | when_expr | LPAREN inner:expression RPAREN
 ; called as `identifier(args)` is either an EP2 namespaced extension
 ; call, or (against a `logic`-kind source) `logic`'s EP2 bare call" --
 ; so this rule accepts *any* identifier followed by parenthesized args,
-; not just the 5 real aggregates (`sum`/`avg`/`count`/`min`/`max`,
-; lang_spec §5.8 -- the rest of that section's built-ins, casts/`json`/
-; window functions/`count(distinct ...)`, stay deferred). Which names
-; are actually executable is `ScryCore.Executor`'s own concern
-; (`eval_aggregate/5`), not the grammar's -- same split as
-; `body_item_ep1`/`:variant` elsewhere in this file, a real, expected-
-; to-exist-eventually construct core doesn't fully handle yet, not an
-; error at the grammar level. At least one argument is required (no
-; `count(*)`/zero-arg calls yet -- every real §5.8 aggregate this phase
-; supports takes exactly one, matching lang_spec §11's own worked
+; not just the 9 real functions this phase executes (`sum`/`avg`/
+; `count`/`min`/`max`, `string`/`int`/`exact`/`inexact` -- the rest of
+; that section's built-ins, `json`/window functions, stay deferred).
+; Which names are actually executable is `ScryCore.Executor`'s own
+; concern (`eval_aggregate/5`/`apply_cast/2`), not the grammar's -- same
+; split as `body_item_ep1`/`:variant` elsewhere in this file, a real,
+; expected-to-exist-eventually construct core doesn't fully handle yet,
+; not an error at the grammar level. At least one argument is required
+; (no `count(*)`/zero-arg calls yet -- every real §5.8 aggregate this
+; phase supports takes exactly one, matching lang_spec §11's own worked
 ; example; window functions like `row_number()` are still deferred
 ; wholesale, so the zero-arg question doesn't need answering yet).
 call := name:IDENT LPAREN args:call_args RPAREN
-call_args := head:expression (COMMA tail:expression)*
+
+; `count(distinct …)` (lang_spec §5.8: "Distinct-value count") -- `DISTINCT`
+; is allowed syntactically as a prefix on *any* call argument here, not
+; just `count`'s own single one, the same "grammar stays permissive,
+; execution rejects misuse with a clear error" posture `call` itself
+; already has for an unknown function name (`ScryCore.Executor.
+; eval_aggregate/5`'s own comment). Reuses `KW_DISTINCT` directly -- the
+; exact same token `distinct_clause` (`select`'s own header modifier)
+; already reclassifies from `IDENT`, no new keyword needed. The
+; non-`DISTINCT` alternative passes straight through to whatever
+; `expression` itself produces (confirmed empirically, scratch grammar
+; -- `call_arg`'s own second alternative needs no `handle_rule` clause
+; at all, the same default single-capture passthrough `field_name :=
+; IDENT | ESCAPED_IDENT` already relies on), so every existing call
+; (none of which use `DISTINCT`) is completely unaffected.
+call_args := head:call_arg (COMMA tail:call_arg)*
+call_arg := distinct:KW_DISTINCT expr:expression | expression
 
 ; Conditional expression (lang_spec §5.6, §9): "Inline, not a block."
 ; Just another `primary` alternative, not a separate top-level-only

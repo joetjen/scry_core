@@ -130,15 +130,25 @@ defmodule ScryCore.Query do
   `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8, the fixed
   built-in-function surface -- `sum`/`avg`/`count`/`min`/`max` and
   `string`/`int`/`exact`/`inexact` are the 9 names actually executable
-  today; `json`/window functions/`count(distinct ...)` still deferred)
-  is deliberately not restricted to a known `name` at this type's own
-  level, the same way `:variant` isn't restricted to a known kind -- the
-  grammar (and this type) accept any `identifier(args)` call (lang_spec
-  §5.8's own framing: "anything else ... is either an EP2 namespaced
-  extension call, or ... `logic`'s EP2 bare call"), and it's
-  `ScryCore.Executor` that decides, at execution time, which names it
-  actually knows how to run (`eval_aggregate/5` for the 5 aggregates,
-  `apply_cast/2` for the 4 casts).
+  today; `json`/window functions still deferred) is deliberately not
+  restricted to a known `name` at this type's own level, the same way
+  `:variant` isn't restricted to a known kind -- the grammar (and this
+  type) accept any `identifier(args)` call (lang_spec §5.8's own
+  framing: "anything else ... is either an EP2 namespaced extension
+  call, or ... `logic`'s EP2 bare call"), and it's `ScryCore.Executor`
+  that decides, at execution time, which names it actually knows how to
+  run (`eval_aggregate/5` for the 5 aggregates, `apply_cast/2` for the 4
+  casts).
+
+  `expr()`'s own `{:distinct, expr}` (lang_spec.md §5.8: `count(distinct
+  …)`, "Distinct-value count") is meaningful only as `count`'s own
+  single argument (`ScryCore.Executor.eval_aggregate/5` dedupes the
+  resolved per-member-row values before counting) -- syntactically
+  permitted as a prefix on *any* call argument (`priv/grammar.aether`'s
+  own `call_arg` comment has the "grammar stays permissive, execution
+  rejects misuse" reasoning, the same posture an unknown function name
+  already has), but a real, clear error anywhere else (`sum(distinct
+  x)`, or nested inside arithmetic).
 
   `predicate()`'s own left-hand side (`{:cmp, op, lhs, rhs}`/`{:in, lhs,
   values}`) widens from a bare `path :: [String.t()]` to `[String.t()]
@@ -161,6 +171,7 @@ defmodule ScryCore.Query do
           | {:arith, :add | :sub | :mul | :div | :pow, expr(), expr()}
           | {:when, clauses :: [{predicate(), expr()}], else_expr :: expr()}
           | {:call, name :: String.t(), args :: [expr()]}
+          | {:distinct, expr()}
 
   @type predicate ::
           {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match,
