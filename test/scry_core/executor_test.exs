@@ -53,12 +53,40 @@ defmodule ScryCore.ExecutorTest do
     %{"name" => "D", "tier" => "silver", "score" => 4}
   ]
 
+  # For correlation/REQUIRED: Bob has no matching orders at all (tests
+  # REQUIRED dropping an outer row); Alice and Carol both do (tests
+  # limit-after-drop counts survivors, not raw sorted rows).
+  @customers [
+    %{"id" => 1, "name" => "Alice"},
+    %{"id" => 2, "name" => "Bob"},
+    %{"id" => 3, "name" => "Carol"}
+  ]
+
+  @customer_orders [
+    %{"id" => 100, "customer_id" => 1, "total" => 50},
+    %{"id" => 101, "customer_id" => 1, "total" => 75},
+    %{"id" => 102, "customer_id" => 3, "total" => 20}
+  ]
+
+  # `customer_id` here deliberately correlates to the *grandparent*
+  # (customers), not the immediate parent (customer_orders) -- proves
+  # the scope chain reaches more than one level up, not just the
+  # nearest enclosing query.
+  @order_items [
+    %{"id" => 1000, "order_id" => 100, "customer_id" => 1, "sku" => "A"},
+    %{"id" => 1001, "order_id" => 101, "customer_id" => 1, "sku" => "B"},
+    %{"id" => 1002, "order_id" => 102, "customer_id" => 3, "sku" => "C"}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
     ["products"] => @products,
     ["events"] => @events,
-    ["accounts"] => @accounts
+    ["accounts"] => @accounts,
+    ["customers"] => @customers,
+    ["customer_orders"] => @customer_orders,
+    ["order_items"] => @order_items
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -366,5 +394,107 @@ defmodule ScryCore.ExecutorTest do
     }
 
     assert_raise FunctionClauseError, fn -> run(query) end
+  end
+
+  defp orders_for(customer_id_path) do
+    %Query{
+      source: ["customer_orders"],
+      wheres: [{:cmp, :eq, ["customer_id"], {:field, customer_id_path}}],
+      select: [{:field, ["id"]}]
+    }
+  end
+
+  test "a correlated nested SELECT produces a different result per outer row" do
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["id"], :asc}],
+      select: [{:field, ["name"]}, orders_for(["customers", "id"])]
+    }
+
+    assert {:ok, rows} = run(query)
+
+    assert rows == [
+             %{
+               "name" => "Alice",
+               "customer_orders" => [%{"id" => 100}, %{"id" => 101}]
+             },
+             %{"name" => "Bob", "customer_orders" => []},
+             %{"name" => "Carol", "customer_orders" => [%{"id" => 102}]}
+           ]
+  end
+
+  test "REQUIRED drops an outer row whose correlated nested query is empty" do
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["id"], :asc}],
+      select: [{:field, ["name"]}, %{orders_for(["customers", "id"]) | required: true}]
+    }
+
+    assert {:ok, rows} = run(query)
+
+    assert rows == [
+             %{
+               "name" => "Alice",
+               "customer_orders" => [%{"id" => 100}, %{"id" => 101}]
+             },
+             %{"name" => "Carol", "customer_orders" => [%{"id" => 102}]}
+           ]
+  end
+
+  test "limit applies after REQUIRED drops rows, not before" do
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["name"], :asc}],
+      limit: 2,
+      select: [{:field, ["name"]}, %{orders_for(["customers", "id"]) | required: true}]
+    }
+
+    assert {:ok, rows} = run(query)
+
+    # Sorted ascending by name: Alice, Bob, Carol -- if limit ran before
+    # the REQUIRED drop, "top 2" would be [Alice, Bob], and dropping
+    # Bob afterward would leave only 1 row despite limit: 2. It doesn't:
+    # Bob is dropped first, so the surviving two (Alice, Carol) both
+    # make it through limit: 2.
+    assert Enum.map(rows, & &1["name"]) == ["Alice", "Carol"]
+  end
+
+  test "correlation reaches more than one nesting level up (grandparent, not just parent)" do
+    grandchild = %Query{
+      source: ["order_items"],
+      wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+      select: [{:field, ["sku"]}]
+    }
+
+    order_with_items = %Query{
+      source: ["customer_orders"],
+      wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+      select: [{:field, ["id"]}, grandchild]
+    }
+
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["id"], :asc}],
+      select: [{:field, ["name"]}, order_with_items]
+    }
+
+    assert {:ok, rows} = run(query)
+
+    assert rows == [
+             %{
+               "name" => "Alice",
+               "customer_orders" => [
+                 %{"id" => 100, "order_items" => [%{"sku" => "A"}, %{"sku" => "B"}]},
+                 %{"id" => 101, "order_items" => [%{"sku" => "A"}, %{"sku" => "B"}]}
+               ]
+             },
+             %{"name" => "Bob", "customer_orders" => []},
+             %{
+               "name" => "Carol",
+               "customer_orders" => [
+                 %{"id" => 102, "order_items" => [%{"sku" => "C"}]}
+               ]
+             }
+           ]
   end
 end

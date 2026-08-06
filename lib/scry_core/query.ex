@@ -39,6 +39,15 @@ defmodule ScryCore.Query do
   a predicate operand here instead of an output-projection marker.
   Worth knowing they're the same tag in two conceptually distinct
   positions, not two coincidentally-identical ones.
+
+  `required` (lang_spec.md §6, "Correlation and joins") is meaningful
+  only when this query is itself a nested body item -- it's read
+  entirely by the *enclosing* query's own projection step (whether to
+  drop the outer row when this one comes back empty), never by
+  anything in this query's own pipeline. A top-level query's own
+  `required` is simply never read by anything; don't go looking for
+  where `ScryCore.Executor.run/3` checks its own flag, because it
+  doesn't -- only a parent's view of a child's `required` matters.
   """
 
   @type predicate ::
@@ -61,6 +70,7 @@ defmodule ScryCore.Query do
           order_bys: [{[String.t()], :asc | :desc}],
           limit: non_neg_integer() | nil,
           offset: non_neg_integer() | nil,
+          required: boolean(),
           select: [body_item()],
           variant: %{optional(atom()) => term()}
         }
@@ -74,6 +84,7 @@ defmodule ScryCore.Query do
             order_bys: [],
             limit: nil,
             offset: nil,
+            required: false,
             select: [],
             variant: %{}
 end

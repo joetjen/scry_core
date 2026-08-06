@@ -15,36 +15,79 @@ defmodule ScryCore.Executor do
   own EP1(b)/(c)/(d) construct means, so `run/3` returns an explicit
   error rather than silently ignoring or mishandling one.
 
-  A nested `SELECT` body item is **not correlated** to its enclosing
-  row -- Phase 1's grammar (`priv/grammar.aether`) has no syntax for a
-  nested predicate to reference an outer row's fields at all yet, so
-  every outer row gets the identical nested result. A real, honest
-  limitation of what the grammar can express today, not something this
-  module works around.
-
   **`run/3` still only ignores `group_by`/`having`.** Those two need
   real aggregate-*expression* evaluation, which doesn't exist anywhere
   in this codebase yet, grammar included -- there's no syntax to even
   write `sum(total)` as a body item today, so there's nothing yet to
   execute even if this module tried. `distinct`/`order_bys`/`limit`/
-  `offset` are now applied, in the pipeline lang_spec.md §6's own
-  "Modifier ordering" paragraph describes: filter, sort (`order_bys`,
-  evaluated against each *source* row, before projection -- see
-  `sort_rows/2`'s own comment for why), project, dedupe (`distinct`,
-  the block's *projected* output shape per §6's "Deduplication
-  semantics", preserving first-occurrence order), then paginate
-  (`limit`/`offset`). lang_spec.md §5.2's own "ordering by a field
-  outside the projected shape while distinct is active is a
-  compile-time error" is **not** enforced here -- no static/compile-time
-  validation pass exists anywhere in this codebase yet (the same gap
-  `having`'s own aggregate-expression requirement has); this module
-  still produces a well-defined, deterministic result for that case
-  (sorted, pre-dedup order breaks the tie for which duplicate's
-  position "wins"), it just doesn't reject it the way a real compiler
-  eventually should.
+  `offset` are applied in the pipeline lang_spec.md §6's own "Modifier
+  ordering" paragraph describes: filter, sort (`order_bys`, evaluated
+  against each *source* row, before projection -- see `sort_rows/3`'s
+  own comment for why), project, dedupe (`distinct`, the block's
+  *projected* output shape per §6's "Deduplication semantics",
+  preserving first-occurrence order), then paginate (`limit`/`offset`).
+  lang_spec.md §5.2's own "ordering by a field outside the projected
+  shape while distinct is active is a compile-time error" is **not**
+  enforced here -- no static/compile-time validation pass exists
+  anywhere in this codebase yet (the same gap `having`'s own
+  aggregate-expression requirement has); this module still produces a
+  well-defined, deterministic result for that case (sorted, pre-dedup
+  order breaks the tie for which duplicate's position "wins"), it just
+  doesn't reject it the way a real compiler eventually should.
+
+  **Correlation and `REQUIRED` (lang_spec.md §6, "Correlation and
+  joins").** A nested `SELECT` body item's own `where` can reference an
+  *enclosing* query's row -- a path whose first segment matches an
+  ancestor `select`'s own source name (`List.last(source)`, the same
+  name this module already uses as the nested-output map key) resolves
+  against that ancestor's row instead of the current one, nearest
+  enclosing match first. There is **no self-qualification**: inside
+  `SELECT orders {...}`, a path starting with `orders.` is *not*
+  specially stripped -- it's read as an ordinary (likely absent) nested
+  field on the current row, exactly as it would be with no enclosing
+  query at all. Self-qualifying was deliberately rejected during design
+  (not just left out): it would silently reinterpret ordinary nested-
+  field access (`orders.total` meaning "this row's own nested `orders`
+  key, then `total`") as "look up `total` on the current row directly"
+  whenever a row happens to contain a field named after its own
+  source's tail segment -- a real, silent behavior change for a
+  document-shaped row, not a harmless redundancy. Dropping it keeps a
+  top-level (non-nested) `run/3` call provably unaffected: an empty
+  scope chain makes the ancestor-lookup branch below a strict no-op.
+  A narrower residual risk remains in principle -- an *ancestor's*
+  scope name colliding with a real nested-field name on a *descendant*
+  row two or more levels down -- and is left undocumented-away rather
+  than solved, the same honest posture `group_by`/`having`'s own gaps
+  already get here.
+
+  `REQUIRED` (`ScryCore.Query.required`) is read entirely by the
+  *enclosing* query's own projection step: if a `REQUIRED` nested
+  query comes back with zero rows for a given outer row, that outer
+  row is dropped from the final result entirely (INNER-JOIN-like);
+  absent `REQUIRED`, the outer row survives regardless (today's
+  existing default, LEFT-JOIN-like). Only these two states are
+  supported -- not the full LEFT/RIGHT/INNER/OUTER JOIN vocabulary.
+  RIGHT and FULL OUTER JOIN need a flat row with nulls standing in for
+  a missing side; Scry's nested/hierarchical output has no equivalent
+  flat shape, so there is no sensible place to nest a child that has
+  no matching parent at all.
+
+  **Cost.** A correlated, `REQUIRED`-marked nested query gets
+  re-fetched from scratch (full source, no pushdown --
+  `ScryCore.EngineBehaviour`'s own documented limitation) once per
+  *surviving* outer row, because `limit`/`offset` on the outer query
+  only apply after projection. This isn't a new cost *class* -- an
+  uncorrelated nested query already re-runs, redundantly, once per
+  outer row today -- but correlation is exactly what makes a nested
+  `SELECT` worth writing as a real join at real row counts, where this
+  starts to matter rather than being an unexploited memoization
+  opportunity.
   """
 
   alias ScryCore.{EngineBehaviour, Query, Rational}
+
+  @typedoc "One `{ancestor_source_name, ancestor_row}` per enclosing query, nearest first."
+  @type scope :: [{String.t(), EngineBehaviour.row()}]
 
   @doc """
   Executes `query` against `engine_module` (a module implementing
@@ -52,19 +95,27 @@ defmodule ScryCore.Executor do
   result row per source row surviving every predicate in `query.wheres`
   (combined with `and`), sorted, deduped, and paginated per
   `query.order_bys`/`query.distinct`/`query.limit`/`query.offset` --
-  see this module's own moduledoc for the exact pipeline order and what
-  it still doesn't do (`group_by`/`having`).
+  see this module's own moduledoc for the exact pipeline order, the
+  correlation/`REQUIRED` semantics, and what it still doesn't do
+  (`group_by`/`having`).
   """
   @spec run(Query.t(), module(), term()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
-  def run(%Query{} = query, engine_module, conn) do
+  def run(%Query{} = query, engine_module, conn), do: run(query, [], engine_module, conn)
+
+  @spec run(Query.t(), scope(), module(), term()) ::
+          {:ok, [EngineBehaviour.row()]} | {:error, term()}
+  defp run(%Query{} = query, scope, engine_module, conn) do
     with {:ok, rows} <- engine_module.fetch(conn, query.source) do
       sorted =
         rows
-        |> Enum.filter(&matches_all?(&1, query.wheres))
-        |> sort_rows(query.order_bys)
+        |> Enum.filter(&matches_all?(&1, query.wheres, scope))
+        |> sort_rows(query.order_bys, scope)
 
-      with {:ok, projected} <- project_all(sorted, query.select, engine_module, conn) do
+      own_name = List.last(query.source)
+
+      with {:ok, projected} <-
+             project_all(sorted, query.select, own_name, scope, engine_module, conn) do
         {:ok,
          projected
          |> maybe_dedupe(query.distinct)
@@ -73,7 +124,7 @@ defmodule ScryCore.Executor do
     end
   end
 
-  # Sorts *source* rows (`get_path/2` against the same row shape `where`
+  # Sorts *source* rows (`get_path/3` against the same row shape `where`
   # filters against), before projection -- not the projected output.
   # lang_spec.md §5.2's own "ordering by a field outside the projected
   # shape ... is a compile-time error" only makes sense read this way:
@@ -86,14 +137,16 @@ defmodule ScryCore.Executor do
   # "wins" -- `Enum.uniq/1`'s own documented first-occurrence-wins
   # behavior, combined with `Enum.sort/2`'s documented stability
   # (verified empirically, not just cited), makes that deterministic.
-  defp sort_rows(rows, []), do: rows
-  defp sort_rows(rows, order_bys), do: Enum.sort(rows, &sorts_before?(&1, &2, order_bys))
+  defp sort_rows(rows, [], _scope), do: rows
 
-  defp sorts_before?(_a, _b, []), do: true
+  defp sort_rows(rows, order_bys, scope),
+    do: Enum.sort(rows, &sorts_before?(&1, &2, order_bys, scope))
 
-  defp sorts_before?(a, b, [{path, direction} | rest]) do
-    case term_order(get_path(a, path), get_path(b, path)) do
-      :eq -> sorts_before?(a, b, rest)
+  defp sorts_before?(_a, _b, [], _scope), do: true
+
+  defp sorts_before?(a, b, [{path, direction} | rest], scope) do
+    case term_order(get_path(a, scope, path), get_path(b, scope, path)) do
+      :eq -> sorts_before?(a, b, rest, scope)
       :lt -> direction == :asc
       :gt -> direction == :desc
     end
@@ -114,38 +167,41 @@ defmodule ScryCore.Executor do
   defp take_limit(rows, nil), do: rows
   defp take_limit(rows, limit), do: Enum.take(rows, limit)
 
-  defp matches_all?(row, wheres), do: Enum.all?(wheres, &eval_predicate(&1, row))
+  defp matches_all?(row, wheres, scope), do: Enum.all?(wheres, &eval_predicate(&1, row, scope))
 
-  # `rhs` resolves first (either the literal value as-is, or -- new,
-  # lang_spec.md §5.9 -- another field's value via `{:field, path}`,
-  # the same tag `Query.body_item/0` uses for a projected field),
-  # *then* dispatches on what it resolved to. Collapsing what used to
-  # be two separate clauses (one `:match`-only, one everything-else)
-  # into one resolve-then-dispatch shape closes a real gap the old
-  # split would otherwise have reopened for `{:field, ...}`: `WHERE
-  # name ~ some_field` where `some_field` resolves to a non-regex would
-  # have hit the generic `compare/3` clause -> `ordering_result(:match,
-  # _)`, an undocumented `FunctionClauseError`, instead of the same
-  # (deliberate, documented) crash `Regex.match?/2` itself already
-  # gives for a non-string *left*-hand value. No defensive
+  # `rhs` resolves first (either the literal value as-is, or -- lang_spec
+  # §5.9 -- another field's value via `{:field, path}`, the same tag
+  # `Query.body_item/0` uses for a projected field, now scope-aware so it
+  # can reach across a nesting boundary), *then* dispatches on what it
+  # resolved to. Resolve-then-dispatch (rather than one clause per
+  # op/shape combination) closes a real gap the naive split would
+  # otherwise reopen: `WHERE name ~ some_field` where `some_field`
+  # resolves to a non-regex hits the same (deliberate, documented) crash
+  # `Regex.match?/2` itself already gives for a non-string *left*-hand
+  # value, not a fresh, undocumented `FunctionClauseError`. No defensive
   # `is_binary/1`/`is_struct/2` guard here either -- the same "not
   # specially hardened against a type mismatch" posture every other
   # predicate in this module already has (e.g. `<`/`>` against
   # mismatched types already "works" via Erlang's own total term order
   # without erroring, just not usefully).
-  defp eval_predicate({:cmp, op, path, rhs}, row) do
-    left = get_path(row, path)
+  defp eval_predicate({:cmp, op, path, rhs}, row, scope) do
+    left = get_path(row, scope, path)
 
-    case resolve_rhs(rhs, row) do
+    case resolve_rhs(rhs, row, scope) do
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
       right -> compare(op, left, right)
     end
   end
 
-  defp eval_predicate({:in, path, values}, row), do: get_path(row, path) in values
-  defp eval_predicate({:and, l, r}, row), do: eval_predicate(l, row) and eval_predicate(r, row)
-  defp eval_predicate({:or, l, r}, row), do: eval_predicate(l, row) or eval_predicate(r, row)
-  defp eval_predicate({:not, p}, row), do: not eval_predicate(p, row)
+  defp eval_predicate({:in, path, values}, row, scope), do: get_path(row, scope, path) in values
+
+  defp eval_predicate({:and, l, r}, row, scope),
+    do: eval_predicate(l, row, scope) and eval_predicate(r, row, scope)
+
+  defp eval_predicate({:or, l, r}, row, scope),
+    do: eval_predicate(l, row, scope) or eval_predicate(r, row, scope)
+
+  defp eval_predicate({:not, p}, row, scope), do: not eval_predicate(p, row, scope)
 
   defp compare(op, a, b), do: ordering_result(op, term_order(a, b))
 
@@ -184,7 +240,7 @@ defmodule ScryCore.Executor do
   # kind) -- so `<`/`>` are always well-defined for any two terms, and
   # this genuinely *is* `a == b` whenever neither holds, not an
   # approximation of it. `compare/2`'s own final fallback, and directly
-  # used by `sorts_before?/3` for any value type that doesn't need one
+  # used by `sorts_before?/4` for any value type that doesn't need one
   # of the special cases above.
   defp term_order(a, b) do
     cond do
@@ -194,7 +250,7 @@ defmodule ScryCore.Executor do
     end
   end
 
-  # Shared by `compare/2` above and `sorts_before?/3` -- both ultimately
+  # Shared by `compare/2` above and `sorts_before?/4` -- both ultimately
   # just need to turn a `term_order/2` result into what they
   # respectively want (a boolean for a given comparison operator; a
   # three-way branch for a sort comparator).
@@ -205,16 +261,42 @@ defmodule ScryCore.Executor do
   defp ordering_result(:le, ordering), do: ordering != :gt
   defp ordering_result(:ge, ordering), do: ordering != :lt
 
-  defp get_path(row, [key]), do: Map.get(row, key)
-  defp get_path(row, [key | rest]), do: row |> Map.get(key, %{}) |> get_path(rest)
+  # A single-segment path is never a qualified (cross-scope) reference --
+  # it has nothing after a would-be qualifier to look up -- so it always
+  # resolves against the current row directly, the same as with no scope
+  # at all. This isn't just a shortcut: without it, a one-segment path
+  # whose sole segment happens to match a scope name would fall into the
+  # clause below and recurse into `get_path_in(scoped_row, [])`, which
+  # has no clause for an empty list.
+  #
+  # Otherwise, the first segment is checked against `scope` (nearest
+  # enclosing query first, per how `scope` is built in `project_item/6`
+  # below) -- a match resolves the *rest* of the path against that
+  # ancestor's row; no match falls through to ordinary same-row nested
+  # lookup (`get_path_in/2`, this module's original, unqualified
+  # behavior, entirely unchanged). See this module's own moduledoc for
+  # why there is deliberately no equivalent check against the *current*
+  # query's own name.
+  defp get_path(row, _scope, [_single] = path), do: get_path_in(row, path)
 
-  defp resolve_rhs({:field, path}, row), do: get_path(row, path)
-  defp resolve_rhs(literal, _row), do: literal
+  defp get_path(row, scope, [qualifier | rest] = path) do
+    case List.keyfind(scope, qualifier, 0) do
+      {^qualifier, scoped_row} -> get_path_in(scoped_row, rest)
+      nil -> get_path_in(row, path)
+    end
+  end
 
-  defp project_all(rows, select_items, engine_module, conn) do
+  defp get_path_in(row, [key]), do: Map.get(row, key)
+  defp get_path_in(row, [key | rest]), do: row |> Map.get(key, %{}) |> get_path_in(rest)
+
+  defp resolve_rhs({:field, path}, row, scope), do: get_path(row, scope, path)
+  defp resolve_rhs(literal, _row, _scope), do: literal
+
+  defp project_all(rows, select_items, own_name, scope, engine_module, conn) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
-      case project(row, select_items, engine_module, conn) do
+      case project(row, select_items, own_name, scope, engine_module, conn) do
         {:ok, projected} -> {:cont, {:ok, [projected | acc]}}
+        :skip -> {:cont, {:ok, acc}}
         {:error, _} = err -> {:halt, err}
       end
     end)
@@ -224,27 +306,52 @@ defmodule ScryCore.Executor do
     end
   end
 
-  defp project(row, select_items, engine_module, conn) do
+  # Halts on the first `:skip` -- once one `REQUIRED` nested query is
+  # empty for this row, the whole row is already guaranteed dropped, so
+  # there's no reason to keep evaluating the rest of the body items
+  # (including, potentially, other expensive nested queries). This also
+  # gives correct AND-across-multiple-`REQUIRED`-children semantics for
+  # free: a row with two `REQUIRED` nested selects is only kept if
+  # *both* are non-empty, matching how a SQL row surviving a chain of
+  # `INNER JOIN`s needs every one of them to match.
+  defp project(row, select_items, own_name, scope, engine_module, conn) do
     Enum.reduce_while(select_items, {:ok, %{}}, fn item, {:ok, acc} ->
-      case project_item(item, row, engine_module, conn) do
+      case project_item(item, row, own_name, scope, engine_module, conn) do
         {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+        :skip -> {:halt, :skip}
         {:error, _} = err -> {:halt, err}
       end
     end)
   end
 
-  defp project_item({:field, path}, row, _engine_module, _conn) do
-    {:ok, List.last(path), get_path(row, path)}
+  defp project_item({:field, path}, row, _own_name, scope, _engine_module, _conn) do
+    {:ok, List.last(path), get_path(row, scope, path)}
   end
 
-  defp project_item(%Query{source: source} = nested, _row, engine_module, conn) do
-    case run(nested, engine_module, conn) do
-      {:ok, nested_rows} -> {:ok, List.last(source), nested_rows}
+  # `[{own_name, row} | scope]` -- the enclosing row becomes the nearest
+  # entry in the *nested* query's own scope chain, so its own `where`
+  # (and `order_by`) can reach it via `get_path/3` above, multiple
+  # nesting levels deep if needed (each level just prepends its own
+  # entry before recursing). `{:ok, []} when required` is the one place
+  # `REQUIRED` actually does anything -- everywhere else in this module,
+  # `query.required` is simply never read (see this module's own
+  # moduledoc, and `Query`'s).
+  defp project_item(
+         %Query{required: required} = nested,
+         row,
+         own_name,
+         scope,
+         engine_module,
+         conn
+       ) do
+    case run(nested, [{own_name, row} | scope], engine_module, conn) do
+      {:ok, []} when required -> :skip
+      {:ok, nested_rows} -> {:ok, List.last(nested.source), nested_rows}
       {:error, _} = err -> err
     end
   end
 
-  defp project_item({:variant, _} = item, _row, _engine_module, _conn) do
+  defp project_item({:variant, _} = item, _row, _own_name, _scope, _engine_module, _conn) do
     {:error, {:unsupported_body_item, item}}
   end
 end

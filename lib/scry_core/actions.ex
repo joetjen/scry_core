@@ -149,6 +149,7 @@ defmodule ScryCore.Actions do
          {:ok, distinct, ctx} <- maybe_eval(captures, :distinct_clause, ctx),
          {:ok, order_bys, ctx} <- maybe_eval(captures, :order_by_clause, ctx),
          {:ok, limit_and_offset, ctx} <- maybe_eval(captures, :limit_clause, ctx),
+         {:ok, required, ctx} <- maybe_eval(captures, :required_clause, ctx),
          {:ok, select, ctx} <- captures.body.eval.(ctx) do
       variant = if ep1a == :absent, do: %{}, else: %{select_ep1a: ep1a}
       wheres = if where_pred == :absent, do: [], else: [where_pred]
@@ -165,6 +166,7 @@ defmodule ScryCore.Actions do
          order_bys: absent_to([], order_bys),
          limit: limit,
          offset: offset,
+         required: required != :absent,
          select: select,
          variant: variant
        }, ctx}

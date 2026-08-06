@@ -199,7 +199,7 @@ defmodule ScryCore.ActionsTest do
              run(
                g,
                ~s(SELECT orders WHERE total > 50 GROUP BY status DISTINCT
-                  ORDER BY status LIMIT 5 OFFSET 1 { status })
+                  ORDER BY status LIMIT 5 OFFSET 1 REQUIRED { status })
              )
 
     assert q.wheres == [{:cmp, :gt, ["total"], 50}]
@@ -208,6 +208,29 @@ defmodule ScryCore.ActionsTest do
     assert q.order_bys == [{["status"], :asc}]
     assert q.limit == 5
     assert q.offset == 1
+    assert q.required
+  end
+
+  test "REQUIRED is absent by default and present when written", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders { id }))
+    refute q.required
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT orders REQUIRED { id }))
+    assert q2.required
+  end
+
+  test "REQUIRED on a nested SELECT, correlated to the outer row via a field-to-field comparison",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(SELECT users { name, SELECT orders WHERE user_id = users.id REQUIRED { id } })
+             )
+
+    assert [{:field, ["name"]}, %Query{} = nested] = q.select
+    assert nested.source == ["orders"]
+    assert nested.wheres == [{:cmp, :eq, ["user_id"], {:field, ["users", "id"]}}]
+    assert nested.required
   end
 
   test "the fixed modifier order is enforced -- writing modifiers out of order fails to parse", %{
@@ -215,6 +238,7 @@ defmodule ScryCore.ActionsTest do
   } do
     assert {:error, _} = run(g, ~s(SELECT users LIMIT 5 WHERE age > 30 { name }))
     assert {:error, _} = run(g, ~s(SELECT users ORDER BY age DISTINCT { name }))
+    assert {:error, _} = run(g, ~s(SELECT users REQUIRED LIMIT 5 { name }))
   end
 
   test "double-quoted string escapes: quote, backslash, newline, tab", %{grammar: g} do

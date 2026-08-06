@@ -31,7 +31,8 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "limit" => :KW_LIMIT,
     "offset" => :KW_OFFSET,
     "desc" => :KW_DESC,
-    "asc" => :KW_ASC
+    "asc" => :KW_ASC,
+    "required" => :KW_REQUIRED
   }
 
   @impl true
