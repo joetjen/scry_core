@@ -103,17 +103,25 @@ defmodule ScryCore.Actions do
     end
   end
 
-  # Single-letter tag, `/` the only delimiter -- priv/grammar.aether's
-  # own SIGIL comment has the full reasoning (arbitrary-delimiter
-  # backreferencing isn't expressible as a plain token pattern). `r` is
-  # the one concrete tag lang_spec.md §4 actually specifies; any other
-  # is a real, reportable error rather than a silent no-op or a guess at
-  # unspecified semantics. `Regex.compile/1`'s own `{:error, {message,
-  # index}}` is already a valid `handle_token/3` error shape, passed
-  # through unchanged -- same "let the stdlib's own error surface as an
-  # ordinary parse error" pattern DATE already established.
-  def handle_token(:SIGIL, <<"@", tag::binary-size(1), "/", rest::binary>>, _ctx) do
-    content = rest |> String.slice(0..-2//1) |> String.replace("\\/", "/")
+  # Any single-byte delimiter now (`ScryCore.Grammar.SigilLexeme`'s own
+  # moduledoc has the "why this needed `@native`" reasoning) -- the
+  # delimiter is read from the matched text itself (the byte right after
+  # the tag), not assumed to be `/`. `r` is the one concrete tag
+  # lang_spec.md §4 actually specifies; any other is a real, reportable
+  # error rather than a silent no-op or a guess at unspecified semantics.
+  # `Regex.compile/1`'s own `{:error, {message, index}}` is already a
+  # valid `handle_token/3` error shape, passed through unchanged -- same
+  # "let the stdlib's own error surface as an ordinary parse error"
+  # pattern DATE already established.
+  def handle_token(
+        :SIGIL,
+        <<"@", tag::binary-size(1), delim::binary-size(1), rest::binary>>,
+        _ctx
+      ) do
+    content =
+      rest
+      |> String.slice(0..-2//1)
+      |> String.replace("\\" <> delim, delim)
 
     case tag do
       "r" -> Regex.compile(content)

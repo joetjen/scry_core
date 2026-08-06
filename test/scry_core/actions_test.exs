@@ -519,6 +519,31 @@ line two""" { name }))
     assert {:error, _} = run(g, ~s(SELECT users WHERE name ~ @r/[a-z/ { name }))
   end
 
+  test "a sigil with a delimiter other than /, letting a / appear in the pattern unescaped", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} =
+             run(g, ~S(SELECT users WHERE path ~ @r|^/usr/local/.*| { name }))
+
+    assert [{:cmp, :match, ["path"], %Regex{source: "^/usr/local/.*"}}] = q.wheres
+  end
+
+  test "a # delimiter, another arbitrary choice", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE name ~ @r#^A.*# { name }))
+    assert [{:cmp, :match, ["name"], %Regex{source: "^A.*"}}] = q.wheres
+  end
+
+  test "a non-/ sigil still escapes its own delimiter the same way", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S(SELECT users WHERE path ~ @r|a\|b| { name }))
+    assert [{:cmp, :match, ["path"], %Regex{source: "a|b"}}] = q.wheres
+  end
+
+  test "an unterminated sigil with a non-/ delimiter is still a parse error, not a raise", %{
+    grammar: g
+  } do
+    assert {:error, _} = run(g, ~s(SELECT users WHERE name ~ @r|unterminated { name }))
+  end
+
   test "a field-to-field comparison (right-hand side is a path, not a literal)", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT products WHERE price > cost { name }))
     assert q.wheres == [{:cmp, :gt, ["price"], {:field, ["cost"]}}]

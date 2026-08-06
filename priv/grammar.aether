@@ -25,8 +25,9 @@
 ;     8601 date/timestamp literals (a real `Date`/`NaiveDateTime`/
 ;     `DateTime`, per what's present -- calendar validation happens via
 ;     the stdlib in ScryCore.Actions, not in the grammar), regex sigils
-;     (`@r/.../ `, `/`-delimited only for now -- SIGIL's own comment has
-;     the "any delimiter" reasoning) paired with the `~` match operator,
+;     (`@r/.../ `, any single-byte delimiter -- `SIGIL`'s own comment has
+;     the mechanics, via Aether's `@native`/`CustomLexeme` escape hatch)
+;     paired with the `~` match operator,
 ;     nil/true/false (§4), duration/byte-size literals (`DURATION`/
 ;     `BYTE_SIZE`'s own comments have the concrete unit vocabulary
 ;     chosen, mirrored in lang_spec.md itself) -- the rest of the
@@ -266,24 +267,16 @@ ESCAPE := "\\" ("\"" | "'" | "\\" | "n" | "t" | "u" HEX HEX HEX HEX)
 ; requiring the same character back at the close is a backreference,
 ; and neither Aether's native token primitives nor its own regex-sigil
 ; desugaring support those (the latter rejects `\1`-`\9` outright, per
-; guides/aether/AETHER.md's own "Regex literals" section). `/` only,
-; for now -- lang_spec's one worked example (`@r/^[a-z]+@/`) uses it,
-; and true "any delimiter" support needs Aether's `@native`/
-; `CustomLexeme` escape hatch (real Elixir code plugged into the
-; lexer), not investigated yet. Tag is a single letter, not
-; `[[:alpha:]]+` -- lang_spec gives exactly one concrete tag (`r`);
-; supporting an arbitrary-length tag name ahead of a second real one
-; existing is exactly the kind of "design for a hypothetical future
-; requirement" this codebase otherwise avoids.
-;
-; `\/ ` inside content is the one recognized escape (lets a `/` appear
-; literally without ending the sigil) -- deliberately *not* reusing
-; ESCAPE/`unescape/1`: sigil content is regex syntax, where `\d`/`\s`/
-; etc. are meaningful to the regex engine itself and must reach it
-; completely unmodified, not be resolved as if they were string
-; escapes.
-SIGIL         := "@" [[:alpha:]] "/" (SIGIL_ESCAPE | !"/" .)* "/"
-SIGIL_ESCAPE  := "\\" "/"
+; guides/aether/AETHER.md's own "Regex literals" section). Handed to
+; `ScryCore.Grammar.SigilLexeme.scan/3` via Aether's own `@native`/
+; `Ichor.CustomLexeme` escape hatch (real Elixir code plugged into the
+; lexer) -- that module's own moduledoc has the full mechanics,
+; confirmed via a scratch grammar before landing this shape (a `nil`
+; capture override correctly falls through to the ordinary per-token
+; path, so `ScryCore.Actions.handle_token/3`'s own `:SIGIL` clause needs
+; only a small generalization -- reading the delimiter from the matched
+; text itself -- not a rewrite).
+SIGIL := @native("ScryCore.Grammar.SigilLexeme", "scan")
 
 ; ---- operators / delimiters ----
 
