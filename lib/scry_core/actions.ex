@@ -386,12 +386,19 @@ defmodule ScryCore.Actions do
   end
 
   # The real root (priv/grammar.aether's own `@root document`/`document`
-  # comments have the full reasoning). `type_decl`/`fragment_decl`/
-  # `with_decl` are all bare/unrenamed and `*`-repeated, so each always
-  # has its own key -- `[]`, not a missing one, when absent (confirmed
-  # empirically, same finding as `additive_tail`/`when_clause` elsewhere
-  # in this module), so no `maybe_eval` is needed here the way an
-  # *optional* rule reference would need.
+  # comments have the full reasoning). `type_or_comment`/
+  # `fragment_or_comment`/`with_or_comment` are all bare/unrenamed and
+  # `*`-repeated, so each always has its own key -- `[]`, not a missing
+  # one, when absent (confirmed empirically, same finding as
+  # `additive_tail`/`when_clause` elsewhere in this module), so no
+  # `maybe_eval` is needed here the way an *optional* rule reference
+  # would need. Each list is filtered down to just the real
+  # declarations (`is_tuple/1` -- a real one is always `{name, value}`;
+  # a matched `BLOCK_COMMENT` inside one of these wrapper rules is a
+  # bare token string, its own default passthrough) before building the
+  # name map -- priv/grammar.aether's own `document` comment has the
+  # full "why a comment and a real declaration are mutually exclusive
+  # alternatives at the same position" reasoning.
   #
   # Duplicate `TYPE`/`FRAGMENT`/`WITH` names are each a real, reportable
   # compile error (`Map.new/2` would otherwise silently let the second
@@ -417,19 +424,22 @@ defmodule ScryCore.Actions do
   def handle_rule(
         :document,
         %{
-          type_decl: type_caps,
-          fragment_decl: frag_caps,
-          with_decl: with_caps,
+          type_or_comment: type_caps,
+          fragment_or_comment: frag_caps,
+          with_or_comment: with_caps,
           select: select_cap
         },
         ctx
       ) do
-    with {:ok, types, ctx} <- eval_list(:type_decl, type_caps, ctx),
-         {:ok, type_decls} <- build_name_map(types, :duplicate_type),
-         {:ok, frags, ctx} <- eval_list(:fragment_decl, frag_caps, ctx),
-         {:ok, fragments} <- build_name_map(frags, :duplicate_fragment),
-         {:ok, withs, ctx} <- eval_list(:with_decl, with_caps, ctx),
-         {:ok, with_bindings} <- build_name_map(withs, :duplicate_with),
+    with {:ok, type_items, ctx} <- eval_list(:type_or_comment, type_caps, ctx),
+         {:ok, type_decls} <-
+           build_name_map(Enum.filter(type_items, &is_tuple/1), :duplicate_type),
+         {:ok, frag_items, ctx} <- eval_list(:fragment_or_comment, frag_caps, ctx),
+         {:ok, fragments} <-
+           build_name_map(Enum.filter(frag_items, &is_tuple/1), :duplicate_fragment),
+         {:ok, with_items, ctx} <- eval_list(:with_or_comment, with_caps, ctx),
+         {:ok, with_bindings} <-
+           build_name_map(Enum.filter(with_items, &is_tuple/1), :duplicate_with),
          :ok <- ScryCore.WithCycleCheck.check(with_bindings),
          {:ok, result, ctx} <- select_cap.eval.(ctx) do
       case ScryCore.FragmentResolver.resolve(result, fragments) do

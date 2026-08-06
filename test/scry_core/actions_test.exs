@@ -1375,4 +1375,107 @@ line two""" { name }))
       assert Map.has_key?(q.type_decls, "T")
     end
   end
+
+  describe "; block comments (lang_spec.md §3)" do
+    test "comments out an entire alternate SELECT before the real one", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, "; SELECT orders { total }\nSELECT users { id }")
+
+      assert q.source == ["users"]
+    end
+
+    test "comments out a TYPE declaration, a real one still parses", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, "; TYPE Bad { id: Int }\nTYPE Good { id: Int }\nSELECT users { id }")
+
+      assert Map.keys(q.type_decls) == ["Good"]
+    end
+
+    test "comments out a FRAGMENT declaration entirely", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, "; FRAGMENT f { id }\nSELECT users { id }")
+      assert q.source == ["users"]
+    end
+
+    test "comments out a WITH declaration entirely", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, "; WITH x = SELECT orders { id }\nSELECT users { id }")
+
+      assert q.with_bindings == %{}
+    end
+
+    test "a real declaration followed by a commented-out one, order preserved", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, "TYPE A { id: Int }\n; TYPE B { id: Int }\nSELECT users { id }")
+
+      assert Map.keys(q.type_decls) == ["A"]
+    end
+
+    test "depth-counts through a nested SELECT inside the commented-out construct", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} =
+               run(g, "; SELECT users { name, SELECT orders { id } }\nSELECT users { id }")
+
+      assert q.select == [{:field, ["id"]}]
+    end
+
+    test "a { or } inside a string literal in the commented-out construct doesn't affect depth counting",
+         %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s(; SELECT users WHERE name = "a { b } c" { id }\nSELECT users { id }))
+
+      assert q.source == ["users"]
+    end
+
+    test "the same, with a single-quoted string", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s(; SELECT users WHERE name = 'a { b } c' { id }\nSELECT users { id }))
+
+      assert q.source == ["users"]
+    end
+
+    test "the same, with a triple-quoted multiline string", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s(; SELECT users WHERE name = """a { b } c""" { id }\nSELECT users { id })
+               )
+
+      assert q.source == ["users"]
+    end
+
+    test "a trailing # comment right after the closing brace is unaffected", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, "; SELECT orders { id } # leftover note\nSELECT users { id }")
+
+      assert q.source == ["users"]
+    end
+
+    test "case-insensitive keyword matching, same as every other structural keyword", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} = run(g, "; select orders { id }\nSELECT users { id }")
+      assert q.source == ["users"]
+    end
+
+    test "an unterminated block comment is a compile error", %{grammar: g} do
+      assert {:error, _} = run(g, "; SELECT users { id\nSELECT users { id }")
+    end
+
+    test "; not immediately followed by a recognized keyword is a compile error", %{
+      grammar: g
+    } do
+      assert {:error, _} = run(g, "; users { id }\nSELECT users { id }")
+    end
+
+    test "real declarations are completely unaffected when no block comment is present", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} =
+               run(g, "TYPE T { id: Int }\nFRAGMENT f { id }\nSELECT users { ...f }")
+
+      assert Map.has_key?(q.type_decls, "T")
+      assert q.select == [{:field, ["id"]}]
+    end
+  end
 end

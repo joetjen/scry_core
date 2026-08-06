@@ -4,13 +4,13 @@
 ; composition architecture (impl_spec.md §2/§4) can be proven against a
 ; real parser before the full language is written out. Phase 1 has:
 ;
-;   - `#` line comments (lang_spec §3) -- `;` block comments deferred
-;     (a real gap, not just an unstarted one: lang_spec §3 defines it as
-;     consuming its own matching `}` via `{`/`}` depth counting, which
-;     is a context-free, not regular, construct -- it cannot be
-;     expressed as lexer-level trivia the way `#`/SPACE are, in Aether
-;     or any other PEG-lexer; it needs real parser-level (rule) support,
-;     a materially bigger undertaking than "add another comment token")
+;   - `#` line comments and `;` block comments (lang_spec §3) -- the
+;     latter genuinely is a context-free, not regular, construct
+;     (consuming its own matching `}` via `{`/`}` depth counting), so it
+;     cannot be a plain lexer-level token the way `#`/SPACE are; it
+;     needs Aether's own `@native`/`CustomLexeme` escape hatch instead
+;     (`BLOCK_COMMENT`'s own comment below, `ScryCore.Grammar.
+;     BlockCommentLexeme`'s moduledoc has the full mechanics)
 ;   - bare identifiers + dot-path, backtick-escaped on keyword collision
 ;     (`` `select` ``, §3)
 ;   - double- and single-quoted strings with real escape handling
@@ -75,6 +75,30 @@
 
 COMMENT := "#" (!"\n" .)*
 TRIVIA  := (SPACE | COMMENT)*
+
+; `;` block comments (lang_spec §3) -- ScryCore.Grammar.BlockCommentLexeme's
+; own moduledoc has the full mechanics (Aether's `@native`/`CustomLexeme`
+; escape hatch, verified via scratch grammar first, the same way `SIGIL`'s
+; own "any delimiter" support was). Genuinely a context-free construct
+; (nested `{`/`}` depth counting) no plain token pattern could express.
+;
+; Deliberately *not* folded into `TRIVIA` -- confirmed empirically (the
+; hard way, a real `Grammar.VM.Linker` crash caught before this reached
+; `develop`) that a `CustomLexeme` token can never be referenced from
+; inside *another* token's own body (`guides/aether/AETHER.md`'s own
+; `@native` section says as much -- "can't be referenced from inside
+; another token's body, and can't be composed inside a larger token
+; expression" -- a constraint this file's own `SIGIL` change didn't run
+; into, since `SIGIL` is only ever referenced from a *rule* (`literal`),
+; never from inside `TRIVIA` itself). Wired in at the *rule* level
+; instead, exactly where lang_spec's own "valid only immediately before
+; a block-opening keyword" wording already points -- see `document`'s
+; own comment for the `*_or_comment` wrapper-rule shape this uses,
+; verified against `Grammar.VM` specifically (the interpreted backend
+; this project's own test suite runs against, not just the native
+; codegen backend a first pass verified against and wrongly trusted was
+; equivalent).
+BLOCK_COMMENT := @native("ScryCore.Grammar.BlockCommentLexeme", "scan")
 
 ; ---- identifiers / keywords ----
 ;
@@ -421,7 +445,32 @@ NEVER := []
 ; nothing consumes it yet" posture `body_item_ep1 := NEVER`/`:variant`
 ; already have for an EP1(b)/(c)/(d) construct with no real kind
 ; contributing one yet.
-document := type_decl* fragment_decl* with_decl* select:combined_select TRIVIA?
+;
+; `*_or_comment*`, not bare `type_decl*`/etc -- `;` block comments
+; (lang_spec §3, `BLOCK_COMMENT`'s own comment above) are valid
+; "immediately before a block-opening keyword," which a real
+; declaration and a comment *replacing* one are mutually exclusive
+; alternatives at any given position (a matched `BLOCK_COMMENT` already
+; consumed an entire would-be declaration's own text, so there's never
+; anything left there for `type_decl`/etc itself to also try matching).
+; Each wrapper is a plain, unrenamed, bare alternation (`type_decl |
+; BLOCK_COMMENT`) repeated the same way `body_item` itself already is
+; inside `body_list`'s own `(COMMA tail:body_item)*` -- proven safe
+; already, not a new shape. `ScryCore.Actions`' own `document` handler
+; filters each resulting list down to just the real declarations
+; (`is_tuple/1` -- a real one is always `{name, value}`; a matched
+; `BLOCK_COMMENT`'s own default passthrough is a bare token string)
+; before building the name map, so a comment contributes nothing to the
+; result, exactly as if it had never been there. Verified via scratch
+; grammar against `Grammar.VM` specifically (this project's own
+; interpreted test-suite backend) before landing this shape -- see
+; `BLOCK_COMMENT`'s own comment for why that specificity mattered here.
+document := type_or_comment* fragment_or_comment* with_or_comment*
+            select:combined_select TRIVIA?
+
+type_or_comment := type_decl | BLOCK_COMMENT
+fragment_or_comment := fragment_decl | BLOCK_COMMENT
+with_or_comment := with_decl | BLOCK_COMMENT
 
 ; `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` (lang_spec §5.4, "Top-level,
 ; joining two complete select blocks"). Bare, unrenamed
