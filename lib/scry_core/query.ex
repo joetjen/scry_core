@@ -94,6 +94,30 @@ defmodule ScryCore.Query do
   own expression, falling back to `else_expr` if none match -- `ELSE`
   is mandatory at the grammar level (no default, no implicit `nil`),
   not just a documented expectation.
+
+  `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8: `sum`/`avg`/
+  `count`/`min`/`max`, the fixed built-in-function surface -- casts/
+  `json`/window functions/`count(distinct ...)` deferred) is
+  deliberately not restricted to a known-aggregate `name` at this type's
+  own level, the same way `:variant` isn't restricted to a known kind --
+  the grammar (and this type) accept any `identifier(args)` call
+  (lang_spec §5.8's own framing: "anything else ... is either an EP2
+  namespaced extension call, or ... `logic`'s EP2 bare call"), and it's
+  `ScryCore.Executor.eval_aggregate/5` that decides, at execution time,
+  which names it actually knows how to run.
+
+  `predicate()`'s own left-hand side (`{:cmp, op, lhs, rhs}`/`{:in, lhs,
+  values}`) widens from a bare `path :: [String.t()]` to `[String.t()]
+  | {:call, String.t(), [expr()]}` for the same reason -- lang_spec
+  §11's own worked example needs `HAVING sum(total) > 200`, a function
+  call on a comparison's *left* side, which a bare path alone can never
+  be. Narrower than a full `expr()` on purpose (unlike `rhs`, which
+  already accepts one): a bare field predicate still produces exactly
+  the same plain `[String.t()]` this type always has, so every existing
+  predicate shape is unaffected -- only the new call-as-lhs shape is new
+  surface. The right-hand side is *not* widened the same way (`HAVING
+  sum(a) > avg(b)`, a call on *both* sides, stays unsupported) -- the
+  one concrete need is call-on-the-left-only.
   """
 
   @type expr ::
@@ -102,11 +126,14 @@ defmodule ScryCore.Query do
           | {:param, String.t()}
           | {:arith, :add | :sub | :mul | :div | :pow, expr(), expr()}
           | {:when, clauses :: [{predicate(), expr()}], else_expr :: expr()}
+          | {:call, name :: String.t(), args :: [expr()]}
 
   @type predicate ::
-          {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match, path :: [String.t()],
+          {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match,
+           lhs :: [String.t()] | {:call, String.t(), [expr()]},
            rhs :: term() | {:field, [String.t()]} | {:param, String.t()}}
-          | {:in, path :: [String.t()], values :: [term() | {:param, String.t()}]}
+          | {:in, lhs :: [String.t()] | {:call, String.t(), [expr()]},
+             values :: [term() | {:param, String.t()}]}
           | {:and, predicate(), predicate()}
           | {:or, predicate(), predicate()}
           | {:not, predicate()}

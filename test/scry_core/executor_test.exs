@@ -770,4 +770,186 @@ defmodule ScryCore.ExecutorTest do
              %{"name" => "Carol", "customer_orders" => [%{"size" => "small"}]}
            ]
   end
+
+  describe "GROUP BY / HAVING / aggregate functions" do
+    # @customer_orders: customer_id 1 has two orders (50, 75 -- total
+    # 125), customer_id 3 has one (20). No `GROUP BY` collapses every
+    # matched row into one implicit group -- the same mechanism, not a
+    # special case (ScryCore.Executor's own moduledoc).
+    test "a flat aggregate (no GROUP BY) collapses every row into one output row" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [
+          {:computed, "order_count", {:call, "count", [{:field, ["id"]}]}},
+          {:computed, "total", {:call, "sum", [{:field, ["total"]}]}},
+          {:computed, "avg", {:call, "avg", [{:field, ["total"]}]}},
+          {:computed, "lo", {:call, "min", [{:field, ["total"]}]}},
+          {:computed, "hi", {:call, "max", [{:field, ["total"]}]}}
+        ]
+      }
+
+      assert {:ok, [row]} = run(query)
+
+      assert row == %{
+               "order_count" => 3,
+               "total" => 145,
+               "avg" => Rational.new(145, 3),
+               "lo" => 20,
+               "hi" => 75
+             }
+    end
+
+    test "GROUP BY produces one row per distinct key" do
+      query = %Query{
+        source: ["customer_orders"],
+        group_bys: [["customer_id"]],
+        order_bys: [{["customer_id"], :asc}],
+        select: [
+          {:field, ["customer_id"]},
+          {:computed, "order_count", {:call, "count", [{:field, ["id"]}]}},
+          {:computed, "total", {:call, "sum", [{:field, ["total"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"customer_id" => 1, "order_count" => 2, "total" => 125},
+               %{"customer_id" => 3, "order_count" => 1, "total" => 20}
+             ]
+    end
+
+    test "HAVING drops groups that don't satisfy the aggregate predicate" do
+      query = %Query{
+        source: ["customer_orders"],
+        group_bys: [["customer_id"]],
+        havings: [{:cmp, :gt, {:call, "sum", [{:field, ["total"]}]}, 100}],
+        select: [
+          {:field, ["customer_id"]},
+          {:computed, "total", {:call, "sum", [{:field, ["total"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"customer_id" => 1, "total" => 125}]
+    end
+
+    test "a zero-row flat aggregate is still one well-defined output row" do
+      query = %Query{
+        source: ["customer_orders"],
+        wheres: [{:cmp, :eq, ["customer_id"], 999}],
+        select: [
+          {:computed, "c", {:call, "count", [{:field, ["id"]}]}},
+          {:computed, "s", {:call, "sum", [{:field, ["total"]}]}},
+          {:computed, "a", {:call, "avg", [{:field, ["total"]}]}},
+          {:computed, "lo", {:call, "min", [{:field, ["total"]}]}},
+          {:computed, "hi", {:call, "max", [{:field, ["total"]}]}}
+        ]
+      }
+
+      assert {:ok, [row]} = run(query)
+      assert row == %{"c" => 0, "s" => nil, "a" => nil, "lo" => nil, "hi" => nil}
+    end
+
+    test "ORDER BY/LIMIT compose with GROUP BY, applied to the projected group rows" do
+      query = %Query{
+        source: ["customer_orders"],
+        group_bys: [["customer_id"]],
+        order_bys: [{["total"], :desc}],
+        limit: 1,
+        select: [
+          {:field, ["customer_id"]},
+          {:computed, "total", {:call, "sum", [{:field, ["total"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"customer_id" => 1, "total" => 125}]
+    end
+
+    test "an aggregate over a field that's nil on every row hard-errors, no silent skip" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "x", {:call, "sum", [{:field, ["discount"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/encountered a nil value/, fn -> run(query) end
+    end
+
+    test "an unknown/unsupported function name raises a clear error" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "x", {:call, "foo", [{:field, ["id"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/unknown or unsupported function/, fn -> run(query) end
+    end
+
+    test "a known aggregate called with the wrong number of arguments raises" do
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "x", {:call, "sum", [{:field, ["id"]}, {:field, ["total"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/expects exactly one argument/, fn -> run(query) end
+    end
+
+    test "a call used as an ordinary per-row predicate's left-hand side raises a clear error" do
+      query = %Query{
+        source: ["customer_orders"],
+        wheres: [{:cmp, :gt, {:call, "sum", [{:field, ["total"]}]}, 1}],
+        select: [{:field, ["id"]}]
+      }
+
+      assert_raise ArgumentError, ~r/only valid inside GROUP BY\/HAVING/, fn -> run(query) end
+    end
+
+    test "a nested, un-grouped SELECT with aggregate fields is a flat aggregate per outer row (lang_spec §11)" do
+      query = %Query{
+        source: ["customers"],
+        order_bys: [{["id"], :asc}],
+        select: [
+          {:field, ["name"]},
+          %Query{
+            source: ["customer_orders"],
+            wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+            select: [
+              {:computed, "order_count", {:call, "count", [{:field, ["id"]}]}},
+              {:computed, "total_spent", {:call, "sum", [{:field, ["total"]}]}}
+            ]
+          }
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{
+                 "name" => "Alice",
+                 "customer_orders" => [%{"order_count" => 2, "total_spent" => 125}]
+               },
+               %{
+                 "name" => "Bob",
+                 "customer_orders" => [%{"order_count" => 0, "total_spent" => nil}]
+               },
+               %{
+                 "name" => "Carol",
+                 "customer_orders" => [%{"order_count" => 1, "total_spent" => 20}]
+               }
+             ]
+    end
+
+    test "a nested SELECT/variant body item inside a grouped query's own select is a clear error, not a crash" do
+      query = %Query{
+        source: ["customer_orders"],
+        group_bys: [["customer_id"]],
+        select: [
+          {:field, ["customer_id"]},
+          %Query{source: ["order_items"], select: [{:field, ["sku"]}]}
+        ]
+      }
+
+      assert {:error, {:unsupported_grouped_body_item, %Query{}}} = run(query)
+    end
+  end
 end

@@ -15,25 +15,60 @@ defmodule ScryCore.Executor do
   own EP1(b)/(c)/(d) construct means, so `run/3` returns an explicit
   error rather than silently ignoring or mishandling one.
 
-  **`run/3` still only ignores `group_by`/`having`.** Those two need
-  real aggregate-*expression* evaluation, which doesn't exist anywhere
-  in this codebase yet, grammar included -- there's no syntax to even
-  write `sum(total)` as a body item today, so there's nothing yet to
-  execute even if this module tried. `distinct`/`order_bys`/`limit`/
-  `offset` are applied in the pipeline lang_spec.md §6's own "Modifier
-  ordering" paragraph describes: filter, sort (`order_bys`, evaluated
-  against each *source* row, before projection -- see `sort_rows/3`'s
-  own comment for why), project, dedupe (`distinct`, the block's
-  *projected* output shape per §6's "Deduplication semantics",
-  preserving first-occurrence order), then paginate (`limit`/`offset`).
-  lang_spec.md §5.2's own "ordering by a field outside the projected
-  shape while distinct is active is a compile-time error" is **not**
-  enforced here -- no static/compile-time validation pass exists
-  anywhere in this codebase yet (the same gap `having`'s own
-  aggregate-expression requirement has); this module still produces a
-  well-defined, deterministic result for that case (sorted, pre-dedup
-  order breaks the tie for which duplicate's position "wins"), it just
-  doesn't reject it the way a real compiler eventually should.
+  **`GROUP BY`/`HAVING`/aggregate functions (lang_spec.md §5.2/§5.8).**
+  `run/5` splits into `run_plain/6` (today's original, ungrouped
+  per-row pipeline, byte-identical) and `run_grouped/6`
+  (`aggregate_query?/1` decides which -- a real `GROUP BY`, or a
+  function call anywhere in `select`/`havings`, triggers grouped
+  execution). No explicit `GROUP BY` isn't a special case: `group_rows/3`
+  returns one implicit group containing every filtered row when
+  `query.group_bys` is empty, which is exactly what makes lang_spec
+  §11's own nested, un-grouped `SELECT orders { count(id), sum(total) }`
+  work -- it collapses to one output row, the same mechanism `GROUP BY`
+  itself uses per distinct key.
+
+  Only the 5 real aggregates (`sum`/`avg`/`count`/`min`/`max`) are
+  actually executable (`eval_aggregate/5`) -- the rest of lang_spec
+  §5.8's built-in surface (casts, `json`, window functions,
+  `count(distinct ...)`) still isn't. Every aggregate hard-errors
+  (`raise ArgumentError`) the moment any resolved operand is `nil`, per
+  lang_spec.md's own "Aggregates over nullable fields hard-error the
+  same way [as comparing a nullable field directly] -- no silent
+  nil-skipping; filter explicitly first" -- no special-cased "COUNT
+  skips nulls" the way SQL has. `count([])` is `0`; `sum`/`avg`/`min`/
+  `max` of `[]` are `nil` -- real SQL's own empty-aggregate answers, and
+  what makes a flat aggregate over zero filtered rows still produce
+  exactly one well-defined output row. A `GROUP BY`'s own group context
+  is just its member rows, never a separately tracked key map -- a
+  plain field resolves against the group's first member row (every
+  member of a well-formed group already carries the identical value for
+  any field that's actually a `GROUP BY` field), the same "not enforced,
+  but well-defined" posture this module already has for a non-grouped
+  `order_by`/`distinct` field.
+
+  A grouped/aggregate query's own output sorts (`sort_rows/3`) *after*
+  projection, not before -- unlike `run_plain/6`, there's no "outside
+  the projected shape" *source* row left to sort by once grouping has
+  collapsed multiple rows into one; only the already-computed group/
+  aggregate values exist. `maybe_dedupe/2`/`paginate/3` are otherwise
+  fully shared, unchanged, between both paths.
+
+  `distinct`/`order_bys`/`limit`/`offset` are applied in the pipeline
+  lang_spec.md §6's own "Modifier ordering" paragraph describes: filter,
+  group (grouped path only), having (grouped path only), sort
+  (`order_bys` -- against each *source* row pre-projection on the plain
+  path, see `sort_rows/3`'s own comment for why; against each
+  *projected* row post-projection on the grouped path, see above),
+  project, dedupe (`distinct`, the block's *projected* output shape per
+  §6's "Deduplication semantics", preserving first-occurrence order),
+  then paginate (`limit`/`offset`). lang_spec.md §5.2's own "ordering by
+  a field outside the projected shape while distinct is active is a
+  compile-time error" is **not** enforced here -- no static/compile-time
+  validation pass exists anywhere in this codebase yet; this module
+  still produces a well-defined, deterministic result for that case
+  (sorted, pre-dedup order breaks the tie for which duplicate's position
+  "wins"), it just doesn't reject it the way a real compiler eventually
+  should.
 
   **Correlation and `REQUIRED` (lang_spec.md §6, "Correlation and
   joins").** A nested `SELECT` body item's own `where` can reference an
@@ -123,10 +158,12 @@ defmodule ScryCore.Executor do
   placeholder against `params`. Returns one projected result row per
   source row surviving every predicate in `query.wheres` (combined
   with `and`), sorted, deduped, and paginated per `query.order_bys`/
-  `query.distinct`/`query.limit`/`query.offset` -- see this module's
-  own moduledoc for the exact pipeline order, the correlation/
-  `REQUIRED`/external-parameter semantics, and what it still doesn't
-  do (`group_by`/`having`).
+  `query.distinct`/`query.limit`/`query.offset` -- or, if `query` uses
+  `GROUP BY` or a function call anywhere in its `select`/`havings`, one
+  row per group (or one flat-aggregate row with no explicit `GROUP BY`)
+  instead. See this module's own moduledoc for the exact pipeline order,
+  the correlation/`REQUIRED`/external-parameter semantics, and the full
+  `GROUP BY`/`HAVING`/aggregate-function story.
   """
   @spec run(Query.t(), module(), term(), params()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
@@ -137,22 +174,136 @@ defmodule ScryCore.Executor do
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
   defp run(%Query{} = query, scope, params, engine_module, conn) do
     with {:ok, rows} <- engine_module.fetch(conn, query.source) do
-      sorted =
-        rows
-        |> Enum.filter(&matches_all?(&1, query.wheres, scope, params))
-        |> sort_rows(query.order_bys, scope)
-
+      filtered = Enum.filter(rows, &matches_all?(&1, query.wheres, scope, params))
       own_name = List.last(query.source)
 
-      with {:ok, projected} <-
-             project_all(sorted, query.select, own_name, scope, params, engine_module, conn) do
-        {:ok,
-         projected
-         |> maybe_dedupe(query.distinct)
-         |> paginate(query.limit, query.offset)}
+      if aggregate_query?(query) do
+        run_grouped(query, filtered, own_name, scope, params, engine_module, conn)
+      else
+        run_plain(query, filtered, own_name, scope, params, engine_module, conn)
       end
     end
   end
+
+  # Today's ungrouped path, unchanged -- extracted verbatim so
+  # `aggregate_query?/1` saying `false` is provably a no-op against this
+  # module's own pre-existing behavior for any query that doesn't use
+  # `GROUP BY` or a function call anywhere.
+  defp run_plain(query, filtered, own_name, scope, params, engine_module, conn) do
+    sorted = sort_rows(filtered, query.order_bys, scope)
+
+    with {:ok, projected} <-
+           project_all(sorted, query.select, own_name, scope, params, engine_module, conn) do
+      {:ok,
+       projected
+       |> maybe_dedupe(query.distinct)
+       |> paginate(query.limit, query.offset)}
+    end
+  end
+
+  # `GROUP BY`/aggregate-function path (lang_spec.md §5.2/§5.8, "Groups
+  # filtered rows" / the fixed built-in-function set). No explicit
+  # `GROUP BY` is not a special case -- `group_rows/3` returns a single
+  # implicit group containing every filtered row when `query.group_bys`
+  # is empty, which is exactly what makes a *flat* aggregate (lang_spec
+  # §11's own nested, un-grouped `SELECT orders { count(id), sum(total)
+  # }`) work: it collapses to one output row, the same way `GROUP BY`
+  # collapses each distinct key's own rows to one.
+  #
+  # Sorts *after* projection, unlike `run_plain/6` -- `order_by`'s own
+  # "reference a field outside the projected shape" allowance
+  # (`sort_rows/3`'s own comment) only makes sense pre-projection, but a
+  # grouped/aggregate row has no such outside-the-shape *source* row left
+  # once grouping has collapsed multiple rows into one; only the
+  # already-computed group/aggregate values exist to sort by. Empty
+  # `scope` here is deliberate, not a placeholder -- `sort_rows`/
+  # `sorts_before?`/`get_path` are reused completely unchanged, and an
+  # empty scope makes the qualified-lookup branch inside `get_path/3` a
+  # strict no-op (same guarantee a top-level, non-nested `run/3` call
+  # already relies on), which is exactly right: a projected/grouped row
+  # has no ancestor scope chain of its own to speak of.
+  defp run_grouped(query, filtered, own_name, scope, params, engine_module, conn) do
+    groups = group_rows(filtered, query.group_bys, scope)
+
+    with {:ok, projected} <-
+           project_groups(query, groups, own_name, scope, params, engine_module, conn) do
+      {:ok,
+       projected
+       |> sort_rows(query.order_bys, [])
+       |> maybe_dedupe(query.distinct)
+       |> paginate(query.limit, query.offset)}
+    end
+  end
+
+  # Manual order-preserving partition, not `Enum.group_by/2` -- that
+  # function's own map-based grouping gives no guarantee about the order
+  # groups (or a group's own members) come back in, and this module's
+  # existing determinism discipline (`sort_rows/3`'s own stability
+  # comment) already treats "well-defined even when not required" as
+  # worth the extra few lines. `group_bys == []` returns a single
+  # implicit group with every filtered row -- see `run_grouped/7`'s own
+  # comment for why that's the mechanism a flat aggregate needs, not a
+  # separate code path.
+  defp group_rows(rows, [], _scope), do: [rows]
+
+  defp group_rows(rows, group_bys, scope) do
+    {order, groups} =
+      Enum.reduce(rows, {[], %{}}, fn row, {order, groups} ->
+        key = Enum.map(group_bys, &get_path(row, scope, &1))
+
+        case Map.has_key?(groups, key) do
+          true -> {order, Map.update!(groups, key, &[row | &1])}
+          false -> {[key | order], Map.put(groups, key, [row])}
+        end
+      end)
+
+    order
+    |> Enum.reverse()
+    |> Enum.map(&Enum.reverse(Map.fetch!(groups, &1)))
+  end
+
+  # A query needs grouped execution when it either has a real `GROUP BY`,
+  # or uses a function call anywhere in its own `select`/`havings` --
+  # *any* call, not just the 5 real aggregates this module actually
+  # executes (`eval_aggregate/5`'s own comment has the reasoning: an
+  # unsupported/unknown function name still needs to land in the grouped
+  # path to get a clear error there, rather than silently falling through
+  # to `run_plain/6`'s per-row `resolve_rhs/4`, which has no clause for
+  # `{:call, ...}` at all and would crash with an opaque
+  # `FunctionClauseError` instead).
+  defp aggregate_query?(query),
+    do:
+      query.group_bys != [] or select_has_call?(query.select) or havings_have_call?(query.havings)
+
+  defp select_has_call?(items), do: Enum.any?(items, &body_item_has_call?/1)
+
+  defp body_item_has_call?({:computed, _alias, expr}), do: expr_has_call?(expr)
+  defp body_item_has_call?(_other), do: false
+
+  defp havings_have_call?(havings), do: Enum.any?(havings, &predicate_has_call?/1)
+
+  defp predicate_has_call?({:cmp, _op, lhs, rhs}), do: lhs_has_call?(lhs) or expr_has_call?(rhs)
+
+  defp predicate_has_call?({:in, lhs, values}),
+    do: lhs_has_call?(lhs) or Enum.any?(values, &expr_has_call?/1)
+
+  defp predicate_has_call?({:and, l, r}), do: predicate_has_call?(l) or predicate_has_call?(r)
+  defp predicate_has_call?({:or, l, r}), do: predicate_has_call?(l) or predicate_has_call?(r)
+  defp predicate_has_call?({:not, p}), do: predicate_has_call?(p)
+
+  defp lhs_has_call?({:call, _name, _args}), do: true
+  defp lhs_has_call?(path) when is_list(path), do: false
+
+  defp expr_has_call?({:call, _name, _args}), do: true
+  defp expr_has_call?({:arith, _op, l, r}), do: expr_has_call?(l) or expr_has_call?(r)
+
+  defp expr_has_call?({:when, clauses, else_expr}) do
+    Enum.any?(clauses, fn {predicate, expr} ->
+      predicate_has_call?(predicate) or expr_has_call?(expr)
+    end) or expr_has_call?(else_expr)
+  end
+
+  defp expr_has_call?(_other), do: false
 
   # Sorts *source* rows (`get_path/3` against the same row shape `where`
   # filters against), before projection -- not the projected output.
@@ -215,8 +366,8 @@ defmodule ScryCore.Executor do
   # predicate in this module already has (e.g. `<`/`>` against
   # mismatched types already "works" via Erlang's own total term order
   # without erroring, just not usefully).
-  defp eval_predicate({:cmp, op, path, rhs}, row, scope, params) do
-    left = get_path(row, scope, path)
+  defp eval_predicate({:cmp, op, lhs, rhs}, row, scope, params) do
+    left = resolve_predicate_lhs(lhs, row, scope)
 
     case resolve_rhs(rhs, row, scope, params) do
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
@@ -227,8 +378,11 @@ defmodule ScryCore.Executor do
   # Each element resolved the same way a comparison's own right-hand
   # side is -- `in [$a, $b]`/`in [orders.status]` work for exactly the
   # same reason `= $a`/`= orders.status` do, not a separate mechanism.
-  defp eval_predicate({:in, path, values}, row, scope, params) do
-    get_path(row, scope, path) in Enum.map(values, &resolve_rhs(&1, row, scope, params))
+  defp eval_predicate({:in, lhs, values}, row, scope, params) do
+    resolve_predicate_lhs(lhs, row, scope) in Enum.map(
+      values,
+      &resolve_rhs(&1, row, scope, params)
+    )
   end
 
   defp eval_predicate({:and, l, r}, row, scope, params),
@@ -239,6 +393,25 @@ defmodule ScryCore.Executor do
 
   defp eval_predicate({:not, p}, row, scope, params),
     do: not eval_predicate(p, row, scope, params)
+
+  # `predicate()`'s own lhs is `[String.t()] | {:call, ...}`
+  # (`ScryCore.Query`'s own moduledoc) -- a bare path resolves exactly as
+  # it always has. A call is a real, purpose-written error here, not a
+  # crash: `Query.expr()`'s own `{:call, ...}` only has real execution
+  # semantics inside a grouped/aggregate context (`resolve_group_lhs/4`,
+  # `run_grouped/7`), which this function -- `matches_all?/4`'s own
+  # per-row `WHERE`/`WHEN` predicate evaluation -- never is. Without this
+  # clause, `WHEN sum(x) > 1 THEN ...` used per-row would instead hit
+  # `get_path/3`'s own missing clause for a 2-tuple path and raise an
+  # opaque `FunctionClauseError` with no indication of what actually went
+  # wrong.
+  defp resolve_predicate_lhs({:call, name, _args}, _row, _scope) do
+    raise ArgumentError,
+          "#{name}(...) is an aggregate function -- only valid inside GROUP BY/HAVING or a " <>
+            "flat-aggregate SELECT (lang_spec.md §5.2/§5.8), not an ordinary per-row predicate"
+  end
+
+  defp resolve_predicate_lhs(path, row, scope) when is_list(path), do: get_path(row, scope, path)
 
   defp compare(op, a, b), do: ordering_result(op, term_order(a, b))
 
@@ -378,6 +551,156 @@ defmodule ScryCore.Executor do
   defp arith(:div, a, b), do: Rational.div(a, b)
   defp arith(:pow, a, b), do: Rational.pow(a, b)
 
+  # ---- GROUP BY / HAVING / aggregate-function evaluation -----------------
+  #
+  # A group context is just its own `member_rows` -- a plain field
+  # resolves against the group's *representative* row (`representative/1`,
+  # its first member, or `%{}` for the one genuinely empty group a
+  # zero-row flat aggregate produces), and a call aggregates across every
+  # member. No separately tracked group-key map: every member row of a
+  # well-formed group already carries the identical value for any field
+  # that's actually one of the `GROUP BY` fields, so there's nothing a key
+  # map would offer that the representative row doesn't already have --
+  # the same "not enforced, but well-defined" posture this module's own
+  # moduledoc already documents for a non-grouped `order_by`/`distinct`
+  # field.
+  #
+  # `eval_group_predicate/4`/`resolve_group_lhs/4`/`resolve_group_rhs/4`
+  # mirror `eval_predicate/4`/`resolve_rhs/4` exactly, one level up
+  # (`member_rows` instead of a single `row`) -- kept as a genuinely
+  # separate family, not unified via an extra parameter, the same way
+  # `resolve_rhs`/`eval_predicate` themselves are already two parallel
+  # families rather than one merged dispatcher.
+  defp eval_group_predicate({:cmp, op, lhs, rhs}, member_rows, scope, params) do
+    left = resolve_group_lhs(lhs, member_rows, scope, params)
+
+    case resolve_group_rhs(rhs, member_rows, scope, params) do
+      %Regex{} = regex when op == :match -> Regex.match?(regex, left)
+      right -> compare(op, left, right)
+    end
+  end
+
+  defp eval_group_predicate({:in, lhs, values}, member_rows, scope, params) do
+    left = resolve_group_lhs(lhs, member_rows, scope, params)
+    left in Enum.map(values, &resolve_group_rhs(&1, member_rows, scope, params))
+  end
+
+  defp eval_group_predicate({:and, l, r}, member_rows, scope, params),
+    do:
+      eval_group_predicate(l, member_rows, scope, params) and
+        eval_group_predicate(r, member_rows, scope, params)
+
+  defp eval_group_predicate({:or, l, r}, member_rows, scope, params),
+    do:
+      eval_group_predicate(l, member_rows, scope, params) or
+        eval_group_predicate(r, member_rows, scope, params)
+
+  defp eval_group_predicate({:not, p}, member_rows, scope, params),
+    do: not eval_group_predicate(p, member_rows, scope, params)
+
+  defp resolve_group_lhs({:call, name, args}, member_rows, scope, params),
+    do: eval_aggregate(name, args, member_rows, scope, params)
+
+  defp resolve_group_lhs(path, member_rows, scope, _params) when is_list(path),
+    do: get_path(representative(member_rows), scope, path)
+
+  defp resolve_group_rhs({:call, name, args}, member_rows, scope, params),
+    do: eval_aggregate(name, args, member_rows, scope, params)
+
+  defp resolve_group_rhs({:field, path}, member_rows, scope, _params),
+    do: get_path(representative(member_rows), scope, path)
+
+  defp resolve_group_rhs({:param, name}, _member_rows, _scope, params) do
+    case Map.fetch(params, name) do
+      {:ok, value} -> value
+      :error -> raise ArgumentError, "missing external parameter: #{inspect(name)}"
+    end
+  end
+
+  defp resolve_group_rhs({:arith, op, left_expr, right_expr}, member_rows, scope, params) do
+    left = resolve_group_rhs(left_expr, member_rows, scope, params)
+    right = resolve_group_rhs(right_expr, member_rows, scope, params)
+    arith(op, left, right)
+  end
+
+  defp resolve_group_rhs({:when, clauses, else_expr}, member_rows, scope, params) do
+    case Enum.find(clauses, fn {predicate, _then_expr} ->
+           eval_group_predicate(predicate, member_rows, scope, params)
+         end) do
+      {_predicate, then_expr} -> resolve_group_rhs(then_expr, member_rows, scope, params)
+      nil -> resolve_group_rhs(else_expr, member_rows, scope, params)
+    end
+  end
+
+  defp resolve_group_rhs(literal, _member_rows, _scope, _params), do: literal
+
+  defp representative([]), do: %{}
+  defp representative([row | _rest]), do: row
+
+  # lang_spec.md line 399: "Aggregates over nullable fields hard-error the
+  # same way [as comparing a nullable field directly] -- no silent
+  # nil-skipping; filter explicitly first." All 5 real aggregates raise,
+  # uniformly, the moment *any* resolved operand value is `nil` -- no
+  # special-cased "COUNT skips nulls" carve-out the way SQL's own
+  # COUNT(column) has, since the spec line doesn't give aggregates one.
+  # Unknown function name and wrong argument count raise the same way,
+  # for the same reason `resolve_rhs/4`'s own missing-external-param and
+  # non-regex `~`-match cases already raise rather than returning
+  # `{:error, _}` -- a caller-fixable, runtime-discovered problem, not a
+  # data-shaped one this module's `{:error, _}`-threading pipeline
+  # (`project`/`project_all`) is built around.
+  defp eval_aggregate(name, [arg], member_rows, scope, params)
+       when name in ["sum", "avg", "count", "min", "max"] do
+    values = Enum.map(member_rows, &resolve_rhs(arg, &1, scope, params))
+
+    if Enum.any?(values, &is_nil/1) do
+      raise ArgumentError,
+            "aggregate #{name}(...) encountered a nil value -- lang_spec.md's own " <>
+              "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
+              "nil-skipping); filter it out explicitly first"
+    end
+
+    apply_aggregate(name, values)
+  end
+
+  defp eval_aggregate(name, args, _member_rows, _scope, _params)
+       when name in ["sum", "avg", "count", "min", "max"] do
+    raise ArgumentError, "aggregate #{name}/1 expects exactly one argument, got #{length(args)}"
+  end
+
+  defp eval_aggregate(name, _args, _member_rows, _scope, _params) do
+    raise ArgumentError, "unknown or unsupported function: #{inspect(name)}"
+  end
+
+  # Empty-group results match real SQL, not one blanket default:
+  # `count([])` is `0` (an empty group still has a defined count) while
+  # `sum`/`avg`/`min`/`max` of `[]` are `nil` (no defined sum/average/
+  # extremum over zero values) -- this is what makes a flat aggregate
+  # over zero *filtered* rows still produce exactly one well-defined
+  # output row (`count(id) = 0` is the correct answer for "this user has
+  # no orders," not a dropped row or a crash).
+  defp apply_aggregate("count", values), do: length(values)
+  defp apply_aggregate("sum", []), do: nil
+  defp apply_aggregate("sum", values), do: Enum.reduce(values, &Rational.add/2)
+  defp apply_aggregate("avg", []), do: nil
+
+  defp apply_aggregate("avg", values),
+    do: Rational.div(Enum.reduce(values, &Rational.add/2), length(values))
+
+  defp apply_aggregate("min", []), do: nil
+  defp apply_aggregate("min", values), do: Enum.reduce(values, &pick_min/2)
+  defp apply_aggregate("max", []), do: nil
+  defp apply_aggregate("max", values), do: Enum.reduce(values, &pick_max/2)
+
+  # Via `term_order/2`, not Kernel `min`/`max` -- the exact same
+  # `Rational`/`DateTime`/`NaiveDateTime` struct-ordering correctness
+  # `term_order/2` already exists for (its own comment has the full
+  # reasoning); Kernel's `min`/`max` would order two `%Rational{}`s by
+  # raw field values, not by magnitude, same bug class `compare/2`
+  # already avoids for ordinary comparisons.
+  defp pick_min(a, b), do: if(term_order(a, b) == :lt, do: a, else: b)
+  defp pick_max(a, b), do: if(term_order(a, b) == :gt, do: a, else: b)
+
   defp project_all(rows, select_items, own_name, scope, params, engine_module, conn) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
       case project(row, select_items, own_name, scope, params, engine_module, conn) do
@@ -498,4 +821,73 @@ defmodule ScryCore.Executor do
        ) do
     {:error, {:unsupported_body_item, item}}
   end
+
+  # `havings` filters *groups*, before that group's own `select`
+  # projection -- lang_spec.md §5.2's own modifier order ("group by ->
+  # having -> distinct -> order by -> limit"), and matches SQL: a group
+  # that fails `HAVING` never gets projected at all, not projected-then-
+  # discarded.
+  defp project_groups(query, groups, own_name, scope, params, engine_module, conn) do
+    Enum.reduce_while(groups, {:ok, []}, fn member_rows, {:ok, acc} ->
+      if having_matches?(query.havings, member_rows, scope, params) do
+        case project_group(
+               query.select,
+               member_rows,
+               own_name,
+               scope,
+               params,
+               engine_module,
+               conn
+             ) do
+          {:ok, projected} -> {:cont, {:ok, [projected | acc]}}
+          {:error, _} = err -> {:halt, err}
+        end
+      else
+        {:cont, {:ok, acc}}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      err -> err
+    end
+  end
+
+  defp having_matches?(havings, member_rows, scope, params),
+    do: Enum.all?(havings, &eval_group_predicate(&1, member_rows, scope, params))
+
+  defp project_group(select_items, member_rows, own_name, scope, params, engine_module, conn) do
+    Enum.reduce_while(select_items, {:ok, %{}}, fn item, {:ok, acc} ->
+      case project_group_item(item, member_rows, own_name, scope, params, engine_module, conn) do
+        {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp project_group_item({:field, path}, member_rows, _own_name, scope, _params, _em, _conn),
+    do: {:ok, List.last(path), get_path(representative(member_rows), scope, path)}
+
+  defp project_group_item(
+         {:computed, alias_name, expr},
+         member_rows,
+         _own_name,
+         scope,
+         params,
+         _engine_module,
+         _conn
+       ) do
+    {:ok, alias_name, resolve_group_rhs(expr, member_rows, scope, params)}
+  end
+
+  # Nested `SELECT`, conditional `{:field, path, condition}`, and
+  # `{:variant, _}` body items are all real, valid `Query.body_item()`
+  # shapes -- just not supported *inside a grouped/aggregate query's own
+  # select* this increment (per-group nested fetch, and what "IF
+  # $param" even means against a group rather than a single row, are
+  # both real open questions, not obvious defaults to pick silently). A
+  # clear, tagged error here rather than a crash or a silently wrong
+  # result -- same posture `project_item`'s own `{:variant, _}` clause
+  # already has.
+  defp project_group_item(item, _member_rows, _own_name, _scope, _params, _em, _conn),
+    do: {:error, {:unsupported_grouped_body_item, item}}
 end

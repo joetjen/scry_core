@@ -353,6 +353,30 @@ defmodule ScryCore.Actions do
   def handle_rule(:primary, %{when_expr: cap}, ctx), do: cap.eval.(ctx)
   def handle_rule(:primary, %{inner: cap}, ctx), do: cap.eval.(ctx)
 
+  # call's own handler already returns the fully-tagged {:call, name,
+  # args} shape -- same reasoning as when_expr/inner above.
+  def handle_rule(:primary, %{call: cap}, ctx), do: cap.eval.(ctx)
+
+  # lang_spec §5.8's built-in functions (sum/avg/count/min/max, this
+  # phase's real set) -- ScryCore.Executor.eval_aggregate/5 decides
+  # which `name`s it actually knows how to run, not this module (same
+  # split as body_item_ep1's own {:variant, value}, a construct the
+  # grammar accepts generally that only *some* of the pipeline
+  # ultimately executes).
+  def handle_rule(:call, %{name: name_cap, args: args_cap}, ctx) do
+    with {:ok, name, ctx} <- name_cap.eval.(ctx),
+         {:ok, args, ctx} <- args_cap.eval.(ctx) do
+      {:ok, {:call, name, args}, ctx}
+    end
+  end
+
+  def handle_rule(:call_args, %{head: head_cap, tail: tail_caps}, ctx) do
+    with {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
+      {:ok, [head | tail], ctx}
+    end
+  end
+
   # `when_clause` (`+`-repeated) always produces at least one element --
   # the grammar itself enforces "at least one WHEN...THEN", not a check
   # here (priv/grammar.aether's own `when_expr` comment). No absence

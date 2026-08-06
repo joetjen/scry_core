@@ -721,4 +721,55 @@ line two""" { name }))
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name }) <> " # trailing note\n")
     assert q.select == [{:field, ["name"]}]
   end
+
+  test "a function call as a computed field", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { total: sum(price) }])
+    assert q.select == [{:computed, "total", {:call, "sum", [{:field, ["price"]}]}}]
+  end
+
+  test "a function call as a comparison's left-hand side, inside HAVING", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders GROUP BY id HAVING sum(total) > 200 { id }])
+
+    assert q.havings == [{:cmp, :gt, {:call, "sum", [{:field, ["total"]}]}, 200}]
+  end
+
+  test "a bare identifier with no parens still parses as a plain field path, not a call", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT stats { sum, count }])
+    assert q.select == [{:field, ["sum"]}, {:field, ["count"]}]
+  end
+
+  test "a function call nested inside arithmetic", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: sum(price) * 2 }])
+
+    assert q.select == [
+             {:computed, "x", {:arith, :mul, {:call, "sum", [{:field, ["price"]}]}, 2}}
+           ]
+  end
+
+  test "a function call with a multi-argument arg list parses (arity isn't grammar-checked)", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: sum(price, tax) }])
+
+    assert q.select == [
+             {:computed, "x", {:call, "sum", [{:field, ["price"]}, {:field, ["tax"]}]}}
+           ]
+  end
+
+  test "a function call as a comparison's left-hand side, plain WHERE", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders WHERE count(id) > 1 { id }])
+
+    assert q.wheres == [{:cmp, :gt, {:call, "count", [{:field, ["id"]}]}, 1}]
+  end
+
+  test "a function call in an in [...] left-hand side", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s|SELECT orders GROUP BY id HAVING count(id) in [1, 2] { id }|)
+
+    assert q.havings == [{:in, {:call, "count", [{:field, ["id"]}]}, [1, 2]}]
+  end
 end
