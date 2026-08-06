@@ -25,7 +25,15 @@ defmodule ScryCore.MixProject do
       docs: docs(),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls],
-      dialyzer: [plt_add_apps: [:mix]]
+      # `:ichor` needs to be listed explicitly here now that it's
+      # `runtime: false` (only [:dev, :test]) -- dialyxir's default PLT
+      # scan draws on the compiled app's own `:applications` list, which
+      # a `runtime: false` dependency is deliberately excluded from
+      # (it's not meant to be part of the running application), even
+      # though it's still genuinely present and compiled in this
+      # (`:test`) env, and `ScryCore.Grammar`/`ScryCore.GrammarCompose`
+      # still reference its types (`Aether.Grammar.t/0`, ...) directly.
+      dialyzer: [plt_add_apps: [:mix, :ichor]]
     ]
   end
 
@@ -47,28 +55,29 @@ defmodule ScryCore.MixProject do
       # (Ichor.Actions), error formatting, the compiled Tokenizer/Parser
       # combinators.
       #
-      # `ichor` is, in principle, a build-time-only tool (grammar
-      # composition and codegen belong at build time via a
-      # `mix ichor.gen`-equivalent Mix compiler task, never via `use
-      # Ichor` at an end consumer's own compile time -- see impl_spec.md
-      # §4) and was originally scoped `only: [:dev, :test]` on that
-      # basis. That scoping turned out to be unusable: `ScryCore.Grammar`
-      # and `ScryCore.GrammarCompose` call Ichor's "raw pipeline"
-      # (Aether.Parser + Grammar.Analysis + Grammar.VM) directly rather
-      # than working from a pre-generated module, so `ichor` is a genuine
-      # compile-time requirement of scry_core's own `lib/` -- not just of
-      # its test suite. Confirmed empirically: even after also declaring
-      # `ichor` directly in a downstream package's own deps, `mix
+      # `ichor` was originally unscoped here (a real, non-`only:` dep):
+      # `ScryCore.Grammar`/`ScryCore.GrammarCompose` used to call Ichor's
+      # "raw pipeline" (Aether.Parser + Grammar.Analysis + Grammar.VM)
+      # directly at runtime, on every `ScryCore.parse/1` call, making
+      # `ichor` a genuine compile-time requirement of scry_core's own
+      # `lib/` -- confirmed empirically at the time: even with `ichor`
+      # also declared directly in a downstream package's own deps, `mix
       # compile` for scry_core-as-a-dependency still failed to resolve
-      # `Aether.Grammar` -- Mix does not propagate an `only:`-scoped
-      # dependency transitively, and compiling scry_core as a dependency
-      # only ever draws on scry_core's own declared dependency graph.
-      # Real (unscoped) for now; the fix that lets this go back to
-      # `only: [:dev, :test]` is building the actual Mix compiler task,
-      # tracked as a confirmed-blocking item in impl_spec.md's Open
-      # Implementation Risks.
+      # `Aether.Grammar`, because Mix does not propagate an `only:`-
+      # scoped dependency transitively -- compiling scry_core as a
+      # dependency only ever draws on scry_core's own declared
+      # dependency graph. Fixed: `ScryCore.parse/1` now runs queries
+      # through `ScryCore.Grammar.Compiled`, a checked-in, pre-generated
+      # module (`priv/gen/generate_compiled_grammar.exs` is its
+      # generator, run by hand, never automatically -- see `ScryCore.
+      # Grammar`'s own moduledoc for why an automatic Mix compiler step
+      # can't solve this, only a script that's never itself compiled as
+      # part of anyone's `lib/` can). The generated module only calls
+      # `ichor_runtime`, never `ichor` -- so `ichor` genuinely is
+      # build-time-only now, back to `only: [:dev, :test]`, matching
+      # `ichor`'s own documented recommendation for exactly this case.
       {:ichor_runtime, "~> 0.2"},
-      {:ichor, "~> 0.2"},
+      {:ichor, "~> 0.2", only: [:dev, :test], runtime: false},
 
       # === CODE QUALITY & STATIC ANALYSIS ===
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -92,6 +101,19 @@ defmodule ScryCore.MixProject do
 
   # Fast/cheap checks first so a broken commit fails quickly; dialyzer
   # (slowest, especially its first PLT build) runs last.
+  #
+  # No automated check here for `lib/scry_core/grammar/compiled.ex`
+  # being stale relative to `priv/grammar.aether` -- tried a regenerate-
+  # and-diff step first, but the codegen backend iterates `%Aether.
+  # Grammar{}`'s own `tokens`/`rules` maps to emit functions, and Elixir
+  # map iteration order isn't stable across VM boots (randomized hash
+  # seeding), so a byte-diff between two separately-generated copies of
+  # the *same* grammar spuriously fails. Matches `mix ichor.gen`'s own
+  # documented, deliberate posture (`ichor/lib/mix/tasks/ichor.gen.ex`'s
+  # own moduledoc): "there's no automatic staleness check between the
+  # checked-in file and its source grammar" -- `grammar_parity_test.exs`
+  # and the generated module's own banner (rerun the command, don't
+  # hand-edit) are the safety net instead.
   defp aliases do
     [
       precommit: [

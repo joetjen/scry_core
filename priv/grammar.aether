@@ -1,5 +1,12 @@
 ; Scry core grammar -- Phase 1 subset.
 ;
+; This file is the hand-written SOURCE for a generated file:
+; `lib/scry_core/grammar/compiled.ex` (`ScryCore.Grammar.Compiled`,
+; what `ScryCore.parse/1` actually runs queries through) is produced
+; from this file by `priv/gen/generate_compiled_grammar.exs` -- after
+; editing anything below, run `mix run priv/gen/generate_compiled_grammar.exs`
+; and re-run the test suite; never hand-edit the generated file itself.
+;
 ; Covers a deliberately bounded slice of lang_spec.md so the core/variant
 ; composition architecture (impl_spec.md §2/§4) can be proven against a
 ; real parser before the full language is written out. Phase 1 has:

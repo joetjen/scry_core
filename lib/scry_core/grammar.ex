@@ -1,17 +1,42 @@
 defmodule ScryCore.Grammar do
   @moduledoc """
-  Compiles core's own `priv/grammar.aether` into a ready-to-run
-  `%Aether.Grammar{}`. The real "`mix ichor.gen`-equivalent tooling"
-  impl_spec.md §4 describes (a Mix compiler step that auto-detects a
-  build's own dependency tree and merges in every loaded kind's own
-  fragment) doesn't exist yet, so both functions below parse and
-  analyze from source on every call instead of loading a pre-generated
-  module. `compile_unanalyzed/0` is what makes composition possible
-  today without that automatic step -- a `scry_<kind>` package calls it
-  directly, merges its own fragment in via `ScryCore.GrammarCompose.
-  merge/2`, and analyzes the merged result itself (`ScryTimeSeries.
-  Grammar`, in the `scry_time_series` package, is the first real one
-  that does this). Revisit once the real Mix task exists.
+  Parses (and, via `compile/0`, analyzes) core's own `priv/grammar.
+  aether` from source. **Not** the production parse path anymore --
+  `ScryCore.parse/1` calls the checked-in, pre-generated `ScryCore.
+  Grammar.Compiled` (`priv/gen/generate_compiled_grammar.exs` is its
+  generator; re-run that script after editing `priv/grammar.aether`,
+  never hand-edit the generated file). Both functions here stay, for
+  two real callers that still legitimately want the from-source,
+  uncompiled path: `compile_unanalyzed/0` is what `ScryCore.
+  GrammarCompose.merge/2` itself requires (an unanalyzed `%Aether.
+  Grammar{}` to merge a kind fragment into -- `ScryTimeSeries.Grammar`,
+  in the `scry_time_series` package, calls this directly), and both
+  this module's own generator script and `test/scry_core/actions_test.
+  exs`/`grammar_compose_test.exs` (testing `ScryCore.Actions`'
+  individual `handle_rule` clauses against the cheap interpreted
+  `Grammar.VM` path, deliberately, rather than round-tripping through
+  codegen for every unit test) use `compile/0`.
+
+  Why the production path is a *manually-run* generator script, not an
+  automatic Mix compiler (`compilers: [...]`) auto-detecting the build's
+  own dependency tree the way impl_spec.md §4 originally sketched: any
+  module that calls `Ichor.*` (parsing, analysis, codegen) has to live
+  somewhere Mix compiles it, and *any* file under a package's own
+  `elixirc_paths` -- a `Mix.Task.Compiler` included, since it has to be
+  a real discoverable module to be invoked via `compilers: [...]` at
+  all -- gets compiled unconditionally whenever that package is built,
+  including as someone else's dependency. `mix.exs`'s own deps comment
+  has the empirical finding this runs into: an `only: [:dev, :test]`
+  dependency of *this* package is dropped by Mix whenever `scry_core`
+  is compiled as someone else's dependency, regardless of the
+  downstream package's own env. A plain script run via `mix run
+  priv/gen/generate_compiled_grammar.exs`, only ever invoked in this
+  package's own top-level dev context, is never compiled as part of
+  anyone's build at all -- this mirrors `mix ichor.gen`'s own
+  documented, recommended path for exactly this problem
+  (`ichor/lib/ichor.ex`'s own moduledoc: "the only one of the three
+  [ways to run a grammar] where `ichor` itself never needs to be
+  present at runtime, `mix release` builds included").
 
   Uses `:code.priv_dir/1`, not a path relative to the current working
   directory -- the only way this resolves correctly both from
@@ -64,9 +89,12 @@ defmodule ScryCore.Grammar do
 
   @doc """
   Parses and analyzes core's own grammar (`compile_unanalyzed/0` +
-  `Grammar.Analysis.run/1`) -- the core-alone case; a kind package
-  composing its own fragment in calls `compile_unanalyzed/0` directly
-  instead (see its own moduledoc).
+  `Grammar.Analysis.run/1`) -- the core-alone case. Used by this
+  module's own generator script and by `ScryCore.Actions`' own unit
+  tests (`Grammar.VM.run/4` against the result), not by `ScryCore.
+  parse/1` itself anymore (see this module's own moduledoc); a kind
+  package composing its own fragment in calls `compile_unanalyzed/0`
+  directly instead.
   """
   @spec compile() :: {:ok, Aether.Grammar.t()} | {:error, term()}
   def compile do

@@ -12,9 +12,9 @@ defmodule ScryCore do
 
   `parse/1` is the intended entry point for anything outside this
   package (`scry_test_engine_core`'s own integration tests, eventually
-  a real adapter's) -- `ScryCore.Grammar`/`ScryCore.Actions` are public
-  too, but composing them by hand is exactly the friction this function
-  exists to avoid.
+  a real adapter's) -- `ScryCore.Grammar`/`ScryCore.Grammar.Compiled`/
+  `ScryCore.Actions` are public too, but composing them by hand is
+  exactly the friction this function exists to avoid.
   """
 
   alias ScryCore.{CombinedQuery, Query}
@@ -51,8 +51,6 @@ defmodule ScryCore do
   """
   @spec parse(String.t()) :: {:ok, Query.t() | CombinedQuery.t()} | {:error, term()}
   def parse(source) when is_binary(source) do
-    with {:ok, grammar} <- ScryCore.Grammar.compile() do
-      Grammar.VM.run(grammar, source, ScryCore.Actions, nil)
-    end
+    ScryCore.Grammar.Compiled.run(source, nil)
   end
 end
