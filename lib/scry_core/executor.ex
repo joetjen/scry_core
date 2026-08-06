@@ -100,6 +100,13 @@ defmodule ScryCore.Executor do
   class of error, not a data-shaped one. Consistent with this module's
   existing posture elsewhere: a type mismatch (`~` against a
   non-string) already raises rather than returning `{:error, _}`.
+
+  **Conditional field inclusion (lang_spec.md §5.3/§9, `<field> IF
+  $<param>`).** A `{:field, path, {:param, name}}` body item is omitted
+  from the projected row entirely when the resolved parameter is falsy
+  (`nil`/`false`, Scry's own two falsy values) -- a genuinely absent
+  key, not a `nil`-valued one, the GraphQL `@include`/`@skip`
+  equivalent this is modeled on.
   """
 
   alias ScryCore.{EngineBehaviour, Query, Rational}
@@ -355,11 +362,16 @@ defmodule ScryCore.Executor do
   # gives correct AND-across-multiple-`REQUIRED`-children semantics for
   # free: a row with two `REQUIRED` nested selects is only kept if
   # *both* are non-empty, matching how a SQL row surviving a chain of
-  # `INNER JOIN`s needs every one of them to match.
+  # `INNER JOIN`s needs every one of them to match. `:omit` (lang_spec
+  # §5.3/§9's `IF $<param>`) is a different, weaker outcome than
+  # `:skip` -- it drops just *this one item's own key* from the
+  # projected row, not the whole row, so it `:cont`s rather than
+  # `:halt`s.
   defp project(row, select_items, own_name, scope, params, engine_module, conn) do
     Enum.reduce_while(select_items, {:ok, %{}}, fn item, {:ok, acc} ->
       case project_item(item, row, own_name, scope, params, engine_module, conn) do
         {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+        :omit -> {:cont, {:ok, acc}}
         :skip -> {:halt, :skip}
         {:error, _} = err -> {:halt, err}
       end
@@ -368,6 +380,30 @@ defmodule ScryCore.Executor do
 
   defp project_item({:field, path}, row, _own_name, scope, _params, _engine_module, _conn) do
     {:ok, List.last(path), get_path(row, scope, path)}
+  end
+
+  # `nil`/`false` are the only falsy values (Scry's own "no implicit
+  # coercion" design principle, lang_spec.md §4/§7, extended to this one
+  # truthiness check the same way -- not, say, `0` or `""` too, unlike
+  # some scripting languages' looser convention). Omits the key entirely
+  # when falsy, matching GraphQL's own `@include`/`@skip` semantics this
+  # construct is modeled on -- not a `nil`-valued key, which would be a
+  # real, distinguishable difference to anything consuming the result
+  # (`Map.has_key?/2` would say `true` for a present-but-null field,
+  # `false` for an omitted one).
+  defp project_item(
+         {:field, path, {:param, _} = condition},
+         row,
+         _own_name,
+         scope,
+         params,
+         _engine_module,
+         _conn
+       ) do
+    case resolve_rhs(condition, row, scope, params) do
+      falsy when falsy in [nil, false] -> :omit
+      _truthy -> {:ok, List.last(path), get_path(row, scope, path)}
+    end
   end
 
   # `[{own_name, row} | scope]` -- the enclosing row becomes the nearest

@@ -484,4 +484,14 @@ line two""" { name }))
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE status in [$a, $b] { name }))
     assert q.wheres == [{:in, ["status"], [{:param, "a"}, {:param, "b"}]}]
   end
+
+  test "a plain field body item has no condition, unchanged", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name }))
+    assert q.select == [{:field, ["name"]}]
+  end
+
+  test "a conditionally-included field body item (IF $param)", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name, email IF $includeEmail }))
+    assert q.select == [{:field, ["name"]}, {:field, ["email"], {:param, "includeEmail"}}]
+  end
 end

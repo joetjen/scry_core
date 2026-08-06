@@ -200,9 +200,28 @@ defmodule ScryCore.Actions do
     with {:ok, value, ctx} <- cap.eval.(ctx), do: {:ok, {:variant, value}, ctx}
   end
 
-  def handle_rule(:body_item, %{path: cap}, ctx) do
-    with {:ok, path, ctx} <- cap.eval.(ctx), do: {:ok, {:field, path}, ctx}
+  # field_body_item's own handler already returns the fully-tagged
+  # {:field, path} or {:field, path, condition} shape (lang_spec §5.3's
+  # IF suffix), so no extra wrapping is needed here either -- same
+  # reasoning as select's own clause above.
+  def handle_rule(:body_item, %{field_body_item: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:field_body_item, %{field: field_cap} = captures, ctx) do
+    with {:ok, path, ctx} <- field_cap.eval.(ctx),
+         {:ok, condition, ctx} <- maybe_eval(captures, :if_clause, ctx) do
+      case condition do
+        :absent -> {:ok, {:field, path}, ctx}
+        param -> {:ok, {:field, path, param}, ctx}
+      end
+    end
   end
+
+  # if_clause's own value is just whatever PARAM already produced
+  # ({:param, name}, via handle_token(:PARAM, ...)) -- KW_IF itself
+  # carries no information worth keeping, so this exists only to pick
+  # `param` out from between the two captures (single-capture
+  # passthrough doesn't apply here, since there are two).
+  def handle_rule(:if_clause, %{param: param_cap}, ctx), do: param_cap.eval.(ctx)
 
   def handle_rule(:body_list, %{head: head_cap, tail: tail_caps}, ctx) do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),

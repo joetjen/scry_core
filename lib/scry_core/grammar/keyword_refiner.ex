@@ -32,7 +32,8 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "offset" => :KW_OFFSET,
     "desc" => :KW_DESC,
     "asc" => :KW_ASC,
-    "required" => :KW_REQUIRED
+    "required" => :KW_REQUIRED,
+    "if" => :KW_IF
   }
 
   @impl true

@@ -559,4 +559,49 @@ defmodule ScryCore.ExecutorTest do
              %{"name" => "Carol", "customer_orders" => []}
            ]
   end
+
+  test "a conditionally-included field is present when its param is truthy" do
+    query = %Query{
+      source: ["users"],
+      select: [{:field, ["name"]}, {:field, ["age"], {:param, "includeAge"}}]
+    }
+
+    assert {:ok, rows} = run(query, %{"includeAge" => true})
+
+    assert rows == [
+             %{"name" => "Alice", "age" => 30},
+             %{"name" => "Bob", "age" => 17},
+             %{"name" => "Carol", "age" => 65}
+           ]
+  end
+
+  test "a conditionally-included field's key is entirely absent when its param is falsy" do
+    query = %Query{
+      source: ["users"],
+      select: [{:field, ["name"]}, {:field, ["age"], {:param, "includeAge"}}]
+    }
+
+    assert {:ok, rows} = run(query, %{"includeAge" => false})
+    assert rows == [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}]
+    refute Map.has_key?(hd(rows), "age")
+  end
+
+  test "nil is also falsy for a conditionally-included field, same as false" do
+    query = %Query{
+      source: ["users"],
+      select: [{:field, ["name"]}, {:field, ["age"], {:param, "includeAge"}}]
+    }
+
+    assert {:ok, [%{"name" => "Alice"} = row | _]} = run(query, %{"includeAge" => nil})
+    refute Map.has_key?(row, "age")
+  end
+
+  test "a missing param for a conditionally-included field still raises" do
+    query = %Query{
+      source: ["users"],
+      select: [{:field, ["name"]}, {:field, ["age"], {:param, "includeAge"}}]
+    }
+
+    assert_raise ArgumentError, ~r/includeAge/, fn -> run(query) end
+  end
 end

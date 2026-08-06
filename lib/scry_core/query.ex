@@ -53,6 +53,14 @@ defmodule ScryCore.Query do
   placeholder, not a value -- parsing never resolves it, since the real
   value is supplied separately, at execution time, via
   `ScryCore.Executor.run/4`'s own `params` argument.
+
+  A `{:field, path}` body item's own optional third element
+  (lang_spec.md §5.3/§9: `<field> IF $<param>`) is that same `{:param,
+  name}` placeholder -- present only when the field was written with an
+  `IF` suffix; `ScryCore.Executor` omits the field from the projected
+  row entirely (not a `nil`-filled key) when the resolved parameter is
+  falsy (`nil`/`false` -- nothing else is), the GraphQL `@include`/
+  `@skip` equivalent this construct is modeled on.
   """
 
   @type predicate ::
@@ -63,7 +71,11 @@ defmodule ScryCore.Query do
           | {:or, predicate(), predicate()}
           | {:not, predicate()}
 
-  @type body_item :: {:field, [String.t()]} | t() | {:variant, term()}
+  @type body_item ::
+          {:field, [String.t()]}
+          | {:field, [String.t()], {:param, String.t()}}
+          | t()
+          | {:variant, term()}
 
   @type t :: %__MODULE__{
           source: [String.t()] | nil,

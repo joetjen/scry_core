@@ -80,7 +80,7 @@ IDENT := [[:alpha:]_][[:alnum:]_-]*
           KW_SELECT, KW_WHERE, KW_AND, KW_OR, KW_NOT, KW_IN,
           KW_NIL, KW_TRUE, KW_FALSE,
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
-          KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED)
+          KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED, KW_IF)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -392,12 +392,21 @@ field_name := IDENT | ESCAPED_IDENT
 ; through body_list), a kind-contributed construct (EP1(b)/(c)/(d)
 ; body-item shapes -- a block-opening construct, a scoped pseudo-field,
 ; or a bare value pseudo-field; lang_spec §2's impl_spec companion),
-; or a plain field path -- tried in that order (most specific leading
-; token first, generic fallback last; PEG's first-match-wins doesn't
+; or a plain field path, optionally suffixed `IF $<param>` (lang_spec
+; §5.3/§9: conditional field inclusion, GraphQL `@include`/`@skip`
+; equivalent) -- tried in that order (most specific leading token
+; first, generic fallback last; PEG's first-match-wins doesn't
 ; actually need the ordering here, since all three start with
 ; structurally distinct tokens, but it's the same defensive convention
 ; select_ep1a's own alternatives follow).
-body_item := select | body_item_ep1 | path
+body_item := select | body_item_ep1 | field_body_item
+
+field_body_item := field:path if_clause?
+
+; Always `$<param>` specifically (lang_spec §5.3: "`<field> IF
+; $<param>`"), not a general boolean expression -- there's no general
+; expression grammar to reference one from yet anyway.
+if_clause := KW_IF param:PARAM
 
 ; core's EP1(b)/(c)/(d) body-item extension point -- the same
 ; union-of-simultaneous-contributions design as select_ep1a (this
