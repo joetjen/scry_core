@@ -27,12 +27,13 @@
 ;     the stdlib in ScryCore.Actions, not in the grammar), regex sigils
 ;     (`@r/.../ `, `/`-delimited only for now -- SIGIL's own comment has
 ;     the "any delimiter" reasoning) paired with the `~` match operator,
-;     nil/true/false (§4) -- everything else in §4 (duration/byte-size
-;     literals -- lang_spec §4 gives no unit vocabulary for either,
-;     unlike ISO 8601's own well-defined standard, so implementing them
-;     means inventing one first -- and the rest of the exact-rational
-;     tower -- arithmetic *expressions*, inexact/float coexistence --
-;     see ScryCore.Rational's own moduledoc) deferred
+;     nil/true/false (§4), duration/byte-size literals (`DURATION`/
+;     `BYTE_SIZE`'s own comments have the concrete unit vocabulary
+;     chosen, mirrored in lang_spec.md itself) -- the rest of the
+;     exact-rational tower's own remaining gap is `inexact`/float
+;     coexistence specifically (see ScryCore.Rational's own moduledoc);
+;     arithmetic *expressions* are implemented (§5.10, `expression`'s
+;     own comment below)
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
 ;     full §5.2 header-modifier chain (`group by`/`having`/`distinct`/
 ;     `order by`/`limit ... offset`, in their required fixed order) (§5)
@@ -147,6 +148,51 @@ DECIMAL := DIGIT+ "." DIGIT+
 RADIX   := "0" [xX] HEX+
          | "0" [oO] [0-7]+
          | "0" [bB] [01]+
+
+; Duration/byte-size literals (lang_spec §4 -- the table gives worked
+; examples, `1h`/`5m`/`10MB`/`10MiB`, not a full unit enumeration; this
+; is the concrete vocabulary chosen to fill that gap, mirrored in
+; lang_spec.md itself so the two stay in sync). Both collapse into the
+; ordinary exact-rational tower exactly like `RADIX` already does
+; (`ScryCore.Actions`' own `handle_token` multiplies the magnitude by
+; the unit's own canonical value via `ScryCore.Rational.mul/2`) -- a
+; canonical *base* unit each (seconds for duration, bytes for byte
+; size), not a distinct wrapper type; `500ms` is simply the exact value
+; `1/2`, indistinguishable from writing that fraction directly, the
+; same "enters the tower as a plain value" precedent `RADIX`'s own
+; comment above already established.
+;
+; `"unit"cs` on every alternative -- forces case-sensitivity for this
+; one literal, overriding this grammar's own file-wide
+; `@case_insensitive` pragma (guides/aether/AETHER.md's own "String
+; literals" section: "a quote suffix controls case sensitivity for that
+; one literal ... `cs` -- always case-sensitive, regardless of the
+; grammar-level setting"). Deliberate, not an oversight: every real
+; system using this exact suffix vocabulary (Prometheus, Kubernetes,
+; Go's own `time.ParseDuration`, AWS) treats it case-sensitively --
+; `5M` (bare, no `B`) or `5MS` (wrong case) are neither a valid duration
+; nor a valid byte size, confirmed empirically (scratch grammar) to
+; fail cleanly rather than silently matching the wrong unit.
+;
+; Maximal munch resolves everything else the same way `RADIX` already
+; documents above: `10MiB` needs its own listed 3-character alternative
+; to win over the 2-character `MB`/`KB`/etc. ones (both are real,
+; distinct alternatives here, not a prefix relationship needing special
+; care), and `500ms` needs `ms` to win over the 1-character `s` --
+; confirmed empirically, not assumed, before relying on either.
+;
+; No `w` (week) -- deliberately excluded, not an oversight: unlike every
+; other unit here, "a week" is not an unambiguous fixed duration without
+; a calendar (7 exact days vs. a locale's own week-start convention),
+; and inventing an answer to a question lang_spec doesn't ask is exactly
+; the kind of "design for a hypothetical requirement" this codebase
+; otherwise avoids.
+DURATION := DIGIT+ ("." DIGIT+)?
+            ("ns"cs | "us"cs | "ms"cs | "s"cs | "m"cs | "h"cs | "d"cs)
+
+BYTE_SIZE := DIGIT+ ("." DIGIT+)?
+             ("KiB"cs | "MiB"cs | "GiB"cs | "TiB"cs | "PiB"cs
+             | "KB"cs | "MB"cs | "GB"cs | "TB"cs | "PB"cs | "B"cs)
 
 ; ISO 8601 (lang_spec §4's own example: `2026-01-01T14:00:00Z`) --
 ; lexically permissive on purpose, not a full calendar-aware match
@@ -566,8 +612,8 @@ list := LBRACK items:literal_list? RBRACK
 ; starts with the LBRACK token, never `literal` itself at position
 ; zero), so it needs none of Ichor's left-recursion rewrite machinery,
 ; same as `select`/`body_item`'s own recursion elsewhere in this file.
-literal := STRING | MULTILINE_STRING | DATE | rational | DECIMAL | RADIX | INTEGER | list | ATOM
-         | SIGIL | PARAM | KW_NIL | KW_TRUE | KW_FALSE
+literal := STRING | MULTILINE_STRING | DATE | rational | DECIMAL | RADIX | DURATION | BYTE_SIZE
+         | INTEGER | list | ATOM | SIGIL | PARAM | KW_NIL | KW_TRUE | KW_FALSE
 
 rational := numerator:INTEGER SLASH denominator:INTEGER
 

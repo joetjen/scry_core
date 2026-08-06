@@ -145,6 +145,25 @@ defmodule ScryCore.Actions do
     {:ok, String.to_integer(digits, base)}
   end
 
+  # Duration/byte-size literals (lang_spec §4; the exact unit vocabulary
+  # -- `priv/grammar.aether`'s own `DURATION`/`BYTE_SIZE` comment has the
+  # reasoning) "enter the ordinary exact-rational tower" the same way
+  # `RADIX` already does above -- `500ms` is exactly `1/2` (seconds), not
+  # a distinct wrapped type. `split_number_and_unit/1` splits on the
+  # digit/letter boundary alone (the grammar itself already guarantees
+  # the overall shape, so no ambiguity to resolve here); the numeric part
+  # reuses `DECIMAL`'s own exact construction when it has a `.`, plain
+  # `String.to_integer/1` otherwise.
+  def handle_token(:DURATION, text, _ctx) do
+    {number, unit} = split_number_and_unit(text)
+    {:ok, Rational.mul(parse_exact_number(number), duration_unit_seconds(unit))}
+  end
+
+  def handle_token(:BYTE_SIZE, text, _ctx) do
+    {number, unit} = split_number_and_unit(text)
+    {:ok, Rational.mul(parse_exact_number(number), byte_size_unit_bytes(unit))}
+  end
+
   @impl true
   def handle_rule(:select, captures, ctx) do
     with {:ok, source, ctx} <- captures.source.eval.(ctx),
@@ -621,6 +640,61 @@ defmodule ScryCore.Actions do
       end
     end)
   end
+
+  # The grammar's own `DURATION`/`BYTE_SIZE` token shape (`DIGIT+ ("."
+  # DIGIT+)? UNIT`) already guarantees digits and letters never mix --
+  # splitting on that boundary alone, with no knowledge of which
+  # specific unit it is, is unambiguous by construction.
+  defp split_number_and_unit(text) do
+    [number, unit] =
+      Regex.run(~r/^([0-9]+(?:\.[0-9]+)?)([a-zA-Z]+)$/, text, capture: :all_but_first)
+
+    {number, unit}
+  end
+
+  defp parse_exact_number(text) do
+    case String.split(text, ".", parts: 2) do
+      [whole] ->
+        String.to_integer(whole)
+
+      [whole, fraction] ->
+        numerator = String.to_integer(whole <> fraction)
+        denominator = Integer.pow(10, String.length(fraction))
+        Rational.new(numerator, denominator)
+    end
+  end
+
+  # Canonical base unit: seconds. `ns`/`us`/`ms` are exact fractions of a
+  # second (never an IEEE-754 approximation, same as every other numeric
+  # literal in this file) -- confirmed the grammar never lets an
+  # unrecognized unit reach this function, so no catch-all clause is
+  # needed (unlike `duration_unit_seconds`'s cousin `eval_aggregate`'s
+  # own runtime "unknown function" case, this is a parse-time-only
+  # concern already closed by the token's own definition).
+  defp duration_unit_seconds("ns"), do: Rational.new(1, 1_000_000_000)
+  defp duration_unit_seconds("us"), do: Rational.new(1, 1_000_000)
+  defp duration_unit_seconds("ms"), do: Rational.new(1, 1_000)
+  defp duration_unit_seconds("s"), do: 1
+  defp duration_unit_seconds("m"), do: 60
+  defp duration_unit_seconds("h"), do: 3600
+  defp duration_unit_seconds("d"), do: 86_400
+
+  # Canonical base unit: bytes. Decimal (SI, powers of 1000) and binary
+  # (IEC 60027-2, powers of 1024) are two genuinely different scales for
+  # the same-looking prefix letter (`M`/`G`/etc.) -- lang_spec.md §4's
+  # own worked example (`10MB` vs `10MiB`) is exactly this distinction,
+  # not a typo or a redundant alternative.
+  defp byte_size_unit_bytes("B"), do: 1
+  defp byte_size_unit_bytes("KB"), do: 1_000
+  defp byte_size_unit_bytes("MB"), do: 1_000_000
+  defp byte_size_unit_bytes("GB"), do: 1_000_000_000
+  defp byte_size_unit_bytes("TB"), do: 1_000_000_000_000
+  defp byte_size_unit_bytes("PB"), do: 1_000_000_000_000_000
+  defp byte_size_unit_bytes("KiB"), do: 1024
+  defp byte_size_unit_bytes("MiB"), do: 1024 * 1024
+  defp byte_size_unit_bytes("GiB"), do: 1024 * 1024 * 1024
+  defp byte_size_unit_bytes("TiB"), do: 1024 * 1024 * 1024 * 1024
+  defp byte_size_unit_bytes("PiB"), do: 1024 * 1024 * 1024 * 1024 * 1024
 
   defp op_from_text("="), do: :eq
   defp op_from_text("not="), do: :not_eq

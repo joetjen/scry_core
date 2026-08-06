@@ -139,6 +139,64 @@ defmodule ScryCore.ActionsTest do
     assert q4.wheres == [{:cmp, :eq, ["mask"], 5}]
   end
 
+  test "duration literals enter the exact-rational tower, canonical unit seconds", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT metrics WHERE age > 1h { name }))
+    assert q.wheres == [{:cmp, :gt, ["age"], 3600}]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT metrics WHERE age > 5m { name }))
+    assert q2.wheres == [{:cmp, :gt, ["age"], 300}]
+
+    assert {:ok, %Query{} = q3} = run(g, ~s(SELECT metrics WHERE age > 2d { name }))
+    assert q3.wheres == [{:cmp, :gt, ["age"], 172_800}]
+
+    assert {:ok, %Query{} = q4} = run(g, ~s(SELECT metrics WHERE age > 1ns { name }))
+    assert q4.wheres == [{:cmp, :gt, ["age"], Rational.new(1, 1_000_000_000)}]
+  end
+
+  test "a duration literal with a decimal magnitude stays exact", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT metrics WHERE age > 1.5h { name }))
+    assert q.wheres == [{:cmp, :gt, ["age"], 5400}]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT metrics WHERE latency > 500ms { name }))
+    assert q2.wheres == [{:cmp, :gt, ["latency"], Rational.new(1, 2)}]
+  end
+
+  test "byte-size literals enter the exact-rational tower, canonical unit bytes", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT metrics WHERE size > 10MB { name }))
+    assert q.wheres == [{:cmp, :gt, ["size"], 10_000_000}]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT metrics WHERE size > 1KB { name }))
+    assert q2.wheres == [{:cmp, :gt, ["size"], 1_000}]
+
+    assert {:ok, %Query{} = q3} = run(g, ~s(SELECT metrics WHERE size > 1PB { name }))
+    assert q3.wheres == [{:cmp, :gt, ["size"], 1_000_000_000_000_000}]
+  end
+
+  test "binary (IEC) byte-size units are distinct from decimal ones, not an alias", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT metrics WHERE size > 10MiB { name }))
+    assert q.wheres == [{:cmp, :gt, ["size"], 10 * 1024 * 1024}]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT metrics WHERE size > 1PiB { name }))
+    assert q2.wheres == [{:cmp, :gt, ["size"], 1024 * 1024 * 1024 * 1024 * 1024}]
+  end
+
+  test "duration/byte-size unit suffixes are case-sensitive, not folded like keywords", %{
+    grammar: g
+  } do
+    # Bare "M" (no "B") and wrong-case "MS" are neither a valid duration
+    # nor a valid byte size (priv/grammar.aether's own DURATION/
+    # BYTE_SIZE comment) -- both fail to parse rather than silently
+    # matching the wrong unit.
+    assert {:error, _} = run(g, ~s(SELECT metrics WHERE size > 5M { name }))
+    assert {:error, _} = run(g, ~s(SELECT metrics WHERE latency > 5MS { name }))
+  end
+
   test "group by a single field", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders GROUP BY status { status }))
     assert q.group_bys == [["status"]]
