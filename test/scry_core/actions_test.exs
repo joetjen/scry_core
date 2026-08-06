@@ -772,4 +772,74 @@ line two""" { name }))
 
     assert q.havings == [{:in, {:call, "count", [{:field, ["id"]}]}, [1, 2]}]
   end
+
+  test "a WITH declaration binds a name to a full query, the lang_spec.md §9 worked example",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s[WITH active_users = SELECT users WHERE status = "active" { id, name } SELECT active_users { name }]
+             )
+
+    assert q.source == ["active_users"]
+    assert q.select == [{:field, ["name"]}]
+
+    assert q.with_bindings == %{
+             "active_users" => %Query{
+               source: ["users"],
+               wheres: [{:cmp, :eq, ["status"], "active"}],
+               select: [{:field, ["id"]}, {:field, ["name"]}]
+             }
+           }
+  end
+
+  test "a query with no top-level WITH still parses with an empty with_bindings map", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT users { name }])
+    assert q.with_bindings == %{}
+  end
+
+  test "two WITH declarations, resolved into the same with_bindings map", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s[WITH a = SELECT users { id } WITH b = SELECT orders { id } SELECT a { id }]
+             )
+
+    assert Map.keys(q.with_bindings) |> Enum.sort() == ["a", "b"]
+  end
+
+  test "two WITH declarations sharing a name is a compile error, not silent last-write-wins",
+       %{grammar: g} do
+    assert {:error, {:duplicate_with, "a"}} =
+             run(
+               g,
+               ~s[WITH a = SELECT users { id } WITH a = SELECT orders { id } SELECT a { id }]
+             )
+  end
+
+  test "a self-referencing WITH is a compile error", %{grammar: g} do
+    assert {:error, {:with_cycle, ["a", "a"]}} =
+             run(g, ~s[WITH a = SELECT a { id } SELECT a { id }])
+  end
+
+  test "a WITH cycle through another WITH binding is a compile error", %{grammar: g} do
+    assert {:error, {:with_cycle, ["a", "b", "a"]}} =
+             run(g, ~s[WITH a = SELECT b { id } WITH b = SELECT a { id } SELECT a { id }])
+  end
+
+  test "a WITH binding's own query can itself have full modifiers", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s[WITH top = SELECT orders WHERE total > 10 ORDER BY total DESC LIMIT 5 { id } SELECT top { id }]
+             )
+
+    assert %Query{
+             wheres: [{:cmp, :gt, ["total"], 10}],
+             order_bys: [{["total"], :desc}],
+             limit: 5
+           } = q.with_bindings["top"]
+  end
 end

@@ -234,25 +234,47 @@ defmodule ScryCore.Actions do
     end
   end
 
+  # `select_cap`'s own handler already returns a real %ScryCore.Query{}
+  # -- a WITH-bound value is a full query, not a special restricted
+  # shape (ScryCore.Query's own moduledoc), so no extra wrapping is
+  # needed here, the same reasoning body_item's own `select` clause
+  # already relies on.
+  def handle_rule(:with_decl, %{name: name_cap, select: select_cap}, ctx) do
+    with {:ok, name, ctx} <- name_cap.eval.(ctx),
+         {:ok, query, ctx} <- select_cap.eval.(ctx) do
+      {:ok, {name, query}, ctx}
+    end
+  end
+
   # The real root (priv/grammar.aether's own `@root document`/`document`
-  # comments have the full reasoning). `fragment_decl` is bare/unrenamed
-  # and `*`-repeated, so it always has its own key -- `[]`, not a missing
-  # one, when no FRAGMENT is present (confirmed empirically, same finding
-  # as `additive_tail`/`when_clause` elsewhere in this module), so no
-  # `maybe_eval` is needed here the way an *optional* rule reference
-  # would need.
+  # comments have the full reasoning). `fragment_decl`/`with_decl` are
+  # both bare/unrenamed and `*`-repeated, so each always has its own key
+  # -- `[]`, not a missing one, when absent (confirmed empirically, same
+  # finding as `additive_tail`/`when_clause` elsewhere in this module),
+  # so no `maybe_eval` is needed here the way an *optional* rule
+  # reference would need.
   #
-  # Duplicate FRAGMENT names are a real, reportable compile error here
-  # (`Map.new/2` would otherwise silently let the second declaration win)
-  # -- checked before ever handing the map to ScryCore.FragmentResolver,
-  # which assumes it's already a real name => body_items map with no
-  # ambiguity in it.
-  def handle_rule(:document, %{fragment_decl: frag_caps, select: select_cap}, ctx) do
+  # Duplicate `FRAGMENT`/`WITH` names are each a real, reportable compile
+  # error (`Map.new/2` would otherwise silently let the second
+  # declaration win) -- checked before handing either map onward, which
+  # assumes it's already unambiguous. `ScryCore.WithCycleCheck` runs
+  # after the map is built but doesn't need the final query at all (a
+  # cycle is a property of the bindings alone) -- ordered before
+  # `FragmentResolver` for no real reason beyond it being the cheaper,
+  # `select`-independent check to fail on first.
+  def handle_rule(
+        :document,
+        %{fragment_decl: frag_caps, with_decl: with_caps, select: select_cap},
+        ctx
+      ) do
     with {:ok, frags, ctx} <- eval_list(:fragment_decl, frag_caps, ctx),
-         {:ok, fragments} <- build_fragment_map(frags),
+         {:ok, fragments} <- build_name_map(frags, :duplicate_fragment),
+         {:ok, withs, ctx} <- eval_list(:with_decl, with_caps, ctx),
+         {:ok, with_bindings} <- build_name_map(withs, :duplicate_with),
+         :ok <- ScryCore.WithCycleCheck.check(with_bindings),
          {:ok, query, ctx} <- select_cap.eval.(ctx) do
       case ScryCore.FragmentResolver.resolve(query, fragments) do
-        {:ok, resolved} -> {:ok, resolved, ctx}
+        {:ok, %Query{} = resolved} -> {:ok, %Query{resolved | with_bindings: with_bindings}, ctx}
         {:error, _} = err -> err
       end
     end
@@ -539,16 +561,18 @@ defmodule ScryCore.Actions do
     end
   end
 
-  # `document`'s own handler's helper -- `Map.new/2` would otherwise
-  # silently let a second `FRAGMENT` declaration with the same name win,
-  # with no error at all; this makes that a real, reportable compile
-  # error instead, before ScryCore.FragmentResolver ever sees the map.
-  defp build_fragment_map(frags) do
-    Enum.reduce_while(frags, {:ok, %{}}, fn {name, body}, {:ok, acc} ->
+  # `document`'s own handler's helper, shared by both `FRAGMENT` and
+  # `WITH` -- `Map.new/2` would otherwise silently let a second
+  # declaration with the same name win, with no error at all; this makes
+  # that a real, reportable compile error instead (tagged by
+  # `error_tag`, so a caller can tell which declaration kind it was),
+  # before either map reaches the code that assumes it's unambiguous.
+  defp build_name_map(decls, error_tag) do
+    Enum.reduce_while(decls, {:ok, %{}}, fn {name, value}, {:ok, acc} ->
       if Map.has_key?(acc, name) do
-        {:halt, {:error, {:duplicate_fragment, name}}}
+        {:halt, {:error, {error_tag, name}}}
       else
-        {:cont, {:ok, Map.put(acc, name, body)}}
+        {:cont, {:ok, Map.put(acc, name, value)}}
       end
     end)
   end

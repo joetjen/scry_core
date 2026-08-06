@@ -142,6 +142,36 @@ defmodule ScryCore.Executor do
   (`nil`/`false`, Scry's own two falsy values) -- a genuinely absent
   key, not a `nil`-valued one, the GraphQL `@include`/`@skip`
   equivalent this is modeled on.
+
+  **`WITH` named sub-queries (lang_spec.md §9, `Query.t()`'s own
+  `with_bindings`).** A query whose own `source` is exactly `[name]` for
+  a declared `WITH` binding is executed and its result rows used
+  *instead of* calling `engine_module.fetch/2` -- checked, and only
+  meaningfully checkable, at the moment a source would otherwise be
+  fetched (`fetch_rows/6`), since there's no distinguishing sigil in the
+  grammar the way a `FRAGMENT` spread's own `...` has; an unrecognized
+  bare name just falls through to a real source, never an error.
+  `with_bindings` passes through every level of recursion unchanged
+  (`fetch_rows/6`, `project_item/8`'s own nested-`%Query{}` clause), the
+  same as `params` -- document-global, not scope-dependent, so a
+  correlated nested `SELECT` several levels deep can reference a
+  top-level `WITH` binding exactly as easily as the query that declared
+  it.
+
+  **Cost, the same honest posture `REQUIRED`'s own paragraph above
+  already has.** A `WITH` binding is re-executed, from scratch, *every
+  time* its name is referenced as a source -- no caching/memoization.
+  This is a deliberate simplification, not an oversight: a real cache
+  would need to live somewhere across the entire recursive call tree
+  (this module has no mutable state to keep one in without real
+  restructuring), and "correct, not necessarily efficient" is already
+  this codebase's established default (`ScryCore.EngineBehaviour`'s own
+  moduledoc, "no pushdown ... always correct, not necessarily
+  efficient"). A `WITH` binding referenced once, or only from one place,
+  pays no extra cost at all; one referenced from inside a correlated
+  nested `SELECT` pays the same "re-fetch per surviving outer row" cost
+  `REQUIRED`'s own paragraph already documents, compounded if the
+  binding is itself layered on another `WITH` binding.
   """
 
   alias ScryCore.{EngineBehaviour, Query, Rational}
@@ -168,32 +198,65 @@ defmodule ScryCore.Executor do
   @spec run(Query.t(), module(), term(), params()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
   def run(%Query{} = query, engine_module, conn, params \\ %{}),
-    do: run(query, [], params, engine_module, conn)
+    do: run(query, [], params, query.with_bindings, engine_module, conn)
 
-  @spec run(Query.t(), scope(), params(), module(), term()) ::
+  @spec run(Query.t(), scope(), params(), %{String.t() => Query.t()}, module(), term()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
-  defp run(%Query{} = query, scope, params, engine_module, conn) do
-    with {:ok, rows} <- engine_module.fetch(conn, query.source) do
+  defp run(%Query{} = query, scope, params, with_bindings, engine_module, conn) do
+    with {:ok, rows} <- fetch_rows(query, scope, params, with_bindings, engine_module, conn) do
       filtered = Enum.filter(rows, &matches_all?(&1, query.wheres, scope, params))
       own_name = List.last(query.source)
 
       if aggregate_query?(query) do
         run_grouped(query, filtered, own_name, scope, params, engine_module, conn)
       else
-        run_plain(query, filtered, own_name, scope, params, engine_module, conn)
+        run_plain(query, filtered, own_name, scope, params, with_bindings, engine_module, conn)
       end
     end
   end
+
+  # A query whose own `source` is exactly `[name]` for a declared `WITH`
+  # binding (`Query.t()`'s own `with_bindings`, lang_spec.md §9) runs
+  # that binding -- fresh, every time, no caching (see this module's own
+  # moduledoc for the cost tradeoff) -- instead of asking the real
+  # engine to fetch it; its own result rows are used exactly as if
+  # they'd come from a real source. `with_bindings` passes through
+  # unchanged into the recursive call, the same way `params` already
+  # does, since it's equally document-global, not scope-dependent.
+  # Falls through to the real `fetch/2` for any multi-segment source (a
+  # `WITH` name is always a single bare identifier, lang_spec §9's own
+  # grammar) or a single-segment one that isn't a declared binding --
+  # deliberately not an error: there's no distinguishing sigil the way a
+  # `FRAGMENT` spread's own `...` has, so an unrecognized bare name is
+  # just assumed to be a real source (`Query`'s own moduledoc).
+  defp fetch_rows(%Query{source: [name]}, scope, params, with_bindings, engine_module, conn) do
+    case Map.fetch(with_bindings, name) do
+      {:ok, bound_query} -> run(bound_query, scope, params, with_bindings, engine_module, conn)
+      :error -> engine_module.fetch(conn, [name])
+    end
+  end
+
+  defp fetch_rows(%Query{source: source}, _scope, _params, _with_bindings, engine_module, conn),
+    do: engine_module.fetch(conn, source)
 
   # Today's ungrouped path, unchanged -- extracted verbatim so
   # `aggregate_query?/1` saying `false` is provably a no-op against this
   # module's own pre-existing behavior for any query that doesn't use
   # `GROUP BY` or a function call anywhere.
-  defp run_plain(query, filtered, own_name, scope, params, engine_module, conn) do
+  defp run_plain(query, filtered, own_name, scope, params, with_bindings, engine_module, conn) do
     sorted = sort_rows(filtered, query.order_bys, scope)
 
     with {:ok, projected} <-
-           project_all(sorted, query.select, own_name, scope, params, engine_module, conn) do
+           project_all(
+             sorted,
+             query.select,
+             own_name,
+             scope,
+             params,
+             with_bindings,
+             engine_module,
+             conn
+           ) do
       {:ok,
        projected
        |> maybe_dedupe(query.distinct)
@@ -701,9 +764,18 @@ defmodule ScryCore.Executor do
   defp pick_min(a, b), do: if(term_order(a, b) == :lt, do: a, else: b)
   defp pick_max(a, b), do: if(term_order(a, b) == :gt, do: a, else: b)
 
-  defp project_all(rows, select_items, own_name, scope, params, engine_module, conn) do
+  defp project_all(
+         rows,
+         select_items,
+         own_name,
+         scope,
+         params,
+         with_bindings,
+         engine_module,
+         conn
+       ) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
-      case project(row, select_items, own_name, scope, params, engine_module, conn) do
+      case project(row, select_items, own_name, scope, params, with_bindings, engine_module, conn) do
         {:ok, projected} -> {:cont, {:ok, [projected | acc]}}
         :skip -> {:cont, {:ok, acc}}
         {:error, _} = err -> {:halt, err}
@@ -727,9 +799,9 @@ defmodule ScryCore.Executor do
   # `:skip` -- it drops just *this one item's own key* from the
   # projected row, not the whole row, so it `:cont`s rather than
   # `:halt`s.
-  defp project(row, select_items, own_name, scope, params, engine_module, conn) do
+  defp project(row, select_items, own_name, scope, params, with_bindings, engine_module, conn) do
     Enum.reduce_while(select_items, {:ok, %{}}, fn item, {:ok, acc} ->
-      case project_item(item, row, own_name, scope, params, engine_module, conn) do
+      case project_item(item, row, own_name, scope, params, with_bindings, engine_module, conn) do
         {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
         :omit -> {:cont, {:ok, acc}}
         :skip -> {:halt, :skip}
@@ -738,7 +810,16 @@ defmodule ScryCore.Executor do
     end)
   end
 
-  defp project_item({:field, path}, row, _own_name, scope, _params, _engine_module, _conn) do
+  defp project_item(
+         {:field, path},
+         row,
+         _own_name,
+         scope,
+         _params,
+         _with_bindings,
+         _engine_module,
+         _conn
+       ) do
     {:ok, List.last(path), get_path(row, scope, path)}
   end
 
@@ -753,6 +834,7 @@ defmodule ScryCore.Executor do
          _own_name,
          scope,
          params,
+         _with_bindings,
          _engine_module,
          _conn
        ) do
@@ -774,6 +856,7 @@ defmodule ScryCore.Executor do
          _own_name,
          scope,
          params,
+         _with_bindings,
          _engine_module,
          _conn
        ) do
@@ -800,10 +883,11 @@ defmodule ScryCore.Executor do
          own_name,
          scope,
          params,
+         with_bindings,
          engine_module,
          conn
        ) do
-    case run(nested, [{own_name, row} | scope], params, engine_module, conn) do
+    case run(nested, [{own_name, row} | scope], params, with_bindings, engine_module, conn) do
       {:ok, []} when required -> :skip
       {:ok, nested_rows} -> {:ok, List.last(nested.source), nested_rows}
       {:error, _} = err -> err
@@ -816,6 +900,7 @@ defmodule ScryCore.Executor do
          _own_name,
          _scope,
          _params,
+         _with_bindings,
          _engine_module,
          _conn
        ) do

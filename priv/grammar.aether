@@ -91,7 +91,7 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_NIL, KW_TRUE, KW_FALSE,
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
           KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED, KW_IF,
-          KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT)
+          KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT, KW_WITH)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -326,13 +326,39 @@ NEVER := []
 ; `NEWLINE` token no longer folded into skip-trivia, threaded through
 ; every separator position that should accept it), not a one-line
 ; addition the way this fix is.
-document := fragment_decl* select TRIVIA?
+; `fragment_decl*` before `with_decl*` -- a fixed relative order between
+; the two declaration kinds, not something lang_spec mandates one way or
+; the other (its own §9 never shows them mixed). Simpler than a unified
+; `top_level_decl := fragment_decl | with_decl` choice rule would be (no
+; tag-based dispatch needed to tell a fragment declaration's own
+; `{name, body_items}` result apart from a with-declaration's `{name,
+; query}` one -- same shape, different meaning -- since each stays under
+; its own distinct capture key instead), at the cost of requiring every
+; `FRAGMENT` before every `WITH` in a document that uses both. Revisit if
+; a real need to interleave them ever surfaces -- not a spec violation
+; either way, just a narrower grammar than the language technically
+; allows.
+document := fragment_decl* with_decl* select TRIVIA?
 
 ; `<body-item> ...` (lang_spec §6's own template) reuses `body_list`
 ; directly -- a FRAGMENT's body is exactly as expressive as a SELECT's
 ; own (it can itself nest a SELECT, or spread another FRAGMENT), so no
 ; separate body grammar is needed here.
 fragment_decl := KW_FRAGMENT name:field_name LBRACE body:body_list RBRACE
+
+; `WITH <name> = SELECT ...` (lang_spec §9: "named reusable sub-query,
+; SQL CTE equivalent" -- vs. `FRAGMENT`'s reusable *shape*, this is
+; reusable *data*). Reuses the `select` rule directly for the bound
+; value, not a copy of it -- a `WITH` binding is a real, fully-formed
+; query (its own `where`/`group by`/`having`/etc. all apply exactly as
+; they would standalone), lang_spec's own grammar block confirms this
+; (`WITH <name> = SELECT <source> [modifiers] { <body-item> ... }`).
+; `WITH RECURSIVE` (lang_spec §5.4.1) is deliberately not this rule's
+; concern -- it needs `UNION`/`UNION ALL` (§5.4) to mean anything at
+; all (the recursive case is defined *as* a union with a base case), and
+; neither combinator exists in this grammar yet; a real, separate,
+; later increment once they do.
+with_decl := KW_WITH name:field_name EQ select:select
 
 ; Modifiers appear in lang_spec.md §5.2/§6's own fixed order, mirroring
 ; evaluation order front to back: an EP1(a) modifier (narrows/reshapes

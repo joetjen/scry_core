@@ -65,14 +65,13 @@ defmodule ScryCore.Query do
   `{:computed, alias, expr}` (lang_spec.md §9: `<alias>: <expression>`,
   e.g. `subtotal: price * quantity`) is a body item computed from an
   `expr()` -- a small arithmetic AST (`+ - * ** /`, lang_spec.md §5.10)
-  over literals, `{:field, path}`, and `{:param, name}`, the same two
-  placeholder tags `predicate()` already uses, evaluated by
+  over literals, `{:field, path}`, `{:param, name}`, and `{:call, name,
+  args}` (lang_spec.md §5.8's built-in functions -- `sum`/`avg`/`count`/
+  `min`/`max` are the only 5 names `ScryCore.Executor.eval_aggregate/5`
+  actually executes, tied to `group by`/`having`, §5.2), evaluated by
   `ScryCore.Executor` against the current row (and, via `{:field,
   ...}`, an enclosing row too, the same scope-chain correlation a
-  `where` predicate already gets). No function calls yet (`sum(...)`
-  etc., lang_spec.md §5.8) -- those are aggregate functions tied to
-  `group by`/`having`, and neither is executed anywhere in this
-  codebase yet either, so there's nothing real to call them against.
+  `where` predicate already gets).
 
   A body item may also be written `...<fragment-name>` in query text
   (lang_spec.md §5.11/§9, GraphQL-style reusable shape) -- but that never
@@ -94,6 +93,33 @@ defmodule ScryCore.Query do
   own expression, falling back to `else_expr` if none match -- `ELSE`
   is mandatory at the grammar level (no default, no implicit `nil`),
   not just a documented expectation.
+
+  `with_bindings` (lang_spec.md §9: `WITH <name> = SELECT ... { ... }`,
+  "named reusable sub-query, SQL CTE equivalent" -- vs. `FRAGMENT`'s
+  reusable *shape*, this is reusable *data*) is meaningful only on the
+  *top-level* query `ScryCore.parse/1` hands back, the mirror image of
+  `required`'s own "only meaningful when nested" -- it's document-global
+  (any `WITH` declaration is visible from every nesting depth, not just
+  the query that happens to reference it first), so `ScryCore.Executor`
+  threads it unchanged through every level of recursion instead of
+  reading it off each query it happens to be executing. A query whose
+  own `source` is exactly `[name]` for some declared `WITH name = ...`
+  is executed (fresh, every time it's referenced -- no caching; see
+  `ScryCore.Executor`'s own moduledoc for the cost tradeoff, the same
+  "correct, not necessarily efficient" posture `REQUIRED`'s own re-fetch
+  cost already has) *instead of* calling the real engine's `fetch/2`,
+  and its own result rows are used exactly as if they'd come from a real
+  source. A `WITH`-bound value is a full `t()` (built by the exact same
+  `select` grammar rule/`handle_rule` clause an ordinary query is), not
+  a special restricted shape -- its own `where`/`group by`/`having`/etc.
+  all apply normally. Whether a bare source name refers to a `WITH`
+  binding or a real engine source is resolved at *execution* time, not
+  parse time -- there's no distinguishing sigil the way `FRAGMENT`'s own
+  `...` spread has, so a name with no matching `WITH` binding is simply
+  assumed to be a real source, not a compile error. `WITH RECURSIVE`
+  (lang_spec.md §5.4.1) isn't part of this -- it needs `UNION`/`UNION
+  ALL` (§5.4) to mean anything at all, and neither combinator is
+  implemented anywhere in this codebase yet.
 
   `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8: `sum`/`avg`/
   `count`/`min`/`max`, the fixed built-in-function surface -- casts/
@@ -157,7 +183,8 @@ defmodule ScryCore.Query do
           offset: non_neg_integer() | nil,
           required: boolean(),
           select: [body_item()],
-          variant: %{optional(atom()) => term()}
+          variant: %{optional(atom()) => term()},
+          with_bindings: %{optional(String.t()) => t()}
         }
 
   defstruct source: nil,
@@ -171,5 +198,6 @@ defmodule ScryCore.Query do
             offset: nil,
             required: false,
             select: [],
-            variant: %{}
+            variant: %{},
+            with_bindings: %{}
 end

@@ -952,4 +952,122 @@ defmodule ScryCore.ExecutorTest do
       assert {:error, {:unsupported_grouped_body_item, %Query{}}} = run(query)
     end
   end
+
+  describe "WITH named sub-queries" do
+    test "a query whose source is a WITH-bound name runs the binding instead of fetching" do
+      query = %Query{
+        source: ["active_users"],
+        select: [{:field, ["name"]}],
+        with_bindings: %{
+          "active_users" => %Query{
+            source: ["users"],
+            wheres: [{:cmp, :eq, ["status"], "active"}],
+            select: [{:field, ["name"]}]
+          }
+        }
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"name" => "Alice"}]
+    end
+
+    test "a bare name with no matching WITH binding falls through to a real source, not an error" do
+      query = %Query{
+        source: ["users"],
+        select: [{:field, ["name"]}],
+        with_bindings: %{"unrelated" => %Query{source: ["orders"], select: []}}
+      }
+
+      assert {:ok, [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}]} = run(query)
+    end
+
+    test "a WITH binding can itself reference another WITH binding" do
+      # base: age > 20 keeps Alice (30) and Carol (65), drops Bob (17).
+      # filtered: age < 40 on top of base keeps only Alice -- proves a
+      # real two-step narrowing, not a coincidence of either filter
+      # alone.
+      query = %Query{
+        source: ["filtered"],
+        select: [{:field, ["name"]}],
+        with_bindings: %{
+          "base" => %Query{
+            source: ["users"],
+            wheres: [{:cmp, :gt, ["age"], 20}],
+            select: [{:field, ["name"]}, {:field, ["age"]}]
+          },
+          "filtered" => %Query{
+            source: ["base"],
+            wheres: [{:cmp, :lt, ["age"], 40}],
+            select: [{:field, ["name"]}]
+          }
+        }
+      }
+
+      assert {:ok, [%{"name" => "Alice"}]} = run(query)
+    end
+
+    test "with_bindings threads through a nested SELECT and correlates normally" do
+      query = %Query{
+        source: ["customers"],
+        order_bys: [{["id"], :asc}],
+        select: [
+          {:field, ["name"]},
+          %Query{
+            source: ["big_orders"],
+            wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+            select: [{:field, ["total"]}]
+          }
+        ],
+        with_bindings: %{
+          "big_orders" => %Query{
+            source: ["customer_orders"],
+            wheres: [{:cmp, :gt, ["total"], 60}],
+            select: [{:field, ["id"]}, {:field, ["customer_id"]}, {:field, ["total"]}]
+          }
+        }
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"name" => "Alice", "big_orders" => [%{"total" => 75}]},
+               %{"name" => "Bob", "big_orders" => []},
+               %{"name" => "Carol", "big_orders" => []}
+             ]
+    end
+
+    test "an unfiltered WITH binding composes with per-outer-row correlation around it" do
+      # own_orders itself has no WHERE -- the *outer* nested SELECT's own
+      # correlated WHERE is what narrows it down differently per outer
+      # row, proving the binding's rows are fetched fresh at each
+      # reference rather than some single, stale execution reused
+      # everywhere.
+      query = %Query{
+        source: ["customers"],
+        order_bys: [{["id"], :asc}],
+        select: [
+          {:field, ["name"]},
+          %Query{
+            source: ["own_orders"],
+            wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+            select: [{:field, ["id"]}]
+          }
+        ],
+        with_bindings: %{
+          "own_orders" => %Query{
+            source: ["customer_orders"],
+            select: [{:field, ["id"]}, {:field, ["customer_id"]}]
+          }
+        }
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"name" => "Alice", "own_orders" => [%{"id" => 100}, %{"id" => 101}]},
+               %{"name" => "Bob", "own_orders" => []},
+               %{"name" => "Carol", "own_orders" => [%{"id" => 102}]}
+             ]
+    end
+  end
 end
