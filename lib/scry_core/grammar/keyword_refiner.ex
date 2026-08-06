@@ -42,7 +42,16 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "union" => :KW_UNION,
     "all" => :KW_ALL,
     "intersect" => :KW_INTERSECT,
-    "except" => :KW_EXCEPT
+    "except" => :KW_EXCEPT,
+    "over" => :KW_OVER,
+    "partition" => :KW_PARTITION,
+    "rows" => :KW_ROWS,
+    "between" => :KW_BETWEEN,
+    "preceding" => :KW_PRECEDING,
+    "following" => :KW_FOLLOWING,
+    "current" => :KW_CURRENT,
+    "row" => :KW_ROW,
+    "unbounded" => :KW_UNBOUNDED
   }
 
   @impl true

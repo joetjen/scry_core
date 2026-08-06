@@ -1090,4 +1090,115 @@ line two""" { name }))
 
     assert q.wheres == [{:in, {:literal, "active"}, ["active", "pending"]}]
   end
+
+  describe "window functions (lang_spec.md §5.5)" do
+    test "row_number()/rank() parse with zero arguments", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { n: row_number() OVER }])
+      assert q.select == [{:computed, "n", {:window, {:call, "row_number", []}, [], [], nil}}]
+
+      assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { r: rank() OVER }])
+      assert q.select == [{:computed, "r", {:window, {:call, "rank", []}, [], [], nil}}]
+    end
+
+    test "a call with no OVER is completely unaffected, including a zero-arg one", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { n: row_number() }])
+      assert q.select == [{:computed, "n", {:call, "row_number", []}}]
+    end
+
+    test "the lang_spec.md §11 worked example, PARTITION BY and ORDER BY together", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT employees { name, rank: row_number() OVER PARTITION BY department ORDER BY salary DESC }]
+               )
+
+      assert q.select == [
+               {:field, ["name"]},
+               {:computed, "rank",
+                {:window, {:call, "row_number", []}, [["department"]], [{["salary"], :desc}], nil}}
+             ]
+    end
+
+    test "PARTITION BY alone, no ORDER BY or frame", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s[SELECT orders { n: row_number() OVER PARTITION BY region }])
+
+      assert q.select == [
+               {:computed, "n", {:window, {:call, "row_number", []}, [["region"]], [], nil}}
+             ]
+    end
+
+    test "ORDER BY alone, no PARTITION BY or frame", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { n: row_number() OVER ORDER BY id }])
+
+      assert q.select == [
+               {:computed, "n", {:window, {:call, "row_number", []}, [], [{["id"], :asc}], nil}}
+             ]
+    end
+
+    test "a full ROWS BETWEEN frame with a numeric bound on both sides", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT orders { s: sum(total) OVER PARTITION BY region ORDER BY id ROWS BETWEEN 1 PRECEDING AND 2 FOLLOWING }]
+               )
+
+      assert q.select == [
+               {:computed, "s",
+                {:window, {:call, "sum", [{:field, ["total"]}]}, [["region"]], [{["id"], :asc}],
+                 {{:preceding, 1}, {:following, 2}}}}
+             ]
+    end
+
+    test "UNBOUNDED PRECEDING/FOLLOWING frame bounds", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT orders { s: sum(total) OVER ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING }]
+               )
+
+      assert q.select == [
+               {:computed, "s",
+                {:window, {:call, "sum", [{:field, ["total"]}]}, [], [],
+                 {:unbounded_preceding, :unbounded_following}}}
+             ]
+    end
+
+    test "CURRENT ROW frame bounds", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT orders { s: sum(total) OVER ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW }]
+               )
+
+      assert q.select == [
+               {:computed, "s",
+                {:window, {:call, "sum", [{:field, ["total"]}]}, [], [{["id"], :asc}],
+                 {:current_row, :current_row}}}
+             ]
+    end
+
+    test "OVER is syntactically permitted on any call name, grammar stays permissive", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: json(metadata) OVER }])
+
+      assert q.select == [
+               {:computed, "x", {:window, {:call, "json", [{:field, ["metadata"]}]}, [], [], nil}}
+             ]
+    end
+
+    test "a window function can never reach WHERE -- a grammar-level restriction, not just execution-level",
+         %{grammar: g} do
+      # predicate_lhs/in_lhs and comparison's own right/right_field/
+      # items/items_expr alternatives never reference window_call or
+      # even expression/primary generally, so this is a genuine parse
+      # error, confirmed here rather than assumed from reading the
+      # grammar alone.
+      assert {:error, _} =
+               run(g, ~s[SELECT orders WHERE row_number() OVER > 1 { id }])
+    end
+  end
 end

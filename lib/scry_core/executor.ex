@@ -30,10 +30,12 @@ defmodule ScryCore.Executor do
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
   `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
   full standard-aggregate list, `count(distinct ...)` included) are
-  actually executable (`eval_aggregate/5`). Window functions (`over`,
-  `row_number()`, `rank()`, `first_value`/`last_value`, §5.5) are the one
-  remaining piece of §5.8's built-in surface still unimplemented. Every
-  aggregate hard-errors
+  actually executable (`eval_aggregate/5`), every one of them also
+  usable as a window function (`over`, §5.5 -- this module's own
+  "Window functions" section, near the bottom, has the full mechanics)
+  alongside the 4 window-only names `row_number`/`rank`/`first_value`/
+  `last_value`. That closes lang_spec §5.8's entire built-in-function
+  surface. Every aggregate hard-errors
   (`raise ArgumentError`) the moment any resolved operand is `nil`, per
   lang_spec.md's own "Aggregates over nullable fields hard-error the
   same way [as comparing a nullable field directly] -- no silent
@@ -420,11 +422,19 @@ defmodule ScryCore.Executor do
     with {:ok, rows} <- fetch_rows(query, scope, params, with_bindings, engine_module, conn) do
       filtered = Enum.filter(rows, &matches_all?(&1, query.wheres, scope, params))
       own_name = List.last(query.source)
+      {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
 
-      if aggregate_query?(query) do
-        run_grouped(query, filtered, own_name, scope, params, engine_module, conn)
-      else
-        run_plain(query, filtered, own_name, scope, params, with_bindings, engine_module, conn)
+      cond do
+        windows != [] and aggregate_query?(query) ->
+          raise ArgumentError,
+                "combining GROUP BY/an aggregate query with a window function in the same " <>
+                  "SELECT isn't supported yet"
+
+        aggregate_query?(query) ->
+          run_grouped(query, filtered, own_name, scope, params, engine_module, conn)
+
+        true ->
+          run_plain(query, filtered, own_name, scope, params, with_bindings, engine_module, conn)
       end
     end
   end
@@ -462,17 +472,29 @@ defmodule ScryCore.Executor do
   defp fetch_rows(%Query{source: source}, _scope, _params, _with_bindings, engine_module, conn),
     do: engine_module.fetch(conn, source)
 
-  # Today's ungrouped path, unchanged -- extracted verbatim so
-  # `aggregate_query?/1` saying `false` is provably a no-op against this
-  # module's own pre-existing behavior for any query that doesn't use
-  # `GROUP BY` or a function call anywhere.
+  # Today's ungrouped path, unchanged for a query with no window
+  # function anywhere in its own `select` -- `collect_and_rewrite_
+  # window_calls/1` returns `{[], query.select}` in that case (confirmed
+  # by construction: nothing to collect, nothing to rewrite), so
+  # `select`/`filtered` below are exactly `query.select`/`filtered` from
+  # the caller, byte-identical to this module's own pre-existing
+  # behavior. When there *is* a window function, each one's own value
+  # list is computed once here (`compute_window_values/4`, this
+  # module's own "Window functions" section below), then folded onto
+  # `filtered` as an ordinary per-row field under a synthetic key
+  # (`window_key/1`) -- the *rewritten* `select` references that key via
+  # an ordinary `{:field, ...}`, so `project_all` below needs no
+  # awareness of window functions at all; it's already resolving what
+  # looks like any other computed field.
   defp run_plain(query, filtered, own_name, scope, params, with_bindings, engine_module, conn) do
-    sorted = sort_rows(filtered, query.order_bys, scope)
+    {windows, select} = collect_and_rewrite_window_calls(query.select)
+    augmented = augment_with_window_values(filtered, windows, scope, params)
+    sorted = sort_rows(augmented, query.order_bys, scope)
 
     with {:ok, projected} <-
            project_all(
              sorted,
-             query.select,
+             select,
              own_name,
              scope,
              params,
@@ -673,6 +695,20 @@ defmodule ScryCore.Executor do
       predicate_has_aggregate_call?(predicate) or expr_has_aggregate_call?(expr)
     end) or expr_has_aggregate_call?(else_expr)
   end
+
+  # A window-wrapped aggregate (`sum(price) OVER ...`) must *not*
+  # trigger `aggregate_query?`'s own `GROUP BY`/flat-aggregate routing
+  # -- that inner `sum` is handled entirely by this module's own
+  # "Window functions" section below (`compute_window_values/4`), not
+  # by `run_grouped/6`. The exact inverse of every other clause in this
+  # family: everywhere else, recursing *into* a nested call is the fix
+  # (`count(distinct ...)`'s own regression, this module's moduledoc);
+  # here, stopping recursion *at* the `{:window, ...}` boundary is the
+  # correct behavior, found while designing this feature, not by a
+  # regression afterward -- `collect_and_rewrite_window_calls/1` (below)
+  # is what actually walks into a window call's own `args`, and it runs
+  # long before `aggregate_query?/1` would ever get a chance to.
+  defp expr_has_aggregate_call?({:window, _call, _partition_by, _order_bys, _frame}), do: false
 
   defp expr_has_aggregate_call?(_other), do: false
 
@@ -1682,4 +1718,327 @@ defmodule ScryCore.Executor do
   # already has.
   defp project_group_item(item, _member_rows, _own_name, _scope, _params, _em, _conn),
     do: {:error, {:unsupported_grouped_body_item, item}}
+
+  # ---- Window functions (lang_spec.md §5.5/§5.8) --------------------------
+  #
+  # Unlike every other `expr()` tag, a `{:window, ...}` node's value
+  # depends on more than the current row -- it needs the *whole* query's
+  # own filtered row set (partitioned, then ordered within each
+  # partition). `run_plain/8` computes every window function's own value
+  # list *before* projection (`compute_window_values/4`), then folds
+  # each value onto its own row under a synthetic `{:field, [key]}`
+  # reference (`window_key/1`) that the *rewritten* `select`
+  # (`collect_and_rewrite_window_calls/1`) uses in place of the original
+  # `{:window, ...}` node -- so `project_all`/`resolve_rhs` and every
+  # other existing resolver need zero awareness of window functions at
+  # all; by the time they run, a window function's own value is already
+  # an ordinary per-row field. This is a deliberate design choice, not
+  # an accident of implementation order: the alternative (threading a
+  # new "this row's own precomputed window values" parameter through
+  # `resolve_rhs/4` and every one of its recursive call sites --
+  # `{:arith, ...}`, `{:when, ...}`, `{:call, ...}`'s own args, `{:dot,
+  # ...}`'s own base) would ripple through this entire module for no
+  # real benefit over the much smaller "rewrite the AST, augment the
+  # rows" pre-pass here.
+  #
+  # `window_key/1`'s own synthetic field name (`"0_scry_window_#{n}"`)
+  # is provably collision-proof with a real field name, not just
+  # unlikely to collide -- `priv/grammar.aether`'s own `field_name :=
+  # IDENT | ESCAPED_IDENT` are both `[[:alpha:]_][[:alnum:]_]*` shaped,
+  # so a real field name can never start with a digit.
+  #
+  # Deliberately scoped to an *ungrouped* query only -- `run/6` above
+  # raises a clear error if a query both has a window function anywhere
+  # in `select` and would otherwise route to `run_grouped/6` (a real
+  # `GROUP BY`, or an ordinary, non-windowed aggregate call elsewhere in
+  # the same `select`). Real SQL supports a window function over an
+  # already-grouped result; this increment doesn't yet -- a documented,
+  # deliberate gap, not a silent mishandling. Only reachable from
+  # `select` at the grammar level to begin with (`predicate_lhs`/
+  # `in_lhs`, and `comparison`'s own `right`/`right_field`/`items`/
+  # `items_expr` alternatives, never reference `window_call`/`primary`
+  # directly), so a window function can never actually reach `where`/
+  # `having`/`group by` in a valid parse tree in the first place --
+  # confirmed by tracing every grammar rule that reaches `expression`,
+  # not assumed.
+
+  # Walks `select`, collecting every `{:window, ...}` node in pre-order
+  # and replacing each with a synthetic field reference, in one pass
+  # (`Enum.map_reduce/3` threading `{next_index, collected_windows}`) --
+  # not two separate collect-then-rewrite passes, which could disagree
+  # on ordering. Recurses into exactly the same `expr()` shapes
+  # `expr_has_aggregate_call?/1` above does (`{:arith, ...}`, `{:when,
+  # ...}`'s own clauses/else, `{:call, ...}`'s own args, `{:distinct,
+  # ...}`, `{:dot, ...}`'s own base) -- a window call's own inner
+  # `call`/`partition_by`/`order_bys`/`frame` are *not* further
+  # recursed into (nested window-in-window isn't a documented
+  # requirement; left undefined/best-effort, not explicitly guarded
+  # against). Returns `{[], query.select}` (the *original* list,
+  # untouched) when there's no window call anywhere -- confirmed by
+  # construction, not just by convention, since `rewrite_body_item/2`'s
+  # own fallback clause returns its argument unchanged.
+  defp collect_and_rewrite_window_calls(select) do
+    {rewritten, {_next_index, windows}} = Enum.map_reduce(select, {0, []}, &rewrite_body_item/2)
+    {Enum.reverse(windows), rewritten}
+  end
+
+  defp rewrite_body_item({:computed, alias_name, expr}, acc) do
+    {rewritten_expr, acc} = rewrite_expr(expr, acc)
+    {{:computed, alias_name, rewritten_expr}, acc}
+  end
+
+  defp rewrite_body_item(other, acc), do: {other, acc}
+
+  defp rewrite_expr(
+         {:window, _call, _partition_by, _order_bys, _frame} = window,
+         {index, windows}
+       ) do
+    {{:field, [window_key(index)]}, {index + 1, [window | windows]}}
+  end
+
+  defp rewrite_expr({:arith, op, left, right}, acc) do
+    {left, acc} = rewrite_expr(left, acc)
+    {right, acc} = rewrite_expr(right, acc)
+    {{:arith, op, left, right}, acc}
+  end
+
+  defp rewrite_expr({:when, clauses, else_expr}, acc) do
+    {clauses, acc} =
+      Enum.map_reduce(clauses, acc, fn {predicate, then_expr}, acc ->
+        {then_expr, acc} = rewrite_expr(then_expr, acc)
+        {{predicate, then_expr}, acc}
+      end)
+
+    {else_expr, acc} = rewrite_expr(else_expr, acc)
+    {{:when, clauses, else_expr}, acc}
+  end
+
+  defp rewrite_expr({:call, name, args}, acc) do
+    {args, acc} = Enum.map_reduce(args, acc, &rewrite_expr/2)
+    {{:call, name, args}, acc}
+  end
+
+  defp rewrite_expr({:distinct, expr}, acc) do
+    {expr, acc} = rewrite_expr(expr, acc)
+    {{:distinct, expr}, acc}
+  end
+
+  defp rewrite_expr({:dot, base, path}, acc) do
+    {base, acc} = rewrite_expr(base, acc)
+    {{:dot, base, path}, acc}
+  end
+
+  defp rewrite_expr(other, acc), do: {other, acc}
+
+  defp window_key(index), do: "0_scry_window_#{index}"
+
+  # Zero window calls -> `filtered` unchanged, no augmentation, no
+  # per-row work at all.
+  defp augment_with_window_values(filtered, [], _scope, _params), do: filtered
+
+  defp augment_with_window_values(filtered, windows, scope, params) do
+    # One `values` list per window call, each aligned index-for-index
+    # with `filtered` (`compute_window_values/4`'s own contract) -- for
+    # each row, pick out that row's own value from each window's list
+    # by its position and stash it under that window's own synthetic
+    # key. Simple, not the most efficient possible shape (an `Enum.at/2`
+    # per row per window) -- the same "correct, not necessarily
+    # efficient" posture this module's own moduledoc already documents
+    # for `WITH`'s own re-fetch cost and `REQUIRED`'s own re-fetch cost.
+    keyed_value_lists =
+      windows
+      |> Enum.with_index()
+      |> Enum.map(fn {window, index} ->
+        {window_key(index), compute_window_values(window, filtered, scope, params)}
+      end)
+
+    filtered
+    |> Enum.with_index()
+    |> Enum.map(fn {row, row_index} ->
+      Enum.reduce(keyed_value_lists, row, fn {key, values}, acc ->
+        Map.put(acc, key, Enum.at(values, row_index))
+      end)
+    end)
+  end
+
+  # Aligned index-for-index with `filtered_rows` -- partitions (tracking
+  # each row's own original index), sorts each partition via the
+  # *existing* `sorts_before?/4` (reused directly, the same generic
+  # `[{path, direction}]`-shaped comparator `sort_rows/3` above already
+  # uses), computes each row's own value via `window_value/9`, then
+  # reassembles by original index so the result lines up with
+  # `filtered_rows` regardless of partition order.
+  defp compute_window_values(
+         {:window, {:call, name, args}, partition_by, order_bys, frame},
+         filtered_rows,
+         scope,
+         params
+       ) do
+    filtered_rows
+    |> Enum.with_index()
+    |> Enum.group_by(fn {row, _original_index} ->
+      Enum.map(partition_by, &get_path(row, scope, &1))
+    end)
+    |> Enum.flat_map(fn {_partition_key, indexed_rows} ->
+      sorted_indexed =
+        Enum.sort(indexed_rows, fn {a, _}, {b, _} -> sorts_before?(a, b, order_bys, scope) end)
+
+      sorted_rows = Enum.map(sorted_indexed, &elem(&1, 0))
+      n = length(sorted_rows)
+
+      sorted_indexed
+      |> Enum.with_index()
+      |> Enum.map(fn {{_row, original_index}, pos} ->
+        value = window_value(name, args, sorted_rows, pos, n, order_bys, frame, scope, params)
+        {original_index, value}
+      end)
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  # `row_number()`/`rank()` (lang_spec §5.5: "Ranking functions...
+  # ignore frame entirely") -- zero arguments, validated explicitly
+  # (a clear error, not a silently-ignored extra argument).
+  defp window_value("row_number", [], _sorted_rows, pos, _n, _order_bys, _frame, _scope, _params),
+    do: pos + 1
+
+  defp window_value(
+         "row_number",
+         args,
+         _sorted_rows,
+         _pos,
+         _n,
+         _order_bys,
+         _frame,
+         _scope,
+         _params
+       ) do
+    raise ArgumentError, "row_number()/0 expects no arguments, got #{length(args)}"
+  end
+
+  defp window_value("rank", [], sorted_rows, pos, _n, order_bys, _frame, scope, _params),
+    do: rank_at(sorted_rows, pos, order_bys, scope)
+
+  defp window_value("rank", args, _sorted_rows, _pos, _n, _order_bys, _frame, _scope, _params) do
+    raise ArgumentError, "rank()/0 expects no arguments, got #{length(args)}"
+  end
+
+  # `first_value`/`last_value` (lang_spec §5.8) -- one argument,
+  # resolved against the first/last row of the current row's own frame
+  # (default: the whole partition). Deliberately **no** nil-hard-error
+  # here, unlike the 10 aggregates below -- these *select* one row's
+  # value, they don't *reduce* multiple values, so lang_spec's "no
+  # silent nil-skipping" rule (which is about a reduction silently
+  # dropping nulls) doesn't apply the same way; a genuinely nil value at
+  # that position is a legitimate answer, not a skipped one.
+  defp window_value("first_value", [arg], sorted_rows, pos, n, _order_bys, frame, scope, params) do
+    {lo, _hi} = frame_range(frame, pos, n)
+    resolve_rhs(arg, Enum.at(sorted_rows, lo), scope, params)
+  end
+
+  defp window_value(
+         "first_value",
+         args,
+         _sorted_rows,
+         _pos,
+         _n,
+         _order_bys,
+         _frame,
+         _scope,
+         _params
+       ) do
+    raise ArgumentError, "first_value/1 expects exactly one argument, got #{length(args)}"
+  end
+
+  defp window_value("last_value", [arg], sorted_rows, pos, n, _order_bys, frame, scope, params) do
+    {_lo, hi} = frame_range(frame, pos, n)
+    resolve_rhs(arg, Enum.at(sorted_rows, hi), scope, params)
+  end
+
+  defp window_value(
+         "last_value",
+         args,
+         _sorted_rows,
+         _pos,
+         _n,
+         _order_bys,
+         _frame,
+         _scope,
+         _params
+       ) do
+    raise ArgumentError, "last_value/1 expects exactly one argument, got #{length(args)}"
+  end
+
+  # Any of `@aggregate_names` used as a window function (e.g. a running
+  # `sum` -- lang_spec §5.5's own "restricts an aggregate window
+  # function to a frame... enables running totals / moving averages") --
+  # resolved across the row's own **frame** subset, then dispatched
+  # through the *existing* `eval_aggregate/5` **directly, unmodified**,
+  # reusing 100% of its arity/nil-hard-error/distinct-rejection/
+  # `percentile`'s own 2-arg handling for free. The single biggest reuse
+  # win in this feature -- no aggregate-specific logic duplicated here
+  # at all.
+  defp window_value(name, args, sorted_rows, pos, n, _order_bys, frame, scope, params)
+       when name in @aggregate_names do
+    {lo, hi} = frame_range(frame, pos, n)
+    frame_rows = slice_frame(sorted_rows, lo, hi)
+    eval_aggregate(name, args, frame_rows, scope, params)
+  end
+
+  defp window_value(name, _args, _sorted_rows, _pos, _n, _order_bys, _frame, _scope, _params) do
+    raise ArgumentError, "#{name}(...) is not a valid window function"
+  end
+
+  # Default frame = whole partition, *regardless of whether `order_bys`
+  # is present* (lang_spec §5.5's own explicit "deliberately not SQL's
+  # behavior" rule -- SQL silently narrows an implicit frame to
+  # cumulative the moment `ORDER BY` is present; a cumulative/trailing
+  # aggregate here always requires writing `ROWS BETWEEN` explicitly).
+  defp frame_range(nil, _pos, n), do: {0, n - 1}
+
+  defp frame_range({start_bound, end_bound}, pos, n),
+    do: {resolve_bound(start_bound, pos, n), resolve_bound(end_bound, pos, n)}
+
+  defp resolve_bound(:unbounded_preceding, _pos, _n), do: 0
+  defp resolve_bound({:preceding, k}, pos, _n), do: max(0, pos - k)
+  defp resolve_bound(:current_row, pos, _n), do: pos
+  defp resolve_bound({:following, k}, pos, n), do: min(n - 1, pos + k)
+  defp resolve_bound(:unbounded_following, _pos, n), do: n - 1
+
+  # An inverted frame (`lo > hi`, e.g. a `ROWS BETWEEN 1 FOLLOWING AND 1
+  # PRECEDING`-shaped nonsense query) yields an empty frame -- reuses
+  # the *existing* empty-list aggregate answers (`sum([]) = nil`,
+  # `count([]) = 0`, etc, `apply_aggregate/2` above) for free, not a
+  # separate special case. `Enum.slice/2` alone isn't relied on for this
+  # (its own `first > last` behavior isn't asserted here, to stay
+  # independent of that), an explicit guard instead.
+  defp slice_frame(_rows, lo, hi) when lo > hi, do: []
+  defp slice_frame(rows, lo, hi), do: Enum.slice(rows, lo..hi)
+
+  # SQL `RANK()` semantics: rows that tie on every `order_bys` field get
+  # the *same* rank; the next distinct value's rank jumps by the number
+  # of tied rows (not a plain 1-indexed sequence -- that's `row_number`,
+  # above). An empty `order_bys` list makes every row vacuously "tied"
+  # with its predecessor (`ties?/4`'s own `Enum.all?` over zero fields is
+  # trivially true), so `rank()` with no `ORDER BY` naturally gives every
+  # row rank `1` with no special-casing needed.
+  defp rank_at(sorted_rows, pos, order_bys, scope),
+    do: pos + 1 - count_ties_before(sorted_rows, pos, order_bys, scope)
+
+  defp count_ties_before(_sorted_rows, 0, _order_bys, _scope), do: 0
+
+  defp count_ties_before(sorted_rows, pos, order_bys, scope) do
+    if ties?(Enum.at(sorted_rows, pos - 1), Enum.at(sorted_rows, pos), order_bys, scope) do
+      1 + count_ties_before(sorted_rows, pos - 1, order_bys, scope)
+    else
+      0
+    end
+  end
+
+  defp ties?(a, b, order_bys, scope) do
+    Enum.all?(order_bys, fn {path, _direction} ->
+      term_order(get_path(a, scope, path), get_path(b, scope, path)) == :eq
+    end)
+  end
 end

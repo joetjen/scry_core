@@ -447,16 +447,21 @@ defmodule ScryCore.Actions do
   # base, path} shape -- same reasoning as call's own clause just above.
   def handle_rule(:primary, %{call_with_path: cap}, ctx), do: cap.eval.(ctx)
 
-  # lang_spec §5.8's built-in functions (sum/avg/count/min/max, this
-  # phase's real set) -- ScryCore.Executor.eval_aggregate/5 decides
+  # lang_spec §5.8's built-in functions (sum/avg/count/min/max/etc,
+  # this phase's real set) -- ScryCore.Executor.eval_aggregate/5 decides
   # which `name`s it actually knows how to run, not this module (same
   # split as body_item_ep1's own {:variant, value}, a construct the
   # grammar accepts generally that only *some* of the pipeline
-  # ultimately executes).
-  def handle_rule(:call, %{name: name_cap, args: args_cap}, ctx) do
+  # ultimately executes). `call_args` is optional now (window
+  # functions' own `row_number()`/`rank()`, priv/grammar.aether's own
+  # `call` comment) -- read the same way `list`'s own handler already
+  # reads `:literal_list` (`maybe_eval/3`, absent -> `[]`), not a
+  # renamed `args` key (there isn't one anymore -- see that same
+  # comment for why).
+  def handle_rule(:call, %{name: name_cap} = captures, ctx) do
     with {:ok, name, ctx} <- name_cap.eval.(ctx),
-         {:ok, args, ctx} <- args_cap.eval.(ctx) do
-      {:ok, {:call, name, args}, ctx}
+         {:ok, args, ctx} <- maybe_eval(captures, :call_args, ctx) do
+      {:ok, {:call, name, absent_to([], args)}, ctx}
     end
   end
 
@@ -488,6 +493,67 @@ defmodule ScryCore.Actions do
   def handle_rule(:call_arg, %{distinct: _distinct_cap, expr: expr_cap}, ctx) do
     with {:ok, expr, ctx} <- expr_cap.eval.(ctx), do: {:ok, {:distinct, expr}, ctx}
   end
+
+  # Window functions (lang_spec §5.5, priv/grammar.aether's own
+  # `window_call`/`over_spec` comments). `call`'s own handler above
+  # already returns the fully-tagged `{:call, name, args}` shape.
+  def handle_rule(:window_call, %{call: call_cap, over: over_cap}, ctx) do
+    with {:ok, call, ctx} <- call_cap.eval.(ctx),
+         {:ok, {partition_by, order_bys, frame}, ctx} <- over_cap.eval.(ctx) do
+      {:ok, {:window, call, partition_by, order_bys, frame}, ctx}
+    end
+  end
+
+  # All three pieces independently optional (priv/grammar.aether's own
+  # `over_spec` comment) -- absent partition/order default to `[]`
+  # (`Query.t()`'s own `group_bys`/`order_bys` fields use the same
+  # "empty list means unpartitioned/unordered" convention already),
+  # absent frame to `nil` (`ScryCore.Executor`'s own frame-resolution
+  # comment: "default = whole partition").
+  def handle_rule(:over_spec, captures, ctx) do
+    with {:ok, partition_by, ctx} <- maybe_eval(captures, :partition_clause, ctx),
+         {:ok, order_bys, ctx} <- maybe_eval(captures, :order_by_clause, ctx),
+         {:ok, frame, ctx} <- maybe_eval(captures, :frame_clause, ctx) do
+      {:ok, {absent_to([], partition_by), absent_to([], order_bys), absent_to(nil, frame)}, ctx}
+    end
+  end
+
+  # Same shape as `group_by_clause`'s own handler above -- both just
+  # reuse `field_list` directly.
+  def handle_rule(:partition_clause, %{fields: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:frame_clause, %{start: start_cap, stop: stop_cap}, ctx) do
+    with {:ok, start, ctx} <- start_cap.eval.(ctx),
+         {:ok, stop, ctx} <- stop_cap.eval.(ctx) do
+      {:ok, {start, stop}, ctx}
+    end
+  end
+
+  # Three clauses, one per `frame_bound` grammar alternative -- the
+  # `n:INTEGER`-carrying one declared *before* the `UNBOUNDED`-only one
+  # since both share the `prec_or_foll` capture key and Elixir's own
+  # map-pattern matching would otherwise let the narrower pattern match
+  # the `n`-carrying captures too (extra keys in the map don't prevent
+  # a narrower pattern from matching -- ordering is what disambiguates
+  # here, most-specific first, the same discipline this module already
+  # follows for `comparison`'s own alternatives).
+  def handle_rule(:frame_bound, %{n: n_cap, prec_or_foll: pf_cap}, ctx) do
+    with {:ok, n, ctx} <- n_cap.eval.(ctx),
+         {:ok, pf_text, ctx} <- pf_cap.eval.(ctx) do
+      {:ok, {frame_bound_tag(pf_text, :preceding, :following), n}, ctx}
+    end
+  end
+
+  def handle_rule(:frame_bound, %{prec_or_foll: pf_cap}, ctx) do
+    with {:ok, pf_text, ctx} <- pf_cap.eval.(ctx) do
+      {:ok, frame_bound_tag(pf_text, :unbounded_preceding, :unbounded_following), ctx}
+    end
+  end
+
+  # `KW_CURRENT KW_ROW` has no named captures at all -- the third
+  # `frame_bound` alternative, unambiguous once the two clauses above
+  # (both requiring `prec_or_foll`) don't match.
+  def handle_rule(:frame_bound, _captures, ctx), do: {:ok, :current_row, ctx}
 
   # `when_clause` (`+`-repeated) always produces at least one element --
   # the grammar itself enforces "at least one WHEN...THEN", not a check
@@ -826,6 +892,15 @@ defmodule ScryCore.Actions do
   # are already correctly tagged and pass through unchanged.
   defp wrap_field_path(path) when is_list(path), do: {:field, path}
   defp wrap_field_path(already_tagged), do: already_tagged
+
+  # `frame_bound`'s own `prec_or_foll` capture text, case-insensitive
+  # (this grammar's own file-wide `@case_insensitive` pragma) --
+  # "preceding" picks the first tag, anything else (only ever
+  # "following", the token choice group's only other member) the
+  # second.
+  defp frame_bound_tag(pf_text, preceding_tag, following_tag) do
+    if String.downcase(pf_text) == "preceding", do: preceding_tag, else: following_tag
+  end
 
   # Reuses Ichor.Actions.eval_all/2 (already correct for both a single
   # capture and a repeated-under-*/+ list of them) rather than

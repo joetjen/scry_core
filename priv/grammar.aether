@@ -93,7 +93,9 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
           KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED, KW_IF,
           KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT, KW_WITH,
-          KW_UNION, KW_ALL, KW_INTERSECT, KW_EXCEPT)
+          KW_UNION, KW_ALL, KW_INTERSECT, KW_EXCEPT,
+          KW_OVER, KW_PARTITION, KW_ROWS, KW_BETWEEN, KW_PRECEDING,
+          KW_FOLLOWING, KW_CURRENT, KW_ROW, KW_UNBOUNDED)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -728,26 +730,47 @@ power := base:primary (POW exp:power)?
 ; as an ordinary field path (e.g. a real field literally named "sum"),
 ; only `IDENT LPAREN ... RPAREN` triggers `call`/`call_with_path` at
 ; all.
-primary := literal | call_with_path | call | path | when_expr
+; `window_call` tried before `call_with_path`/`call` -- the same "more
+; specific first, backtracking falls through cleanly" pattern
+; `call_with_path | call` already proves (below): a call with a
+; trailing `OVER` matches `window_call` fully; one without it fails
+; `window_call` outright (no partial match to backtrack out of -- `KW_OVER`
+; is required immediately after `call`) and falls through to
+; `call_with_path`/`call` exactly as before, confirmed empirically via
+; scratch grammar together with every other shape in this comment
+; block. `window_call` and `call_with_path` are mutually exclusive on
+; any given input (a window function's own `OVER` attaches directly to
+; the call, never combined with a trailing `.path` -- lang_spec §5.5's
+; own grammar row shows no such combination), so their relative order
+; doesn't matter for correctness, only readability.
+primary := literal | window_call | call_with_path | call | path | when_expr
          | LPAREN inner:expression RPAREN
 
 ; lang_spec §5.8's fixed built-in-function surface -- "anything else
 ; called as `identifier(args)` is either an EP2 namespaced extension
 ; call, or (against a `logic`-kind source) `logic`'s EP2 bare call" --
 ; so this rule accepts *any* identifier followed by parenthesized args,
-; not just the 10 real functions this phase executes (`sum`/`avg`/
-; `count`/`min`/`max`, `string`/`int`/`exact`/`inexact`/`json` -- the
-; rest of that section's built-ins, window functions, stay deferred).
-; Which names are actually executable is `ScryCore.Executor`'s own
-; concern (`eval_aggregate/5`/`apply_cast/2`), not the grammar's -- same
-; split as `body_item_ep1`/`:variant` elsewhere in this file, a real,
-; expected-to-exist-eventually construct core doesn't fully handle yet,
-; not an error at the grammar level. At least one argument is required
-; (no `count(*)`/zero-arg calls yet -- every real §5.8 aggregate this
-; phase supports takes exactly one, matching lang_spec §11's own worked
-; example; window functions like `row_number()` are still deferred
-; wholesale, so the zero-arg question doesn't need answering yet).
-call := name:IDENT LPAREN args:call_args RPAREN
+; not just the 15 real functions this phase executes (`sum`/`avg`/
+; `count`/`min`/`max`/`stddev_samp`/`stddev_pop`/`var_samp`/`var_pop`/
+; `percentile`, `string`/`int`/`exact`/`inexact`/`json`, plus the 4
+; window-only names below). Which names are actually executable is
+; `ScryCore.Executor`'s own concern (`eval_aggregate/5`/`apply_cast/2`),
+; not the grammar's -- same split as `body_item_ep1`/`:variant`
+; elsewhere in this file.
+;
+; `call_args` is *optional* now (bare, unrenamed -- not `args:
+; call_args?`) -- lang_spec §5.8's `row_number()`/`rank()` (§5.5,
+; window functions) are genuinely zero-argument, the first real need
+; for this. Bare, not renamed, for the same reason documented at
+; length on `list`'s own `items:literal_list?` above: renaming an
+; *optional* rule reference produces a spurious second, raw-text
+; capture under the new name, while the real dispatch still only ever
+; happens under the rule's own implicit name (`call_args`, not `args`)
+; -- confirmed (again) via scratch grammar before committing to this
+; shape. `ScryCore.Actions`' own `call` handler reads it the same way
+; `list`'s own handler already reads `:literal_list` (`Map.has_key?/2`,
+; absent -> `[]`), not a value it happens to call `args`.
+call := name:IDENT LPAREN call_args? RPAREN
 
 ; `json(<field>)` (lang_spec §5.8/§7: "reinterprets a String field for
 ; one qualified use -- `WHERE json(metadata).color = "red"`") is the one
@@ -779,6 +802,63 @@ call_with_path := call:call DOT path:path
 ; (none of which use `DISTINCT`) is completely unaffected.
 call_args := head:call_arg (COMMA tail:call_arg)*
 call_arg := distinct:KW_DISTINCT expr:expression | expression
+
+; Window functions (lang_spec §5.5: "`<fn>() OVER [PARTITION BY
+; <field>,...] [ORDER BY <field> [desc|asc],...] [ROWS BETWEEN <bound>
+; AND <bound>]`"). `OVER` marks a call as a window function -- reachable
+; from `primary` (above), so it's syntactically permitted on *any*
+; call, the same "grammar stays permissive, execution rejects misuse"
+; posture `DISTINCT`/`call_with_path` already have (a non-window
+; function used with `OVER`, or a window-only function like
+; `row_number` used *without* it, both raise a clear error at execution
+; time -- `ScryCore.Executor`'s own concern). No parens around
+; `over_spec` itself -- lang_spec's own worked examples never show any
+; (`row_number() OVER PARTITION BY department ORDER BY salary DESC`),
+; unlike SQL's `OVER (...)`.
+window_call := call:call KW_OVER over:over_spec
+
+; All three pieces optional and in this fixed order (lang_spec's own
+; `[PARTITION BY ...] [ORDER BY ...] [ROWS BETWEEN ...]`), the same
+; "fixed modifier order, each independently optional" convention
+; `select`'s own header-modifier chain above already established.
+; Bare/unrenamed for the usual reason (`list`'s own `items:
+; literal_list?` comment) -- confirmed via scratch grammar, together
+; with `call_args?` above, before committing to this shape.
+over_spec := partition_clause? order_by_clause? frame_clause?
+
+; Reuses `field_list` verbatim -- `group_by_clause`'s own field-list
+; rule above, already exactly "comma-separated `path`s," no new rule
+; needed.
+partition_clause := KW_PARTITION KW_BY fields:field_list
+
+; Reuses `order_by_clause` verbatim (above, `select`'s own top-level
+; `ORDER BY`) for a window's own *internal* ordering -- identical shape
+; (`path (KW_DESC|KW_ASC)?`, comma-separated), no duplicate rule
+; needed; a window's own ORDER BY and a query's top-level one are
+; syntactically and semantically the same construct, just used in two
+; different positions.
+;
+; lang_spec §5.5: "omitting `rows between` always means the whole
+; partition, regardless of whether `order by` is present... Ranking
+; functions (`row_number()`, `rank()`) ignore frame entirely." Reuses
+; the existing `KW_AND`/`KW_BY` tokens directly -- no new keyword
+; needed for either.
+frame_clause := KW_ROWS KW_BETWEEN start:frame_bound KW_AND stop:frame_bound
+
+; lang_spec §5.5: "bound ∈ `UNBOUNDED PRECEDING`, `<n> PRECEDING`,
+; `CURRENT ROW`, `<n> FOLLOWING`, `UNBOUNDED FOLLOWING`". `KW_UNBOUNDED`/
+; `n:INTEGER` share one alternative each for PRECEDING/FOLLOWING
+; (`prec_or_foll:(KW_PRECEDING | KW_FOLLOWING)`, a named *token* choice
+; group -- proven safe by `order_item`'s own `dir:(KW_DESC | KW_ASC)?`
+; immediately above, the same shape) rather than 4 separate
+; alternatives, since `ScryCore.Actions` needs to know which of the two
+; matched either way and a token choice group doesn't have the
+; capture-scrambling problem a *rule* choice group nested in a
+; *repeated* group has (this file's own `additive_tail` comment) --
+; neither condition applies here (not repeated, not a rule choice).
+frame_bound := KW_UNBOUNDED prec_or_foll:(KW_PRECEDING | KW_FOLLOWING)
+             | n:INTEGER prec_or_foll:(KW_PRECEDING | KW_FOLLOWING)
+             | KW_CURRENT KW_ROW
 
 ; Conditional expression (lang_spec §5.6, §9): "Inline, not a block."
 ; Just another `primary` alternative, not a separate top-level-only

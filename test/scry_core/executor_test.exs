@@ -126,6 +126,21 @@ defmodule ScryCore.ExecutorTest do
     %{"id" => 8, "v" => 9}
   ]
 
+  # For window functions -- lang_spec.md §11's own worked example shape
+  # (`department`/`salary`). Bob and Carol are deliberately tied at the
+  # same salary within "eng" (tests `rank()`'s own tie-awareness against
+  # `row_number()`'s own strict sequence); Bob appears *before* Carol in
+  # fetch order despite the tie (tests that a stable sort, not fetch
+  # order, decides who's "first" among ties once `ORDER BY` picks a
+  # direction).
+  @employees [
+    %{"name" => "Alice", "department" => "eng", "salary" => 100},
+    %{"name" => "Bob", "department" => "eng", "salary" => 120},
+    %{"name" => "Carol", "department" => "eng", "salary" => 120},
+    %{"name" => "Dave", "department" => "sales", "salary" => 90},
+    %{"name" => "Eve", "department" => "sales", "salary" => 110}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -140,7 +155,8 @@ defmodule ScryCore.ExecutorTest do
     ["team_b"] => @team_b,
     ["tickets"] => @tickets,
     ["cards"] => @cards,
-    ["measurements"] => @measurements
+    ["measurements"] => @measurements,
+    ["employees"] => @employees
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -1823,6 +1839,348 @@ defmodule ScryCore.ExecutorTest do
       }
 
       assert {:ok, [%{"id" => 1}]} = run(query)
+    end
+  end
+
+  describe "window functions (lang_spec.md §5.5/§5.8)" do
+    test "the lang_spec.md §11 worked example -- row_number() OVER PARTITION BY ... ORDER BY ... DESC" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "rank",
+           {:window, {:call, "row_number", []}, [["department"]], [{["salary"], :desc}], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["rank"]}) == %{
+               "Alice" => 3,
+               "Bob" => 1,
+               "Carol" => 2,
+               "Dave" => 2,
+               "Eve" => 1
+             }
+    end
+
+    test "row_number() with no PARTITION BY treats the whole result as one partition" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "n", {:window, {:call, "row_number", []}, [], [{["salary"], :asc}], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["n"]}) == %{
+               "Dave" => 1,
+               "Alice" => 2,
+               "Eve" => 3,
+               "Bob" => 4,
+               "Carol" => 5
+             }
+    end
+
+    test "rank() gives tied rows the same rank and skips the next one, unlike row_number()" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "r",
+           {:window, {:call, "rank", []}, [["department"]], [{["salary"], :desc}], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["r"]}) == %{
+               "Alice" => 3,
+               "Bob" => 1,
+               "Carol" => 1,
+               "Dave" => 2,
+               "Eve" => 1
+             }
+    end
+
+    test "rank() with no ORDER BY gives every row rank 1" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "r", {:window, {:call, "rank", []}, [["department"]], [], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert Enum.all?(rows, &(&1["r"] == 1))
+    end
+
+    test "a running total via ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "running",
+           {:window, {:call, "sum", [{:field, ["salary"]}]}, [["department"]],
+            [{["salary"], :asc}], {:unbounded_preceding, :current_row}}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["running"]}) == %{
+               "Alice" => 100,
+               "Bob" => 220,
+               "Carol" => 340,
+               "Dave" => 90,
+               "Eve" => 200
+             }
+    end
+
+    test "first_value's default frame is the whole partition, regardless of ORDER BY -- the case SQL gets wrong" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "top",
+           {:window, {:call, "first_value", [{:field, ["salary"]}]}, [["department"]],
+            [{["salary"], :desc}], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["top"]}) == %{
+               "Alice" => 120,
+               "Bob" => 120,
+               "Carol" => 120,
+               "Dave" => 110,
+               "Eve" => 110
+             }
+    end
+
+    test "first_value with an explicit ROWS BETWEEN frame varies per row, unlike the default frame" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "v",
+           {:window, {:call, "first_value", [{:field, ["salary"]}]}, [["department"]],
+            [{["salary"], :desc}], {:current_row, {:following, 1}}}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["v"]}) == %{
+               "Alice" => 100,
+               "Bob" => 120,
+               "Carol" => 120,
+               "Dave" => 90,
+               "Eve" => 110
+             }
+    end
+
+    test "last_value picks the frame's own final row" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "bottom",
+           {:window, {:call, "last_value", [{:field, ["salary"]}]}, [["department"]],
+            [{["salary"], :desc}], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["bottom"]}) == %{
+               "Alice" => 100,
+               "Bob" => 100,
+               "Carol" => 100,
+               "Dave" => 90,
+               "Eve" => 90
+             }
+    end
+
+    test "percentile(expr, p) works as a window function too" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "p50",
+           {:window, {:call, "percentile", [{:field, ["salary"]}, Rational.new(1, 2)]},
+            [["department"]], [], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.into(rows, %{}, &{&1["name"], &1["p50"]}) == %{
+               "Alice" => 120,
+               "Bob" => 120,
+               "Carol" => 120,
+               "Dave" => 90,
+               "Eve" => 90
+             }
+    end
+
+    test "a window-wrapped aggregate does not collapse the row count, unlike a bare aggregate" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "s",
+           {:window, {:call, "sum", [{:field, ["salary"]}]}, [["department"]], [], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert length(rows) == length(@employees)
+    end
+
+    test "combining a real GROUP BY with a window function raises a clear error" do
+      query = %Query{
+        source: ["employees"],
+        group_bys: [["department"]],
+        select: [
+          {:field, ["department"]},
+          {:computed, "n", {:window, {:call, "row_number", []}, [["department"]], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/GROUP BY.*window function.*isn.t supported yet/, fn ->
+        run(query)
+      end
+    end
+
+    test "combining an ordinary (non-windowed) aggregate call with a window function also raises" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:computed, "total", {:call, "sum", [{:field, ["salary"]}]}},
+          {:computed, "n", {:window, {:call, "row_number", []}, [], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/GROUP BY.*window function.*isn.t supported yet/, fn ->
+        run(query)
+      end
+    end
+
+    test "row_number()/rank() reject a non-zero argument count" do
+      row_number_query = %Query{
+        source: ["employees"],
+        select: [
+          {:computed, "n", {:window, {:call, "row_number", [{:field, ["salary"]}]}, [], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/row_number\(\)\/0 expects no arguments, got 1/, fn ->
+        run(row_number_query)
+      end
+
+      rank_query = %Query{
+        source: ["employees"],
+        select: [
+          {:computed, "r", {:window, {:call, "rank", [{:field, ["salary"]}]}, [], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/rank\(\)\/0 expects no arguments, got 1/, fn ->
+        run(rank_query)
+      end
+    end
+
+    test "first_value/last_value reject an argument count other than one" do
+      query = %Query{
+        source: ["employees"],
+        select: [{:computed, "v", {:window, {:call, "first_value", []}, [], [], nil}}]
+      }
+
+      assert_raise ArgumentError, ~r/first_value\/1 expects exactly one argument, got 0/, fn ->
+        run(query)
+      end
+    end
+
+    test "an unknown/non-window function used with OVER raises a clear error" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:computed, "x", {:window, {:call, "string", [{:field, ["salary"]}]}, [], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/string\(\.\.\.\) is not a valid window function/, fn ->
+        run(query)
+      end
+    end
+
+    test "first_value/last_value over a nil value do not raise -- selection, not reduction" do
+      data =
+        Map.put(@data, ["employees"], [%{"name" => "A", "department" => "x", "salary" => nil}])
+
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:computed, "top",
+           {:window, {:call, "first_value", [{:field, ["salary"]}]}, [["department"]], [], nil}}
+        ]
+      }
+
+      assert {:ok, [%{"top" => nil}]} = Executor.run(query, FakeEngine, data)
+    end
+
+    test "an aggregate-as-window-function over a nil value still hard-errors, reusing eval_aggregate's own message" do
+      data =
+        Map.put(@data, ["employees"], [%{"name" => "A", "department" => "x", "salary" => nil}])
+
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:computed, "s",
+           {:window, {:call, "sum", [{:field, ["salary"]}]}, [["department"]], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/encountered a nil value/, fn ->
+        Executor.run(query, FakeEngine, data)
+      end
+    end
+
+    test "an inverted/empty frame produces the same empty-aggregate answers a plain aggregate gives for zero rows" do
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "s",
+           {:window, {:call, "sum", [{:field, ["salary"]}]}, [["department"]],
+            [{["salary"], :asc}], {{:following, 1}, {:preceding, 1}}}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert Enum.all?(rows, &(&1["s"] == nil))
+    end
+
+    test "a window-wrapped call is not itself mistaken for a triggering aggregate call" do
+      # Regression class: `expr_has_aggregate_call?` must stop recursion
+      # at a `{:window, ...}` boundary, not treat the wrapped `sum` as a
+      # signal to route this query into GROUP BY-style flat-aggregate
+      # collapsing -- confirmed by row count, not just by not raising.
+      query = %Query{
+        source: ["employees"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "s", {:window, {:call, "sum", [{:field, ["salary"]}]}, [], [], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert length(rows) == length(@employees)
     end
   end
 end

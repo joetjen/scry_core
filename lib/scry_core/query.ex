@@ -130,17 +130,56 @@ defmodule ScryCore.Query do
   `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8, the fixed
   built-in-function surface -- `sum`/`avg`/`count`/`min`/`max`/
   `stddev_samp`/`stddev_pop`/`var_samp`/`var_pop`/`percentile`,
-  `string`/`int`/`exact`/`inexact`, and `json` are the 15 names actually
-  executable today; window functions (`over`, `row_number()`, `rank()`,
-  `first_value`/`last_value`, §5.5) still deferred) is deliberately not
-  restricted to a known `name` at this type's own level, the same way
-  `:variant` isn't restricted to a known kind -- the grammar (and this
-  type) accept any `identifier(args)` call (lang_spec §5.8's own
-  framing: "anything else ... is either an EP2 namespaced extension
-  call, or ... `logic`'s EP2 bare call"), and it's `ScryCore.Executor`
-  that decides, at execution time, which names it actually knows how to
-  run (`eval_aggregate/5` for the 10 aggregates, `apply_cast/2` for the 5
-  casts -- `json` included, alongside `string`/`int`/`exact`/`inexact`).
+  `string`/`int`/`exact`/`inexact`, `json`, and (only meaningful wrapped
+  in `{:window, ...}` below) `row_number`/`rank`/`first_value`/
+  `last_value` are the 19 names actually executable today) is
+  deliberately not restricted to a known `name` at this type's own
+  level, the same way `:variant` isn't restricted to a known kind -- the
+  grammar (and this type) accept any `identifier(args)` call (lang_spec
+  §5.8's own framing: "anything else ... is either an EP2 namespaced
+  extension call, or ... `logic`'s EP2 bare call"), and it's
+  `ScryCore.Executor` that decides, at execution time, which names it
+  actually knows how to run (`eval_aggregate/5` for the 10 aggregates,
+  `apply_cast/2` for the 5 casts -- `json` included, alongside
+  `string`/`int`/`exact`/`inexact` -- and the window-value dispatch
+  inside `compute_window_values/4` for the 4 window-only names).
+
+  `expr()`'s own `{:window, call, partition_by, order_bys, frame}`
+  (lang_spec.md §5.5: "`<fn>() OVER [PARTITION BY <field>,...] [ORDER BY
+  <field> [desc|asc],...] [ROWS BETWEEN <bound> AND <bound>]`") marks a
+  call as a window function -- unlike every other `expr()` tag, its
+  value depends on more than the current row: `partition_by` groups the
+  query's own filtered row set (`[[String.t()]]`, the exact same shape
+  `Query.t()`'s own `group_bys` field already has -- an empty list means
+  "whole result as one partition," lang_spec's own default), `order_bys`
+  sequences each partition (`[{[String.t()], :asc | :desc}]`, again the
+  exact same shape `Query.t()`'s own `order_bys` field has, reused
+  verbatim rather than inventing a parallel type), and `frame` (`nil` or
+  a `{frame_bound(), frame_bound()}` pair) optionally restricts an
+  aggregate-as-window-function to a sliding window within its own
+  partition -- `nil` means "the whole partition, regardless of whether
+  `order_bys` is present" (lang_spec's own explicit "deliberately not
+  SQL's behavior" rule). `call` is `{:call, name, args}}` as always;
+  `name` is either one of `@aggregate_names` (reused as a window
+  function, e.g. a running `sum`) or one of the 4 window-only names
+  (`row_number`/`rank`, zero-argument; `first_value`/`last_value`, one
+  argument) -- `ScryCore.Executor.compute_window_values/4` has the full
+  per-name dispatch. Reachable only from `select`, both at the grammar
+  level (`priv/grammar.aether`'s own `window_call`/`over_spec` comments)
+  and semantically -- `ScryCore.Executor`'s own `resolve_rhs/4` and
+  every sibling resolver reject a `{:window, ...}` node reached from
+  `where`/`having`/a nested `GROUP BY` key with a clear error, since a
+  window function's value depends on the *whole* filtered row set, which
+  none of those positions have (real SQL has the identical restriction).
+  Combining a real `GROUP BY`/aggregate query with a window function in
+  the same `select` is deliberately not supported yet either (a real,
+  documented gap, not silently mishandled) -- `ScryCore.Executor`'s own
+  moduledoc has the reasoning. `frame_bound()` (below) mirrors
+  lang_spec's own 5-shape enumeration exactly (`UNBOUNDED PRECEDING`,
+  `<n> PRECEDING`, `CURRENT ROW`, `<n> FOLLOWING`, `UNBOUNDED
+  FOLLOWING`) -- a plain tagged value, not a struct, matching this
+  module's own general preference for the lightest shape that carries
+  the necessary data.
 
   `expr()`'s own `{:distinct, expr}` (lang_spec.md §5.8: `count(distinct
   …)`, "Distinct-value count") is meaningful only as `count`'s own
@@ -215,6 +254,13 @@ defmodule ScryCore.Query do
   full reasoning.
   """
 
+  @type frame_bound ::
+          :unbounded_preceding
+          | {:preceding, pos_integer()}
+          | :current_row
+          | {:following, pos_integer()}
+          | :unbounded_following
+
   @type expr ::
           term()
           | {:field, [String.t()]}
@@ -224,6 +270,9 @@ defmodule ScryCore.Query do
           | {:call, name :: String.t(), args :: [expr()]}
           | {:distinct, expr()}
           | {:dot, base :: expr(), path :: [String.t()]}
+          | {:window, call :: {:call, String.t(), [expr()]}, partition_by :: [[String.t()]],
+             order_bys :: [{[String.t()], :asc | :desc}],
+             frame :: {frame_bound(), frame_bound()} | nil}
 
   @type predicate ::
           {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match,
