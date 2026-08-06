@@ -2,13 +2,16 @@ defmodule ScryCore.Grammar do
   @moduledoc """
   Compiles core's own `priv/grammar.aether` into a ready-to-run
   `%Aether.Grammar{}`. The real "`mix ichor.gen`-equivalent tooling"
-  impl_spec.md §4 describes doesn't exist yet as an actual Mix compiler
-  task, so `compile/0` parses and analyzes from source on every call
-  instead of loading a pre-generated module. Fine for now: grammar
-  composition (merging in a loaded kind's own fragment,
-  `ScryCore.GrammarCompose`) doesn't have a build-time hook yet either,
-  so this only ever compiles core alone. Revisit both together once the
-  real Mix task exists.
+  impl_spec.md §4 describes (a Mix compiler step that auto-detects a
+  build's own dependency tree and merges in every loaded kind's own
+  fragment) doesn't exist yet, so both functions below parse and
+  analyze from source on every call instead of loading a pre-generated
+  module. `compile_unanalyzed/0` is what makes composition possible
+  today without that automatic step -- a `scry_<kind>` package calls it
+  directly, merges its own fragment in via `ScryCore.GrammarCompose.
+  merge/2`, and analyzes the merged result itself (`ScryTimeSeries.
+  Grammar`, in the `scry_time_series` package, is the first real one
+  that does this). Revisit once the real Mix task exists.
 
   Uses `:code.priv_dir/1`, not a path relative to the current working
   directory -- the only way this resolves correctly both from
@@ -29,8 +32,18 @@ defmodule ScryCore.Grammar do
   Module.register_attribute(__MODULE__, :sobelow_skip, persist: true)
 
   @doc """
-  Parses and analyzes core's own grammar, recompiling from source every
-  call (see this module's own moduledoc for why).
+  Parses core's own grammar (recompiling from source every call, see
+  this module's own moduledoc for why) *without* running `Grammar.
+  Analysis` -- the shape `ScryCore.GrammarCompose.merge/2` itself
+  requires (its own moduledoc: "not yet run through `Grammar.
+  Analysis`"), since analysis expects every `RuleRef` to already
+  resolve, which an EP1/EP2 extension point deliberately doesn't until
+  a kind's own fragment is merged in. A `scry_<kind>` package composing
+  against core (`impl_spec.md` §4) calls this instead of `compile/0`,
+  merges in its own parsed-but-unanalyzed fragment, and only then runs
+  `Grammar.Analysis` on the merged result -- `compile/0` below is
+  exactly that same read-then-parse step, plus analysis, for the
+  no-fragment (core-alone) case.
   """
   # grammar_path/0's only inputs are :code.priv_dir(:scry_core) (fixed
   # at compile time by the OTP application itself, never
@@ -40,12 +53,24 @@ defmodule ScryCore.Grammar do
   # confidence in Sobelow's own report, and this is why it's safe to
   # skip (`mix sobelow --skip`, see this project's own `mix.exs`).
   @sobelow_skip ["Traversal.FileModule"]
-  @spec compile() :: {:ok, Aether.Grammar.t()} | {:error, term()}
-  def compile do
+  @spec compile_unanalyzed() :: {:ok, Aether.Grammar.t()} | {:error, term()}
+  def compile_unanalyzed do
     path = grammar_path()
 
-    with {:ok, source} <- File.read(path),
-         {:ok, grammar} <- Aether.Parser.parse(source, path) do
+    with {:ok, source} <- File.read(path) do
+      Aether.Parser.parse(source, path)
+    end
+  end
+
+  @doc """
+  Parses and analyzes core's own grammar (`compile_unanalyzed/0` +
+  `Grammar.Analysis.run/1`) -- the core-alone case; a kind package
+  composing its own fragment in calls `compile_unanalyzed/0` directly
+  instead (see its own moduledoc).
+  """
+  @spec compile() :: {:ok, Aether.Grammar.t()} | {:error, term()}
+  def compile do
+    with {:ok, grammar} <- compile_unanalyzed() do
       Grammar.Analysis.run(grammar)
     end
   end
