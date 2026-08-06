@@ -257,6 +257,37 @@ defmodule ScryCore.Executor do
   rejects misuse" posture an unknown function name already has), same
   for a cast (`string(distinct x)`) via `resolve_rhs/4`/
   `resolve_group_rhs/4`'s own new `{:distinct, _}` rejection clauses.
+
+  **`json(<field>).path...` (lang_spec.md §5.8/§7, "Reinterprets a
+  String as JSON for one qualified dot-path access, no schema
+  change").** `{:dot, base, path}` (`Query.expr()`'s own moduledoc) is a
+  call's own result narrowed by an ordinary dot-path afterward --
+  `json` itself is dispatched from `apply_cast/2` exactly like the 4
+  numeric/string casts (`cast_to_json/1`, via Erlang/OTP's own `:json`
+  stdlib module, no new dependency), decoding into a plain map with
+  *string* keys, indistinguishable from row data once decoded. `{:dot,
+  ...}`'s own resolution (all 4 call sites: `resolve_rhs/4`/
+  `resolve_predicate_lhs/4`/`resolve_group_rhs/4`/`resolve_group_lhs/4`)
+  resolves `base` through whichever resolver reached it, then walks
+  `path` into the result via `get_path_in/2` -- the exact same helper
+  `{:field, ...}` already walks a path into a row with, reused directly,
+  not reimplemented. Every `*_has_aggregate_call?` clause gained a
+  matching `{:dot, base, _path}` recursion into `base`, the same
+  regression class `count(distinct ...)` above already found and fixed
+  for `{:call, ...}`'s own `args` -- verified for real (`ScryCore
+  .ExecutorTest`), not assumed to carry over just because the shape
+  looks similar.
+
+  Not fixed here, found while testing: lang_spec.md §7's own "List-
+  valued subfields work with `in`" (`WHERE "urgent" in metadata.tags`)
+  needs `in`'s own right-hand side to accept a field/call-derived list,
+  not only a bracketed list *literal* (`comparison`'s own `in:KW_IN
+  items:list` alternative, `priv/grammar.aether`) -- a real, separate
+  gap, unrelated to `json(...)` itself (whose own primary worked
+  example, equality/dot-access, works correctly end to end); `json(
+  ...)`'s own bare value is still usable directly wherever an ordinary
+  `expr()` is, including as an `{:in, ...}` predicate's *left*-hand side
+  (`x in [...]`), just not yet as the list on the right.
   """
 
   alias ScryCore.{CombinedQuery, EngineBehaviour, Query, Rational}
@@ -523,10 +554,13 @@ defmodule ScryCore.Executor do
   # before them, since no non-aggregate call existed to expose it).
   @aggregate_names ["sum", "avg", "count", "min", "max"]
 
-  # lang_spec.md §5.8's 4 explicit casts -- valid per-row (unlike
-  # `@aggregate_names`, which only ever mean something across a group's
-  # own member rows), dispatched via `apply_cast/2`.
-  @cast_names ["string", "int", "exact", "inexact"]
+  # lang_spec.md §5.8's 4 explicit casts, plus `json` (§5.8/§7's own
+  # "String reinterpreted as JSON" escape hatch -- the same per-value
+  # dispatch shape as a cast, even though lang_spec's own table lists it
+  # separately from the 4 "Explicit casts" proper) -- valid per-row
+  # (unlike `@aggregate_names`, which only ever mean something across a
+  # group's own member rows), dispatched via `apply_cast/2`.
+  @cast_names ["string", "int", "exact", "inexact", "json"]
 
   # A query needs grouped execution when it either has a real `GROUP BY`,
   # or calls one of `@aggregate_names` anywhere in its own `select`/
@@ -577,6 +611,11 @@ defmodule ScryCore.Executor do
   defp lhs_has_aggregate_call?({:call, name, args}),
     do: name in @aggregate_names or Enum.any?(args, &expr_has_aggregate_call?/1)
 
+  # `json(<field>).path...` can be a predicate's own lhs directly
+  # (`predicate_lhs := call_with_path | call | path`) -- same recursion
+  # `expr_has_aggregate_call?`'s own `{:dot, ...}` clause below has.
+  defp lhs_has_aggregate_call?({:dot, base, _path}), do: expr_has_aggregate_call?(base)
+
   defp lhs_has_aggregate_call?(path) when is_list(path), do: false
 
   defp expr_has_aggregate_call?({:call, name, args}),
@@ -588,6 +627,14 @@ defmodule ScryCore.Executor do
   # `Enum.any?(args, &expr_has_aggregate_call?/1)` already reaches this,
   # recursing one level further into the wrapped expression itself.
   defp expr_has_aggregate_call?({:distinct, expr}), do: expr_has_aggregate_call?(expr)
+
+  # `json(<field>).path...` -- `base` (in practice always `{:call,
+  # "json", [...]}`, but this recurses generically the same way every
+  # other wrapper here does) needs the same detection any other nested
+  # call gets, so e.g. `string(sum(x)).foo`-shaped nesting (however
+  # nonsensical semantically) still routes to grouped execution instead
+  # of hitting a confusing per-row rejection.
+  defp expr_has_aggregate_call?({:dot, base, _path}), do: expr_has_aggregate_call?(base)
 
   defp expr_has_aggregate_call?({:arith, _op, l, r}),
     do: expr_has_aggregate_call?(l) or expr_has_aggregate_call?(r)
@@ -712,6 +759,17 @@ defmodule ScryCore.Executor do
 
   defp resolve_predicate_lhs({:call, name, args}, row, scope, params) do
     apply_cast(name, Enum.map(args, &resolve_rhs(&1, row, scope, params)))
+  end
+
+  # `json(<field>).path...` (lang_spec §5.8/§7's own `WHERE json(
+  # metadata).color = "red"` worked example) -- `base` resolves the same
+  # way any other expression on this row does (`resolve_rhs/4`), then
+  # `path` walks into the result exactly the way `get_path/3` already
+  # walks a path into a row (`get_path_in/2`, the same helper, reused
+  # directly -- a decoded JSON value is an ordinary map with string keys,
+  # indistinguishable from row data once decoded).
+  defp resolve_predicate_lhs({:dot, base, path}, row, scope, params) do
+    get_path_in(resolve_rhs(base, row, scope, params), path)
   end
 
   defp resolve_predicate_lhs(path, row, scope, _params) when is_list(path),
@@ -885,6 +943,13 @@ defmodule ScryCore.Executor do
     raise ArgumentError, "distinct is only valid inside count(distinct ...), not any other call"
   end
 
+  # `json(<field>).path...` -- same resolution `resolve_predicate_lhs/4`
+  # 's own equivalent clause already does (`base` via this same
+  # function, `path` walked into the result via `get_path_in/2`).
+  defp resolve_rhs({:dot, base, path}, row, scope, params) do
+    get_path_in(resolve_rhs(base, row, scope, params), path)
+  end
+
   defp resolve_rhs(literal, _row, _scope, _params), do: literal
 
   defp arith(:add, a, b), do: Rational.add(a, b)
@@ -957,6 +1022,15 @@ defmodule ScryCore.Executor do
     end
   end
 
+  # `json(<field>).path...` -- `base` resolves the group-aware way
+  # (recursion through `resolve_group_rhs/4`, so it composes with an
+  # aggregate/grouped field the same way `{:call, ...}`'s own cast
+  # branch above already does), `path` walked into the result via
+  # `get_path_in/2`, same as every other `{:dot, ...}` resolution site.
+  defp resolve_group_lhs({:dot, base, path}, member_rows, scope, params) do
+    get_path_in(resolve_group_rhs(base, member_rows, scope, params), path)
+  end
+
   defp resolve_group_lhs(path, member_rows, scope, _params) when is_list(path),
     do: get_path(representative(member_rows), scope, path)
 
@@ -999,6 +1073,12 @@ defmodule ScryCore.Executor do
   # intercepts before this function ever sees it there.
   defp resolve_group_rhs({:distinct, _expr}, _member_rows, _scope, _params) do
     raise ArgumentError, "distinct is only valid inside count(distinct ...), not any other call"
+  end
+
+  # Same resolution `resolve_group_lhs/4`'s own equivalent clause above
+  # already does.
+  defp resolve_group_rhs({:dot, base, path}, member_rows, scope, params) do
+    get_path_in(resolve_group_rhs(base, member_rows, scope, params), path)
   end
 
   defp resolve_group_rhs(literal, _member_rows, _scope, _params), do: literal
@@ -1117,6 +1197,7 @@ defmodule ScryCore.Executor do
   defp apply_cast("int", [value]), do: cast_to_int(value)
   defp apply_cast("exact", [value]), do: cast_to_exact(value)
   defp apply_cast("inexact", [value]), do: Rational.to_float(value)
+  defp apply_cast("json", [value]), do: cast_to_json(value)
 
   defp apply_cast(name, args) when name in @cast_names do
     raise ArgumentError, "cast #{name}/1 expects exactly one argument, got #{length(args)}"
@@ -1185,6 +1266,30 @@ defmodule ScryCore.Executor do
 
   defp cast_to_exact(other) do
     raise ArgumentError, "exact(...) does not support this value: #{inspect(other)}"
+  end
+
+  # `json(<field>)` (lang_spec.md §5.8/§7: "Reinterprets a String as
+  # JSON for one qualified dot-path access, no schema change") --
+  # `:json` is Erlang/OTP's own stdlib module (added in OTP 27; this
+  # project already targets OTP 28, confirmed via `.tool-versions`), not
+  # a new dependency. Decodes into an ordinary map with *string* keys
+  # directly (confirmed empirically, not assumed), the exact shape
+  # `get_path_in/2` already expects -- once decoded, a `json(...)`
+  # value is indistinguishable from row data for `{:dot, ...}`'s own
+  # resolution below, no special-casing needed there. A malformed JSON
+  # string raises `:json`'s own exception -- caught and re-raised with a
+  # clear, Scry-specific message, the same "let the stdlib's own error
+  # surface as an ordinary, clearly-worded error" pattern `handle_token
+  # (:DATE, ...)`/`handle_token(:SIGIL, ...)` already establish
+  # elsewhere in this codebase (`ScryCore.Actions`' own moduledoc).
+  defp cast_to_json(s) when is_binary(s) do
+    :json.decode(s)
+  rescue
+    _ -> raise ArgumentError, "json(...) could not parse this value as JSON: #{inspect(s)}"
+  end
+
+  defp cast_to_json(other) do
+    raise ArgumentError, "json(...) only applies to a String value, got: #{inspect(other)}"
   end
 
   defp project_all(

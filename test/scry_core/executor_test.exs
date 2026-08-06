@@ -91,6 +91,14 @@ defmodule ScryCore.ExecutorTest do
   @team_a [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Alice"}]
   @team_b [%{"name" => "Bob"}, %{"name" => "Carol"}]
 
+  # For json(<field>): metadata is an ordinary String field, not
+  # declared as any kind of Json type -- exactly the "escape hatch"
+  # case lang_spec.md §7 describes.
+  @tickets [
+    %{"id" => 1, "metadata" => ~s({"color":"red","tags":["urgent","new"]})},
+    %{"id" => 2, "metadata" => ~s({"color":"blue","tags":["sale"]})}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -102,7 +110,8 @@ defmodule ScryCore.ExecutorTest do
     ["order_items"] => @order_items,
     ["line_items"] => @line_items,
     ["team_a"] => @team_a,
-    ["team_b"] => @team_b
+    ["team_b"] => @team_b,
+    ["tickets"] => @tickets
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -1408,6 +1417,98 @@ defmodule ScryCore.ExecutorTest do
       assert_raise ArgumentError, ~r/distinct is only valid inside count\(distinct/, fn ->
         run(query)
       end
+    end
+  end
+
+  describe "json(<field>).path (lang_spec.md §5.8/§7)" do
+    test "WHERE json(<field>).path = ... -- the lang_spec.md §7 worked example" do
+      query = %Query{
+        source: ["tickets"],
+        wheres: [
+          {:cmp, :eq, {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["color"]}, "red"}
+        ],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, [%{"id" => 1}]} = run(query)
+    end
+
+    test "a computed field reading a nested path" do
+      query = %Query{
+        source: ["tickets"],
+        select: [
+          {:field, ["id"]},
+          {:computed, "color", {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["color"]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"id" => 1, "color" => "red"}, %{"id" => 2, "color" => "blue"}]
+    end
+
+    test "a list-valued subfield resolves to an ordinary Elixir list" do
+      query = %Query{
+        source: ["tickets"],
+        limit: 1,
+        select: [{:computed, "tags", {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["tags"]}}]
+      }
+
+      assert {:ok, [%{"tags" => ["urgent", "new"]}]} = run(query)
+    end
+
+    test "json(...) used bare (no dot-path) returns the whole decoded value" do
+      query = %Query{
+        source: ["tickets"],
+        limit: 1,
+        select: [{:computed, "m", {:call, "json", [{:field, ["metadata"]}]}}]
+      }
+
+      assert {:ok, [%{"m" => %{"color" => "red", "tags" => ["urgent", "new"]}}]} = run(query)
+    end
+
+    test "json(...) on a non-string value raises a clear error" do
+      query = %Query{
+        source: ["tickets"],
+        select: [{:computed, "m", {:call, "json", [{:field, ["id"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/json\(\.\.\.\) only applies to a String value/, fn ->
+        run(query)
+      end
+    end
+
+    test "malformed JSON text raises a clear error, not a raw stdlib exception" do
+      bad_data = Map.put(@data, ["tickets"], [%{"id" => 1, "metadata" => "not json"}])
+
+      query = %Query{
+        source: ["tickets"],
+        select: [{:computed, "m", {:call, "json", [{:field, ["metadata"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/could not parse this value as JSON/, fn ->
+        Executor.run(query, FakeEngine, bad_data)
+      end
+    end
+
+    test "a call wrapping an aggregate, via {:dot, ...}, is still detected without an explicit GROUP BY" do
+      # Same regression class as count(distinct ...)'s own fix --
+      # {:dot, ...}'s own aggregate-detection recursion, verified for
+      # real, not just by inspection. customer_orders' own three rows
+      # (total 50 + 75 + 20) sum to 145 -- string(sum(total)) collapsing
+      # to "145" (not, say, "50" or crashing on the per-row rejection
+      # error) is only possible if grouped/flat-aggregate execution
+      # actually fired; walking a bogus path into that string then
+      # raises BadMapError, an *expected*, different failure that
+      # itself proves the aggregate was correctly computed first.
+      query = %Query{
+        source: ["customer_orders"],
+        select: [
+          {:computed, "total",
+           {:dot, {:call, "string", [{:call, "sum", [{:field, ["total"]}]}]}, ["nonexistent"]}}
+        ]
+      }
+
+      assert_raise BadMapError, ~r/"145"/, fn -> run(query) end
     end
   end
 end

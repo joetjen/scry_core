@@ -443,6 +443,10 @@ defmodule ScryCore.Actions do
   # args} shape -- same reasoning as when_expr/inner above.
   def handle_rule(:primary, %{call: cap}, ctx), do: cap.eval.(ctx)
 
+  # call_with_path's own handler already returns the fully-tagged {:dot,
+  # base, path} shape -- same reasoning as call's own clause just above.
+  def handle_rule(:primary, %{call_with_path: cap}, ctx), do: cap.eval.(ctx)
+
   # lang_spec §5.8's built-in functions (sum/avg/count/min/max, this
   # phase's real set) -- ScryCore.Executor.eval_aggregate/5 decides
   # which `name`s it actually knows how to run, not this module (same
@@ -460,6 +464,19 @@ defmodule ScryCore.Actions do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),
          {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
       {:ok, [head | tail], ctx}
+    end
+  end
+
+  # `json(<field>).path...` (lang_spec §5.8/§7) -- `call`'s own handler
+  # already returns the fully-tagged `{:call, name, args}` shape, so this
+  # just wraps it with the trailing path, the same `{:field, path}`
+  # already wraps a bare `path` for the identical concept (a path naming
+  # where to look, resolved against a value at execution time -- a row
+  # for `{:field, ...}`, this call's own result for `{:dot, ...}`).
+  def handle_rule(:call_with_path, %{call: call_cap, path: path_cap}, ctx) do
+    with {:ok, call, ctx} <- call_cap.eval.(ctx),
+         {:ok, path, ctx} <- path_cap.eval.(ctx) do
+      {:ok, {:dot, call, path}, ctx}
     end
   end
 

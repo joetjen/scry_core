@@ -1003,4 +1003,39 @@ line two""" { name }))
     assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: sum(distinct price) }])
     assert q.select == [{:computed, "x", {:call, "sum", [{:distinct, {:field, ["price"]}}]}}]
   end
+
+  test "json(<field>).path parses to {:dot, {:call, \"json\", args}, path}, the lang_spec.md §7 worked example",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders WHERE json(metadata).color = "red" { id }])
+
+    assert q.wheres == [
+             {:cmp, :eq, {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["color"]}, "red"}
+           ]
+  end
+
+  test "json(<field>).a.b supports a multi-segment path after the call", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { c: json(metadata).a.b }])
+
+    assert q.select == [
+             {:computed, "c", {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["a", "b"]}}
+           ]
+  end
+
+  test "a bare call with no trailing dot-path still parses as a plain call, unaffected", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { m: json(metadata) }])
+    assert q.select == [{:computed, "m", {:call, "json", [{:field, ["metadata"]}]}}]
+  end
+
+  test "call_with_path is syntactically permitted on any call, not gated to the name \"json\"", %{
+    grammar: g
+  } do
+    # Grammar stays permissive (execution rejects misuse) -- confirms
+    # e.g. `sum(price).foo` at least *parses*, matching
+    # priv/grammar.aether's own `call_with_path` comment.
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { x: sum(price).foo }])
+    assert q.select == [{:computed, "x", {:dot, {:call, "sum", [{:field, ["price"]}]}, ["foo"]}}]
+  end
 end
