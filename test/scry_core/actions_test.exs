@@ -494,4 +494,10 @@ line two""" { name }))
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name, email IF $includeEmail }))
     assert q.select == [{:field, ["name"]}, {:field, ["email"], {:param, "includeEmail"}}]
   end
+
+  test "a bare identifier no longer absorbs a hyphen -- not a valid identifier character", %{
+    grammar: g
+  } do
+    assert {:error, _} = run(g, ~s(SELECT users { some-field }))
+  end
 end

@@ -74,8 +74,18 @@ TRIVIA  := (SPACE | COMMENT)*
 ; up @case_insensitive -- confirmed empirically, not a guess (see
 ; ScryCore.Grammar.KeywordRefiner's moduledoc). @refine hands the whole
 ; decision to that module instead, which downcases first.
-
-IDENT := [[:alpha:]_][[:alnum:]_-]*
+;
+; No `-` in the trailing character class (nor in ESCAPED_IDENT/ATOM/
+; PARAM below, which originally copied this same class) -- lang_spec
+; §3's own "Identifiers" section says only "Bare by default (`name`,
+; `orders.total`)", never mentions hyphens as valid identifier
+; characters at all. Allowing them was an unjustified overreach from
+; this file's own first draft, found while scoping arithmetic
+; operators: with `-` in IDENT's own class, maximal munch would read
+; `price-quantity` as one identifier, never as `price` `MINUS`
+; `quantity` -- silently making subtraction impossible to write without
+; spaces around it. Fixed at the source instead of routed around.
+IDENT := [[:alpha:]_][[:alnum:]_]*
   @refine("ScryCore.Grammar.KeywordRefiner", "refine",
           KW_SELECT, KW_WHERE, KW_AND, KW_OR, KW_NOT, KW_IN,
           KW_NIL, KW_TRUE, KW_FALSE,
@@ -91,7 +101,7 @@ IDENT := [[:alpha:]_][[:alnum:]_-]*
 ; like a keyword. `select`/`` `SELECT` ``/`` `Select` `` (any case, per
 ; lang_spec §3's own "collision check is case-insensitive too") are all
 ; the identifier "select" this way, never KW_SELECT.
-ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_-]* "`"
+ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_]* "`"
 
 ; Colon-*prefixed* (lang_spec §5.3: "`:active` is colon-prefixed;
 ; `subtotal:` is colon-suffixed" -- the latter, an alias/named
@@ -99,7 +109,7 @@ ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_-]* "`"
 ; doesn't collide with this). Never subject to `@refine` -- a
 ; completely separate token from IDENT, same reasoning as
 ; ESCAPED_IDENT immediately above.
-ATOM := ":" [[:alpha:]_][[:alnum:]_-]*
+ATOM := ":" [[:alpha:]_][[:alnum:]_]*
 
 ; External parameter (lang_spec §5.7/§9): a value supplied out-of-band
 ; at submission time via a separate variables payload, never
@@ -109,7 +119,7 @@ ATOM := ":" [[:alpha:]_][[:alnum:]_-]*
 ; `{:param, name}` (ScryCore.Actions' own handle_token(:PARAM, ...));
 ; resolving it against a real caller-supplied value happens entirely
 ; at execution time, in ScryCore.Executor -- see its own moduledoc.
-PARAM := "$" [[:alpha:]_][[:alnum:]_-]*
+PARAM := "$" [[:alpha:]_][[:alnum:]_]*
 
 ; ---- literals ----
 ;
