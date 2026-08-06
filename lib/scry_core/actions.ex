@@ -298,7 +298,33 @@ defmodule ScryCore.Actions do
     with {:ok, path, ctx} <- cap.eval.(ctx), do: {:ok, {:field, path}, ctx}
   end
 
+  def handle_rule(:primary, %{when_expr: cap}, ctx), do: cap.eval.(ctx)
   def handle_rule(:primary, %{inner: cap}, ctx), do: cap.eval.(ctx)
+
+  # `when_clause` (`+`-repeated) always produces at least one element --
+  # the grammar itself enforces "at least one WHEN...THEN", not a check
+  # here (priv/grammar.aether's own `when_expr` comment). No absence
+  # check needed for the same reason `additive_tail`/`mult_tail` don't
+  # need one either.
+  def handle_rule(:when_expr, %{when_clause: clause_caps, else_expr: else_cap}, ctx) do
+    with {:ok, clauses, ctx} <- eval_list(:when_clause, clause_caps, ctx),
+         {:ok, else_expr, ctx} <- else_cap.eval.(ctx) do
+      {:ok, {:when, clauses, else_expr}, ctx}
+    end
+  end
+
+  # Returns its own `{predicate, then_expr}` pair -- `ScryCore.Executor`
+  # walks the list in order and reuses `eval_predicate/4` (the exact
+  # function a `where` clause's own predicates already go through)
+  # directly on each one, rather than this module trying to fold
+  # anything itself; there's no accumulator to fold into here the way
+  # `additive_tail`'s own `{op, right}` pairs get folded by `expression`.
+  def handle_rule(:when_clause, %{cond: cond_cap, then_expr: then_cap}, ctx) do
+    with {:ok, predicate, ctx} <- cond_cap.eval.(ctx),
+         {:ok, then_expr, ctx} <- then_cap.eval.(ctx) do
+      {:ok, {predicate, then_expr}, ctx}
+    end
+  end
 
   def handle_rule(:body_list, %{head: head_cap, tail: tail_caps}, ctx) do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),

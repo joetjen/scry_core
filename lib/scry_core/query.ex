@@ -73,6 +73,16 @@ defmodule ScryCore.Query do
   etc., lang_spec.md §5.8) -- those are aggregate functions tied to
   `group by`/`having`, and neither is executed anywhere in this
   codebase yet either, so there's nothing real to call them against.
+
+  `expr()`'s own `{:when, clauses, else_expr}` (lang_spec.md §5.6/§9:
+  `WHEN <predicate> THEN <expr> [...] ELSE <expr>`, "inline, not a
+  block") reuses `predicate()` directly for each clause's own
+  condition -- the exact same AST a `where` clause already produces, so
+  a `WHEN` can already do anything `WHERE` can. `ScryCore.Executor`
+  evaluates `clauses` in order and resolves the first matching one's
+  own expression, falling back to `else_expr` if none match -- `ELSE`
+  is mandatory at the grammar level (no default, no implicit `nil`),
+  not just a documented expectation.
   """
 
   @type expr ::
@@ -80,6 +90,7 @@ defmodule ScryCore.Query do
           | {:field, [String.t()]}
           | {:param, String.t()}
           | {:arith, :add | :sub | :mul | :div | :pow, expr(), expr()}
+          | {:when, clauses :: [{predicate(), expr()}], else_expr :: expr()}
 
   @type predicate ::
           {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match, path :: [String.t()],

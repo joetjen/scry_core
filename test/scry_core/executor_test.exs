@@ -694,4 +694,80 @@ defmodule ScryCore.ExecutorTest do
 
     assert_raise ArgumentError, ~r/exponent must be an integer/, fn -> run(query) end
   end
+
+  test "WHEN/THEN/ELSE evaluates clauses in order, first match wins" do
+    query = %Query{
+      source: ["users"],
+      order_bys: [{["age"], :asc}],
+      select: [
+        {:field, ["name"]},
+        {:computed, "tier",
+         {:when,
+          [
+            {{:cmp, :gt, ["age"], 60}, "senior"},
+            {{:cmp, :gt, ["age"], 18}, "adult"}
+          ], "minor"}}
+      ]
+    }
+
+    assert {:ok, rows} = run(query)
+
+    assert rows == [
+             %{"name" => "Bob", "tier" => "minor"},
+             %{"name" => "Alice", "tier" => "adult"},
+             %{"name" => "Carol", "tier" => "senior"}
+           ]
+  end
+
+  test "WHEN/THEN/ELSE falls through to ELSE when nothing matches" do
+    query = %Query{
+      source: ["users"],
+      select: [{:computed, "flag", {:when, [{{:cmp, :eq, ["status"], "banned"}, "x"}], "ok"}}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.all?(rows, &(&1["flag"] == "ok"))
+  end
+
+  test "a WHEN condition can reference an external parameter" do
+    query = %Query{
+      source: ["users"],
+      select: [
+        {:field, ["name"]},
+        {:computed, "flag", {:when, [{{:cmp, :gt, ["age"], {:param, "cutoff"}}, "old"}], "young"}}
+      ]
+    }
+
+    assert {:ok, rows} = run(query, %{"cutoff" => 20})
+    assert Enum.find(rows, &(&1["name"] == "Bob"))["flag"] == "young"
+    assert Enum.find(rows, &(&1["name"] == "Alice"))["flag"] == "old"
+  end
+
+  test "WHEN/THEN/ELSE composes with correlation inside a nested SELECT" do
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["id"], :asc}],
+      select: [
+        {:field, ["name"]},
+        %Query{
+          source: ["customer_orders"],
+          wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+          select: [
+            {:computed, "size", {:when, [{{:cmp, :gt, ["total"], 60}, "big"}], "small"}}
+          ]
+        }
+      ]
+    }
+
+    assert {:ok, rows} = run(query)
+
+    assert rows == [
+             %{
+               "name" => "Alice",
+               "customer_orders" => [%{"size" => "small"}, %{"size" => "big"}]
+             },
+             %{"name" => "Bob", "customer_orders" => []},
+             %{"name" => "Carol", "customer_orders" => [%{"size" => "small"}]}
+           ]
+  end
 end

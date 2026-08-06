@@ -33,7 +33,10 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "desc" => :KW_DESC,
     "asc" => :KW_ASC,
     "required" => :KW_REQUIRED,
-    "if" => :KW_IF
+    "if" => :KW_IF,
+    "when" => :KW_WHEN,
+    "then" => :KW_THEN,
+    "else" => :KW_ELSE
   }
 
   @impl true

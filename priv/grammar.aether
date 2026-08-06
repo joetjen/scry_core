@@ -90,7 +90,8 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_SELECT, KW_WHERE, KW_AND, KW_OR, KW_NOT, KW_IN,
           KW_NIL, KW_TRUE, KW_FALSE,
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
-          KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED, KW_IF)
+          KW_LIMIT, KW_OFFSET, KW_DESC, KW_ASC, KW_REQUIRED, KW_IF,
+          KW_WHEN, KW_THEN, KW_ELSE)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -445,7 +446,31 @@ mult_tail := op:(STAR | SLASH) right:power
 ; against a scratch grammar, not assumed from the shape alone.
 power := base:primary (POW exp:power)?
 
-primary := literal | path | LPAREN inner:expression RPAREN
+primary := literal | path | when_expr | LPAREN inner:expression RPAREN
+
+; Conditional expression (lang_spec §5.6, §9): "Inline, not a block."
+; Just another `primary` alternative, not a separate top-level-only
+; construct -- lang_spec §9's own framing ("any body item may be an
+; arbitrary expression") makes a WHEN/THEN/ELSE conceptually the same
+; kind of thing as any other expression, so it composes the same way
+; (nests inside arithmetic, parentheses, another WHEN's own branches).
+; `when_clause+` (one-or-more, not `*`) puts "at least one WHEN...THEN"
+; directly in the grammar itself, matching lang_spec §5.6's own text,
+; rather than a separate check later. `ELSE` is mandatory the same way
+; -- no `?`, no default. Bare (unrenamed) `when_clause+`, the same
+; established reason every other repeated rule reference in this file
+; is left unrenamed (confirmed to extend to `+` too, not just `*`/`?`,
+; the same way it already does for `*` -- verified with a scratch
+; grammar before relying on it here, not assumed to carry over).
+when_expr := when_clause+ KW_ELSE else_expr:expression
+
+; `cond:predicate` reaches forward to `predicate`'s own definition
+; below (Aether allows this; a definition may reference a name declared
+; later in the file) rather than duplicating boolean-logic grammar --
+; the exact same `predicate` a `WHERE` clause already uses, and
+; therefore `WHEN`'s own condition can already do anything `WHERE` can
+; (comparisons, `and`/`or`/`not`, `in [...]`, `~`, ...), for free.
+when_clause := KW_WHEN cond:predicate KW_THEN then_expr:expression
 
 ; A body item is a nested SELECT (core-only, no extension needed --
 ; ordinary PEG recursion, same rule referencing itself indirectly

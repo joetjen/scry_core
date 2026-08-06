@@ -353,6 +353,23 @@ defmodule ScryCore.Executor do
     arith(op, left, right)
   end
 
+  # `WHEN <predicate> THEN <expr> [...] ELSE <expr>` (lang_spec.md
+  # §5.6/§9) -- walks `clauses` in order via `Enum.find/2`, reusing
+  # `eval_predicate/4` directly on each condition (the exact function a
+  # `where` clause's own predicates already go through, so a `WHEN` can
+  # already do anything `WHERE` can, for free) and resolving the first
+  # match's own expression. Falls through to `else_expr` when nothing
+  # matches -- always reachable, never `nil`, since the grammar makes
+  # `ELSE` mandatory (`priv/grammar.aether`'s own `when_expr`).
+  defp resolve_rhs({:when, clauses, else_expr}, row, scope, params) do
+    case Enum.find(clauses, fn {predicate, _then_expr} ->
+           eval_predicate(predicate, row, scope, params)
+         end) do
+      {_predicate, then_expr} -> resolve_rhs(then_expr, row, scope, params)
+      nil -> resolve_rhs(else_expr, row, scope, params)
+    end
+  end
+
   defp resolve_rhs(literal, _row, _scope, _params), do: literal
 
   defp arith(:add, a, b), do: Rational.add(a, b)

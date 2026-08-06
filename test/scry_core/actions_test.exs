@@ -563,4 +563,67 @@ line two""" { name }))
     # aren't valid body-list syntax either.
     assert {:error, _} = run(g, ~s(SELECT orders { subtotal:price }))
   end
+
+  test "a WHEN/THEN/ELSE conditional expression, single clause", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s(SELECT users { tier: WHEN age > 65 THEN "senior" ELSE "other" }))
+
+    assert q.select == [
+             {:computed, "tier", {:when, [{{:cmp, :gt, ["age"], 65}, "senior"}], "other"}}
+           ]
+  end
+
+  test "WHEN/THEN/ELSE with multiple clauses, evaluated in order", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(SELECT users {
+                    tier: WHEN age > 65 THEN "senior" WHEN age > 18 THEN "adult" ELSE "minor"
+                  })
+             )
+
+    assert q.select == [
+             {:computed, "tier",
+              {:when,
+               [
+                 {{:cmp, :gt, ["age"], 65}, "senior"},
+                 {{:cmp, :gt, ["age"], 18}, "adult"}
+               ], "minor"}}
+           ]
+  end
+
+  test "ELSE is mandatory -- WHEN/THEN with no ELSE fails to parse", %{grammar: g} do
+    assert {:error, _} = run(g, ~s(SELECT users { tier: WHEN age > 65 THEN "senior" }))
+  end
+
+  test "a WHEN condition can use full predicate syntax, same as WHERE", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s(SELECT users { x: WHEN age > 18 AND status = "active" THEN 1 ELSE 0 })
+             )
+
+    assert q.select == [
+             {:computed, "x",
+              {:when, [{{:and, {:cmp, :gt, ["age"], 18}, {:cmp, :eq, ["status"], "active"}}, 1}],
+               0}}
+           ]
+  end
+
+  test "WHEN/THEN/ELSE composes with arithmetic (nested inside a parenthesized expression)", %{
+    grammar: g
+  } do
+    # No "END" keyword -- lang_spec §5.6's own grammar has none; the
+    # closing paren (from the *outer* parenthesized-expression
+    # alternative) is what naturally terminates ELSE's own expression,
+    # since nothing after "1"/"2" extends the additive/multiplicative
+    # chain further.
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT orders { total: price * (WHEN vip = true THEN 1 ELSE 2) }])
+
+    assert q.select == [
+             {:computed, "total",
+              {:arith, :mul, {:field, ["price"]}, {:when, [{{:cmp, :eq, ["vip"], true}, 1}], 2}}}
+           ]
+  end
 end
