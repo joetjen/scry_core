@@ -296,7 +296,37 @@ NEVER := []
 ; pass. `document`'s own handler is what invokes it, once both
 ; `fragment_decl` and `select` have already been evaluated into real
 ; terms (`ScryCore.Actions`' own moduledoc has the fuller story).
-document := fragment_decl* select
+; Trailing `TRIVIA?` fixes the "did not expect more input here" gap
+; `body_list`'s own comment flags (a real, found-not-fixed-until-now
+; issue: `SELECT x { y }` followed by so much as one trailing newline
+; used to fail to parse). Root cause, confirmed empirically (scratch
+; grammar) before relying on it: `@skip`-splicing only ever happens
+; *between* two elements of a sequence -- there's no implicit "consume
+; trailing skip" step after a sequence's own last element, so trivia
+; after the true final token of a top-level match was simply left in
+; the token stream, and `Grammar.VM`'s own top-level match requires the
+; *entire* stream consumed (`pos == tuple_size(stream)`) or it reports
+; unconsumed input as a parse error. Adding one further, genuinely
+; optional element to the *end* of the sequence gives the ordinary
+; auto-splice inserted immediately before *it* a chance to consume that
+; trailing trivia -- confirmed this is really what does the work, not
+; `TRIVIA?` matching anything itself (a bare reference to the grammar's
+; own `@skip` token produces no capture at all, matched or not, so this
+; is invisible to `ScryCore.Actions`' own `document` handler either
+; way). Only `document` (the real root) needs this -- every other rule
+; in this file is always followed by more input from its own caller,
+; never genuinely at the end of the stream.
+;
+; The comma-optional-on-newline half of `body_list`'s own gap (lang_spec
+; §6: "optional -- a line break suffices -- when each item is on its own
+; line") is *not* fixed here -- newline is currently just another
+; character inside `TRIVIA`'s own `SPACE`, indistinguishable from a
+; plain space by the time any rule sees it skipped; making it
+; significant needs a real token-level restructuring (a dedicated
+; `NEWLINE` token no longer folded into skip-trivia, threaded through
+; every separator position that should accept it), not a one-line
+; addition the way this fix is.
+document := fragment_decl* select TRIVIA?
 
 ; `<body-item> ...` (lang_spec §6's own template) reuses `body_list`
 ; directly -- a FRAGMENT's body is exactly as expressive as a SELECT's
@@ -569,19 +599,19 @@ if_clause := KW_IF param:PARAM
 ; contribute simultaneously.
 body_item_ep1 := NEVER
 
-; Two real, found-not-fixed gaps against lang_spec §6's own comma rule
+; A real, found-not-yet-fixed gap against lang_spec §6's own comma rule
 ; ("required when two items share a physical line, optional -- a line
-; break suffices -- when each item is on its own line"): (1) `COMMA` is
+; break suffices -- when each item is on its own line"): `COMMA` is
 ; unconditionally required here, on every line break or not -- this
 ; Phase 1 grammar has no "or a line break" alternative yet, so e.g.
 ; `{ name\n email }` (no comma) fails to parse, only `{ name,\n email }`
-; or `{ name, email }` do; (2) trailing trivia after the *final* `RBRACE`
-; of a top-level query isn't consumed either -- `SELECT x { y }\n` (one
-; trailing newline) fails the same "did not expect more input here" way,
-; since `@skip`-splicing only ever happens *between* a rule's own
-; tokens, never automatically after the root rule's last one. Found
-; while writing this feature's own multi-line test fixtures (not
-; something FRAGMENT introduces -- `select` alone had the identical gap
-; before `document` became the root, just untested until now); fixing
-; either is a real, separate increment, not folded into this one.
+; or `{ name, email }` do. Found while writing the FRAGMENT feature's
+; own multi-line test fixtures (not something FRAGMENT introduces --
+; `select` alone had the identical gap); fixing it for real needs a
+; dedicated `NEWLINE` token no longer folded into skip-trivia (`document`
+; 's own comment nearby has the fuller reasoning for why this is a
+; bigger, separate increment, not a one-line fix). The sibling gap this
+; comment used to also describe -- trailing trivia after a top-level
+; query's own final `RBRACE` not being consumed -- is fixed now, by
+; `document`'s own trailing `TRIVIA?`.
 body_list := head:body_item (COMMA tail:body_item)*

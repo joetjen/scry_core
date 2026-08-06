@@ -705,4 +705,20 @@ line two""" { name }))
              %Query{source: ["orders"], select: [{:field, ["total"]}]}
            ]
   end
+
+  test "trailing whitespace after the query's own closing brace no longer fails to parse", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name }) <> "\n")
+    assert q.select == [{:field, ["name"]}]
+
+    assert {:ok, %Query{}} = run(g, ~s(SELECT users { name }) <> "  \n\n  ")
+  end
+
+  test "a trailing comment after the query's own closing brace no longer fails to parse", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users { name }) <> " # trailing note\n")
+    assert q.select == [{:field, ["name"]}]
+  end
 end
