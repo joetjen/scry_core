@@ -101,6 +101,16 @@ ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_-]* "`"
 ; ESCAPED_IDENT immediately above.
 ATOM := ":" [[:alpha:]_][[:alnum:]_-]*
 
+; External parameter (lang_spec §5.7/§9): a value supplied out-of-band
+; at submission time via a separate variables payload, never
+; string-interpolated into query text -- a real injection-safety
+; property, not style. `$` doesn't collide with anything else declared
+; in this file. Parsing only ever produces the placeholder
+; `{:param, name}` (ScryCore.Actions' own handle_token(:PARAM, ...));
+; resolving it against a real caller-supplied value happens entirely
+; at execution time, in ScryCore.Executor -- see its own moduledoc.
+PARAM := "$" [[:alpha:]_][[:alnum:]_-]*
+
 ; ---- literals ----
 ;
 ; Three mutually-exclusive number tokens, disambiguated by maximal munch
@@ -369,7 +379,7 @@ list := LBRACK items:literal_list? RBRACK
 ; zero), so it needs none of Ichor's left-recursion rewrite machinery,
 ; same as `select`/`body_item`'s own recursion elsewhere in this file.
 literal := STRING | MULTILINE_STRING | DATE | rational | DECIMAL | RADIX | INTEGER | list | ATOM
-         | SIGIL | KW_NIL | KW_TRUE | KW_FALSE
+         | SIGIL | PARAM | KW_NIL | KW_TRUE | KW_FALSE
 
 rational := numerator:INTEGER SLASH denominator:INTEGER
 

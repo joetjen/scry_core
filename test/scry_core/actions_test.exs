@@ -472,4 +472,16 @@ line two""" { name }))
 
     assert q.wheres == [{:cmp, :eq, ["user_id"], {:field, ["users", "id"]}}]
   end
+
+  test "an external parameter parses to a {:param, name} placeholder, not a value", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE age > $minAge { name }))
+    assert q.wheres == [{:cmp, :gt, ["age"], {:param, "minAge"}}]
+  end
+
+  test "an external parameter inside an in [...] list", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT users WHERE status in [$a, $b] { name }))
+    assert q.wheres == [{:in, ["status"], [{:param, "a"}, {:param, "b"}]}]
+  end
 end

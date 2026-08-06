@@ -58,6 +58,12 @@ defmodule ScryCore.Actions do
   # STRING literal for downstream matching purposes, without that risk.
   def handle_token(:ATOM, text, _ctx), do: {:ok, {:atom, String.slice(text, 1..-1//1)}}
 
+  # A placeholder, not a value -- `{:param, name}` carries no more than
+  # the name itself at parse time. lang_spec §5.7/§9: resolved against a
+  # real value supplied separately at *execution* time
+  # (ScryCore.Executor), never string-interpolated into query text.
+  def handle_token(:PARAM, text, _ctx), do: {:ok, {:param, String.slice(text, 1..-1//1)}}
+
   # Strips the delimiter (either quote char, both one byte -- ASCII `"`
   # or `'`) and resolves escapes over what's left. lang_spec.md §4's own
   # list, exactly: \" \' \\ \n \t \uXXXX -- an unrecognized \<char> was

@@ -48,12 +48,17 @@ defmodule ScryCore.Query do
   `required` is simply never read by anything; don't go looking for
   where `ScryCore.Executor.run/3` checks its own flag, because it
   doesn't -- only a parent's view of a child's `required` matters.
+
+  `rhs`/`values`'s own `{:param, name}` (lang_spec.md §5.7/§9) is a
+  placeholder, not a value -- parsing never resolves it, since the real
+  value is supplied separately, at execution time, via
+  `ScryCore.Executor.run/4`'s own `params` argument.
   """
 
   @type predicate ::
           {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match, path :: [String.t()],
-           rhs :: term() | {:field, [String.t()]}}
-          | {:in, path :: [String.t()], values :: [term()]}
+           rhs :: term() | {:field, [String.t()]} | {:param, String.t()}}
+          | {:in, path :: [String.t()], values :: [term() | {:param, String.t()}]}
           | {:and, predicate(), predicate()}
           | {:or, predicate(), predicate()}
           | {:not, predicate()}

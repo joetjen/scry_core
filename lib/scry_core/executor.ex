@@ -82,6 +82,24 @@ defmodule ScryCore.Executor do
   `SELECT` worth writing as a real join at real row counts, where this
   starts to matter rather than being an unexploited memoization
   opportunity.
+
+  **External parameters (lang_spec.md §5.7/§9).** `$name` parses to the
+  placeholder `{:param, name}` (`ScryCore.Actions`) -- never resolved
+  at parse time, since the real value is supplied separately, out of
+  band. `run/4`'s own `params` argument (default `%{}`, so every
+  existing 3-arity call site is unaffected) supplies it at execution
+  time instead, wherever `{:param, name}` appears: a comparison's own
+  right-hand side, or any element of an `in [...]` list (both resolved
+  the same way, `resolve_rhs/4`). A query referencing a name absent
+  from `params` raises `ArgumentError` -- deliberately, not an
+  `{:error, _}` return: `run/3`'s own `@spec` promises exactly two
+  outcomes, and threading a third failure mode through `Enum.filter`
+  would need the same `Enum.reduce_while` restructuring `project`/
+  `project_all` already have for a different reason (dropping a row
+  outright), for what amounts to a caller-supplied-insufficient-input
+  class of error, not a data-shaped one. Consistent with this module's
+  existing posture elsewhere: a type mismatch (`~` against a
+  non-string) already raises rather than returning `{:error, _}`.
   """
 
   alias ScryCore.{EngineBehaviour, Query, Rational}
@@ -89,33 +107,38 @@ defmodule ScryCore.Executor do
   @typedoc "One `{ancestor_source_name, ancestor_row}` per enclosing query, nearest first."
   @type scope :: [{String.t(), EngineBehaviour.row()}]
 
+  @typedoc "External values bound to a query's own `$name` placeholders, by name."
+  @type params :: %{optional(String.t()) => term()}
+
   @doc """
   Executes `query` against `engine_module` (a module implementing
-  `ScryCore.EngineBehaviour`) using `conn`. Returns one projected
-  result row per source row surviving every predicate in `query.wheres`
-  (combined with `and`), sorted, deduped, and paginated per
-  `query.order_bys`/`query.distinct`/`query.limit`/`query.offset` --
-  see this module's own moduledoc for the exact pipeline order, the
-  correlation/`REQUIRED` semantics, and what it still doesn't do
-  (`group_by`/`having`).
+  `ScryCore.EngineBehaviour`) using `conn`, resolving any `$name`
+  placeholder against `params`. Returns one projected result row per
+  source row surviving every predicate in `query.wheres` (combined
+  with `and`), sorted, deduped, and paginated per `query.order_bys`/
+  `query.distinct`/`query.limit`/`query.offset` -- see this module's
+  own moduledoc for the exact pipeline order, the correlation/
+  `REQUIRED`/external-parameter semantics, and what it still doesn't
+  do (`group_by`/`having`).
   """
-  @spec run(Query.t(), module(), term()) ::
+  @spec run(Query.t(), module(), term(), params()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
-  def run(%Query{} = query, engine_module, conn), do: run(query, [], engine_module, conn)
+  def run(%Query{} = query, engine_module, conn, params \\ %{}),
+    do: run(query, [], params, engine_module, conn)
 
-  @spec run(Query.t(), scope(), module(), term()) ::
+  @spec run(Query.t(), scope(), params(), module(), term()) ::
           {:ok, [EngineBehaviour.row()]} | {:error, term()}
-  defp run(%Query{} = query, scope, engine_module, conn) do
+  defp run(%Query{} = query, scope, params, engine_module, conn) do
     with {:ok, rows} <- engine_module.fetch(conn, query.source) do
       sorted =
         rows
-        |> Enum.filter(&matches_all?(&1, query.wheres, scope))
+        |> Enum.filter(&matches_all?(&1, query.wheres, scope, params))
         |> sort_rows(query.order_bys, scope)
 
       own_name = List.last(query.source)
 
       with {:ok, projected} <-
-             project_all(sorted, query.select, own_name, scope, engine_module, conn) do
+             project_all(sorted, query.select, own_name, scope, params, engine_module, conn) do
         {:ok,
          projected
          |> maybe_dedupe(query.distinct)
@@ -167,12 +190,13 @@ defmodule ScryCore.Executor do
   defp take_limit(rows, nil), do: rows
   defp take_limit(rows, limit), do: Enum.take(rows, limit)
 
-  defp matches_all?(row, wheres, scope), do: Enum.all?(wheres, &eval_predicate(&1, row, scope))
+  defp matches_all?(row, wheres, scope, params),
+    do: Enum.all?(wheres, &eval_predicate(&1, row, scope, params))
 
-  # `rhs` resolves first (either the literal value as-is, or -- lang_spec
-  # §5.9 -- another field's value via `{:field, path}`, the same tag
-  # `Query.body_item/0` uses for a projected field, now scope-aware so it
-  # can reach across a nesting boundary), *then* dispatches on what it
+  # `rhs` resolves first (the literal value as-is; another field's value
+  # via `{:field, path}`, scope-aware so it can reach across a nesting
+  # boundary, lang_spec §5.9; or an external parameter's bound value via
+  # `{:param, name}`, lang_spec §5.7/§9), *then* dispatches on what it
   # resolved to. Resolve-then-dispatch (rather than one clause per
   # op/shape combination) closes a real gap the naive split would
   # otherwise reopen: `WHERE name ~ some_field` where `some_field`
@@ -184,24 +208,30 @@ defmodule ScryCore.Executor do
   # predicate in this module already has (e.g. `<`/`>` against
   # mismatched types already "works" via Erlang's own total term order
   # without erroring, just not usefully).
-  defp eval_predicate({:cmp, op, path, rhs}, row, scope) do
+  defp eval_predicate({:cmp, op, path, rhs}, row, scope, params) do
     left = get_path(row, scope, path)
 
-    case resolve_rhs(rhs, row, scope) do
+    case resolve_rhs(rhs, row, scope, params) do
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
       right -> compare(op, left, right)
     end
   end
 
-  defp eval_predicate({:in, path, values}, row, scope), do: get_path(row, scope, path) in values
+  # Each element resolved the same way a comparison's own right-hand
+  # side is -- `in [$a, $b]`/`in [orders.status]` work for exactly the
+  # same reason `= $a`/`= orders.status` do, not a separate mechanism.
+  defp eval_predicate({:in, path, values}, row, scope, params) do
+    get_path(row, scope, path) in Enum.map(values, &resolve_rhs(&1, row, scope, params))
+  end
 
-  defp eval_predicate({:and, l, r}, row, scope),
-    do: eval_predicate(l, row, scope) and eval_predicate(r, row, scope)
+  defp eval_predicate({:and, l, r}, row, scope, params),
+    do: eval_predicate(l, row, scope, params) and eval_predicate(r, row, scope, params)
 
-  defp eval_predicate({:or, l, r}, row, scope),
-    do: eval_predicate(l, row, scope) or eval_predicate(r, row, scope)
+  defp eval_predicate({:or, l, r}, row, scope, params),
+    do: eval_predicate(l, row, scope, params) or eval_predicate(r, row, scope, params)
 
-  defp eval_predicate({:not, p}, row, scope), do: not eval_predicate(p, row, scope)
+  defp eval_predicate({:not, p}, row, scope, params),
+    do: not eval_predicate(p, row, scope, params)
 
   defp compare(op, a, b), do: ordering_result(op, term_order(a, b))
 
@@ -289,12 +319,24 @@ defmodule ScryCore.Executor do
   defp get_path_in(row, [key]), do: Map.get(row, key)
   defp get_path_in(row, [key | rest]), do: row |> Map.get(key, %{}) |> get_path_in(rest)
 
-  defp resolve_rhs({:field, path}, row, scope), do: get_path(row, scope, path)
-  defp resolve_rhs(literal, _row, _scope), do: literal
+  defp resolve_rhs({:field, path}, row, scope, _params), do: get_path(row, scope, path)
 
-  defp project_all(rows, select_items, own_name, scope, engine_module, conn) do
+  # `Map.fetch/2` + an explicit raise, not `Map.fetch!/2` -- gives a
+  # clear, scry-specific message (the missing parameter's own name)
+  # rather than `KeyError`'s generic "key ... not found in: %{...}",
+  # which would also leak the rest of `params` into the error text.
+  defp resolve_rhs({:param, name}, _row, _scope, params) do
+    case Map.fetch(params, name) do
+      {:ok, value} -> value
+      :error -> raise ArgumentError, "missing external parameter: #{inspect(name)}"
+    end
+  end
+
+  defp resolve_rhs(literal, _row, _scope, _params), do: literal
+
+  defp project_all(rows, select_items, own_name, scope, params, engine_module, conn) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
-      case project(row, select_items, own_name, scope, engine_module, conn) do
+      case project(row, select_items, own_name, scope, params, engine_module, conn) do
         {:ok, projected} -> {:cont, {:ok, [projected | acc]}}
         :skip -> {:cont, {:ok, acc}}
         {:error, _} = err -> {:halt, err}
@@ -314,9 +356,9 @@ defmodule ScryCore.Executor do
   # free: a row with two `REQUIRED` nested selects is only kept if
   # *both* are non-empty, matching how a SQL row surviving a chain of
   # `INNER JOIN`s needs every one of them to match.
-  defp project(row, select_items, own_name, scope, engine_module, conn) do
+  defp project(row, select_items, own_name, scope, params, engine_module, conn) do
     Enum.reduce_while(select_items, {:ok, %{}}, fn item, {:ok, acc} ->
-      case project_item(item, row, own_name, scope, engine_module, conn) do
+      case project_item(item, row, own_name, scope, params, engine_module, conn) do
         {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
         :skip -> {:halt, :skip}
         {:error, _} = err -> {:halt, err}
@@ -324,7 +366,7 @@ defmodule ScryCore.Executor do
     end)
   end
 
-  defp project_item({:field, path}, row, _own_name, scope, _engine_module, _conn) do
+  defp project_item({:field, path}, row, _own_name, scope, _params, _engine_module, _conn) do
     {:ok, List.last(path), get_path(row, scope, path)}
   end
 
@@ -332,8 +374,11 @@ defmodule ScryCore.Executor do
   # entry in the *nested* query's own scope chain, so its own `where`
   # (and `order_by`) can reach it via `get_path/3` above, multiple
   # nesting levels deep if needed (each level just prepends its own
-  # entry before recursing). `{:ok, []} when required` is the one place
-  # `REQUIRED` actually does anything -- everywhere else in this module,
+  # entry before recursing). `params` passes straight through unchanged
+  # -- external parameters are the same map for the whole query
+  # submission, regardless of nesting depth, unlike `scope`, which grows
+  # per level. `{:ok, []} when required` is the one place `REQUIRED`
+  # actually does anything -- everywhere else in this module,
   # `query.required` is simply never read (see this module's own
   # moduledoc, and `Query`'s).
   defp project_item(
@@ -341,17 +386,26 @@ defmodule ScryCore.Executor do
          row,
          own_name,
          scope,
+         params,
          engine_module,
          conn
        ) do
-    case run(nested, [{own_name, row} | scope], engine_module, conn) do
+    case run(nested, [{own_name, row} | scope], params, engine_module, conn) do
       {:ok, []} when required -> :skip
       {:ok, nested_rows} -> {:ok, List.last(nested.source), nested_rows}
       {:error, _} = err -> err
     end
   end
 
-  defp project_item({:variant, _} = item, _row, _own_name, _scope, _engine_module, _conn) do
+  defp project_item(
+         {:variant, _} = item,
+         _row,
+         _own_name,
+         _scope,
+         _params,
+         _engine_module,
+         _conn
+       ) do
     {:error, {:unsupported_body_item, item}}
   end
 end

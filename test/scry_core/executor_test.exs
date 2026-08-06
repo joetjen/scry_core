@@ -90,6 +90,7 @@ defmodule ScryCore.ExecutorTest do
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
+  defp run(query, params), do: Executor.run(query, FakeEngine, @data, params)
 
   test "no wheres, projects the selected fields" do
     query = %Query{source: ["users"], select: [{:field, ["name"]}]}
@@ -495,6 +496,67 @@ defmodule ScryCore.ExecutorTest do
                  %{"id" => 102, "order_items" => [%{"sku" => "C"}]}
                ]
              }
+           ]
+  end
+
+  test "an external parameter is resolved against the params map at execution time" do
+    query = %Query{
+      source: ["users"],
+      wheres: [{:cmp, :gt, ["age"], {:param, "minAge"}}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query, %{"minAge" => 18})
+    assert Enum.map(rows, & &1["name"]) == ["Alice", "Carol"]
+
+    assert {:ok, rows2} = run(query, %{"minAge" => 60})
+    assert Enum.map(rows2, & &1["name"]) == ["Carol"]
+  end
+
+  test "an external parameter inside an in [...] list" do
+    query = %Query{
+      source: ["users"],
+      wheres: [{:in, ["status"], [{:param, "a"}, "inactive"]}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query, %{"a" => "active"})
+    assert Enum.map(rows, & &1["name"]) == ["Alice", "Carol"]
+  end
+
+  test "a query referencing an external parameter with no value supplied raises" do
+    query = %Query{
+      source: ["users"],
+      wheres: [{:cmp, :gt, ["age"], {:param, "minAge"}}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert_raise ArgumentError, ~r/minAge/, fn -> run(query) end
+  end
+
+  test "an external parameter reaches a nested SELECT's own WHERE too" do
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["id"], :asc}],
+      select: [
+        {:field, ["name"]},
+        %Query{
+          source: ["customer_orders"],
+          wheres: [
+            {:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}},
+            {:cmp, :gt, ["total"], {:param, "minTotal"}}
+          ],
+          select: [{:field, ["id"]}]
+        }
+      ]
+    }
+
+    assert {:ok, rows} = run(query, %{"minTotal" => 60})
+
+    assert rows == [
+             %{"name" => "Alice", "customer_orders" => [%{"id" => 101}]},
+             %{"name" => "Bob", "customer_orders" => []},
+             %{"name" => "Carol", "customer_orders" => []}
            ]
   end
 end
