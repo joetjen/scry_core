@@ -271,4 +271,34 @@ defmodule ScryCore.Executor.LazyExecutionTest do
       assert :counters.get(counter, 1) == 3
     end
   end
+
+  describe "bounded top-K streaming (a real ORDER BY combined with a real LIMIT)" do
+    test "genuinely pulls every row, unlike a LIMIT-only query -- there's no way to know a later row won't outrank a buffered one without seeing it" do
+      counter = :counters.new(1, [])
+      conn = {%{["items"] => @items}, counter}
+
+      query = %Query{
+        source: ["items"],
+        order_bys: [{["value"], :desc}],
+        limit: 3,
+        select: [{:field, ["value"]}]
+      }
+
+      assert {:ok, cursor} = Executor.run(query, CountingEngine, conn)
+
+      assert Cursor.to_list(cursor) == [
+               %{"value" => 10_000},
+               %{"value" => 9_990},
+               %{"value" => 9_980}
+             ]
+
+      # All 1000 source rows pulled -- contrast with the LIMIT-only test
+      # above, which stops at 503. A bounded top-K buffer still bounds
+      # *memory* (never more than `limit + offset` rows held at once),
+      # just not the number of rows scanned -- this is the "memory
+      # boundedness, not speed" distinction this whole feature area has
+      # had since the very first increment.
+      assert :counters.get(counter, 1) == 1000
+    end
+  end
 end

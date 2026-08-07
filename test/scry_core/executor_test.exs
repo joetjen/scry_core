@@ -1,5 +1,6 @@
 defmodule ScryCore.ExecutorTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias ScryCore.{CombinedQuery, Cursor, Executor, Query, Rational}
   alias ScryCore.Executor.QueryError
@@ -1222,6 +1223,125 @@ defmodule ScryCore.ExecutorTest do
       case Executor.run(query, FakeEngine, conn) do
         {:ok, cursor} -> {:ok, Cursor.to_list(cursor)}
         {:error, _} = err -> err
+      end
+    end
+  end
+
+  describe "bounded top-K streaming (a real ORDER BY combined with a real LIMIT)" do
+    @topk_rows [
+      %{"v" => 5},
+      %{"v" => 1},
+      %{"v" => 4},
+      %{"v" => 2},
+      %{"v" => 3}
+    ]
+
+    test "ORDER BY ASC + LIMIT returns the correctly sorted, truncated prefix" do
+      query = %Query{
+        source: ["items"],
+        order_bys: [{["v"], :asc}],
+        limit: 2,
+        select: [{:field, ["v"]}]
+      }
+
+      assert {:ok, rows} = run_against(query, %{["items"] => @topk_rows})
+      assert rows == [%{"v" => 1}, %{"v" => 2}]
+    end
+
+    test "ORDER BY DESC + LIMIT returns the correctly sorted, truncated prefix" do
+      query = %Query{
+        source: ["items"],
+        order_bys: [{["v"], :desc}],
+        limit: 2,
+        select: [{:field, ["v"]}]
+      }
+
+      assert {:ok, rows} = run_against(query, %{["items"] => @topk_rows})
+      assert rows == [%{"v" => 5}, %{"v" => 4}]
+    end
+
+    test "ORDER BY + LIMIT + OFFSET returns the correct window, not just the correct prefix" do
+      query = %Query{
+        source: ["items"],
+        order_bys: [{["v"], :asc}],
+        limit: 2,
+        offset: 2,
+        select: [{:field, ["v"]}]
+      }
+
+      assert {:ok, rows} = run_against(query, %{["items"] => @topk_rows})
+      assert rows == [%{"v" => 3}, %{"v" => 4}]
+    end
+
+    test "LIMIT 0 with a real ORDER BY returns no rows, not a crash" do
+      query = %Query{
+        source: ["items"],
+        order_bys: [{["v"], :asc}],
+        limit: 0,
+        select: [{:field, ["v"]}]
+      }
+
+      assert {:ok, []} = run_against(query, %{["items"] => @topk_rows})
+    end
+
+    test "a tie in the sort key breaks stably, same as Enum.sort/2's own documented guarantee" do
+      rows = [%{"v" => 1, "tag" => "a"}, %{"v" => 1, "tag" => "b"}, %{"v" => 0, "tag" => "c"}]
+
+      query = %Query{
+        source: ["items"],
+        order_bys: [{["v"], :asc}],
+        limit: 3,
+        select: [{:field, ["tag"]}]
+      }
+
+      assert {:ok, rows} = run_against(query, %{["items"] => rows})
+      assert rows == [%{"tag" => "c"}, %{"tag" => "a"}, %{"tag" => "b"}]
+    end
+
+    test "DISTINCT still forces the full materialize-then-sort path -- unaffected by this feature" do
+      rows = [%{"v" => 2}, %{"v" => 1}, %{"v" => 1}, %{"v" => 2}]
+
+      query = %Query{
+        source: ["items"],
+        order_bys: [{["v"], :asc}],
+        limit: 5,
+        distinct: true,
+        select: [{:field, ["v"]}]
+      }
+
+      assert {:ok, rows} = run_against(query, %{["items"] => rows})
+      assert rows == [%{"v" => 1}, %{"v" => 2}]
+    end
+
+    property "always matches a naive Enum.sort_by/2 + Enum.slice/2 reference implementation" do
+      check all(
+              values <- list_of(integer(-50..50), min_length: 0, max_length: 30),
+              limit <- integer(0..10),
+              offset <- integer(0..10),
+              direction <- member_of([:asc, :desc])
+            ) do
+        rows = Enum.map(values, &%{"v" => &1})
+
+        query = %Query{
+          source: ["items"],
+          order_bys: [{["v"], direction}],
+          limit: limit,
+          offset: offset,
+          select: [{:field, ["v"]}]
+        }
+
+        assert {:ok, actual} = run_against(query, %{["items"] => rows})
+
+        sorter = if direction == :asc, do: &<=/2, else: &>=/2
+
+        expected =
+          values
+          |> Enum.sort(sorter)
+          |> Enum.drop(offset)
+          |> Enum.take(limit)
+          |> Enum.map(&%{"v" => &1})
+
+        assert actual == expected
       end
     end
   end

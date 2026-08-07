@@ -562,6 +562,21 @@ defmodule ScryCore.Executor do
       windows == [] and query.order_bys == [] and not query.distinct ->
         run_plain_streaming(query, own_name, scope, params, with_bindings, engine_module, conn)
 
+      windows == [] and query.order_bys != [] and not query.distinct and
+        query.limit != nil and not select_can_skip_rows?(query.select) ->
+        with {:ok, rows} <-
+               run_topk_streaming(
+                 query,
+                 own_name,
+                 scope,
+                 params,
+                 with_bindings,
+                 engine_module,
+                 conn
+               ) do
+          {:ok, Cursor.new(rows)}
+        end
+
       true ->
         with {:ok, filtered} <-
                fetch_and_filter(query, scope, params, with_bindings, engine_module, conn),
@@ -582,8 +597,10 @@ defmodule ScryCore.Executor do
   end
 
   # Shared by every path that still needs the *whole* filtered row set
-  # materialized up front (real `ORDER BY`/`DISTINCT`/window functions on
-  # the plain side; anything grouped that `streaming_aggregate_plan/1`
+  # materialized up front (`DISTINCT`/window functions on the plain side;
+  # a real `ORDER BY` *without* a `LIMIT` to bound it -- `run_topk_
+  # streaming/7`, below, handles the `ORDER BY` + `LIMIT` combination
+  # without this; anything grouped that `streaming_aggregate_plan/1`
   # can't handle incrementally) -- `Cursor.to_list/1` here is the exact
   # same eager materialization `fetch_and_materialize/3` used to do
   # unconditionally, just now only reached when actually needed.
@@ -637,12 +654,16 @@ defmodule ScryCore.Executor do
   # reasoning) -- wrapped here in a `ScryCore.Cursor` and handed back
   # *unmaterialized*. Whether this actually stays lazy any further
   # depends entirely on the caller: `run/6`'s own dispatch either drains
-  # it immediately via `fetch_and_filter/6` (real `ORDER BY`/`DISTINCT`/
-  # window functions, or a grouped query `streaming_aggregate_plan/1`
-  # can't handle incrementally -- all inherently need the whole set
-  # regardless of how `fetch/2` returned its data), or pulls from it one
-  # row at a time (`run_plain_streaming/8`, `run_grouped_streaming/8`) --
-  # this function itself stays agnostic to which.
+  # it immediately via `fetch_and_filter/6` (`DISTINCT`/window functions,
+  # an `ORDER BY` with no `LIMIT`, or a grouped query `streaming_
+  # aggregate_plan/1` can't handle incrementally -- all inherently need
+  # the whole set regardless of how `fetch/2` returned its data), or
+  # pulls from it one row at a time -- either genuinely lazily
+  # (`run_plain_streaming/7`, `run_grouped_streaming/7`) or into a
+  # bounded buffer that still needs every row *pulled*, just never more
+  # than `limit + offset` of them held at once (`run_topk_streaming/7`,
+  # for `ORDER BY` combined with `LIMIT`) -- this function itself stays
+  # agnostic to which.
   defp fetch_lazy(engine_module, conn, source) do
     with {:ok, enumerable} <- engine_module.fetch(conn, source) do
       {:ok, Cursor.new(enumerable)}
@@ -772,6 +793,109 @@ defmodule ScryCore.Executor do
        |> maybe_dedupe(query.distinct)
        |> paginate(query.limit, query.offset)}
     end
+  end
+
+  # ---- Bounded top-K streaming (real ORDER BY + a real LIMIT) -------------
+  #
+  # `run/6`'s own dispatch above reaches this only for a real `ORDER BY`
+  # *with* a real `LIMIT` -- no window function, no `DISTINCT` (both still
+  # force `run_plain/8`'s own full materialize-then-sort path, unchanged),
+  # and no `REQUIRED` nested `SELECT` directly in `select`
+  # (`select_can_skip_rows?/1` below) -- a row that `project_item/8` might
+  # still `:skip` can't safely be counted toward the bounded buffer's own
+  # capacity ahead of time, so that combination keeps using the eager path
+  # too, honestly narrower rather than silently wrong.
+  #
+  # The actual bound: rather than materializing every filtered row before
+  # sorting (`run_plain/8`'s own `sort_rows/3`, `O(n)` memory regardless of
+  # `LIMIT`), this keeps only the `limit + offset` *best-so-far* rows in
+  # memory at any point during the scan -- `O(limit + offset)`, not `O(n)`
+  # -- the same memory-boundedness goal `run_plain_streaming/7`/`run_
+  # grouped_streaming/7` already deliver for their own cases. Every row
+  # still has to be *pulled* from the source and compared (there's no way
+  # to know a later row won't outrank a currently-buffered one without
+  # seeing it), so this doesn't save *time* the way an early `LIMIT`-only
+  # stop does -- only memory, matching this whole feature's own "memory
+  # boundedness, not speed" goal.
+  #
+  # Reuses `sorts_before?/4` (`sort_rows/3`'s own comparator) directly,
+  # not a separate ordering implementation -- the buffer's own final
+  # content is provably identical to `Enum.sort/2` truncated to `limit +
+  # offset` rows, since both are defined by the same total order over the
+  # same predicate; only *how* that result is reached (bounded insertion
+  # vs. a full sort) differs.
+  defp select_can_skip_rows?(select), do: Enum.any?(select, &match?(%Query{required: true}, &1))
+
+  defp run_topk_streaming(query, own_name, scope, params, with_bindings, engine_module, conn) do
+    k = (query.limit || 0) + (query.offset || 0)
+
+    with {:ok, source_cursor} <-
+           fetch_rows(query, scope, params, with_bindings, engine_module, conn),
+         {:ok, top_rows} <- accumulate_topk(source_cursor, query, k, scope, params, []),
+         {:ok, projected} <-
+           project_all(
+             top_rows,
+             query.select,
+             own_name,
+             scope,
+             params,
+             with_bindings,
+             engine_module,
+             conn
+           ) do
+      {:ok, paginate(projected, query.limit, query.offset)}
+    end
+  end
+
+  # `k == 0` (a real `LIMIT 0`) needs no buffering, no `WHERE` evaluation,
+  # and no comparator at all -- still drains the cursor (so a `Stream.
+  # resource/3`-backed source's own `after_fun` still runs on natural
+  # exhaustion, same guarantee every other pull in this module already
+  # has), just never keeps anything.
+  defp accumulate_topk(cursor, _query, 0, _scope, _params, _buffer), do: drain(cursor)
+
+  defp accumulate_topk(cursor, query, k, scope, params, buffer) do
+    case Cursor.next(cursor) do
+      :done ->
+        {:ok, buffer}
+
+      {:ok, row, cursor2} ->
+        if matches_all?(row, query.wheres, scope, params) do
+          new_buffer = insert_topk(buffer, row, k, query.order_bys, scope)
+          accumulate_topk(cursor2, query, k, scope, params, new_buffer)
+        else
+          accumulate_topk(cursor2, query, k, scope, params, buffer)
+        end
+    end
+  rescue
+    e ->
+      Cursor.close(cursor)
+      reraise e, __STACKTRACE__
+  end
+
+  defp drain(cursor) do
+    case Cursor.next(cursor) do
+      :done -> {:ok, []}
+      {:ok, _row, cursor2} -> drain(cursor2)
+    end
+  end
+
+  defp insert_topk(buffer, row, k, order_bys, scope) when length(buffer) < k,
+    do: insert_sorted(buffer, row, order_bys, scope)
+
+  defp insert_topk(buffer, row, _k, order_bys, scope) do
+    worst = List.last(buffer)
+
+    if sorts_before?(row, worst, order_bys, scope) do
+      buffer |> List.delete_at(-1) |> insert_sorted(row, order_bys, scope)
+    else
+      buffer
+    end
+  end
+
+  defp insert_sorted(buffer, row, order_bys, scope) do
+    {before, rest} = Enum.split_while(buffer, &sorts_before?(&1, row, order_bys, scope))
+    before ++ [row | rest]
   end
 
   # ---- Streaming aggregation (group_mode: :plain only) --------------------
