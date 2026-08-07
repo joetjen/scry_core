@@ -1,8 +1,8 @@
 ; Scry core grammar -- Phase 1 subset.
 ;
 ; This file is the hand-written SOURCE for a generated file:
-; `lib/scry_core/grammar/compiled.ex` (`ScryCore.Grammar.Compiled`,
-; what `ScryCore.parse/1` actually runs queries through) is produced
+; `lib/scry_core/grammar/compiled.ex` (`Scry.Core.Grammar.Compiled`,
+; what `Scry.Core.parse/1` actually runs queries through) is produced
 ; from this file by `priv/gen/generate_compiled_grammar.exs` -- after
 ; editing anything below, run `mix run priv/gen/generate_compiled_grammar.exs`
 ; and re-run the test suite; never hand-edit the generated file itself.
@@ -16,7 +16,7 @@
 ;     (consuming its own matching `}` via `{`/`}` depth counting), so it
 ;     cannot be a plain lexer-level token the way `#`/SPACE are; it
 ;     needs Aether's own `@native`/`CustomLexeme` escape hatch instead
-;     (`BLOCK_COMMENT`'s own comment below, `ScryCore.Grammar.
+;     (`BLOCK_COMMENT`'s own comment below, `Scry.Core.Grammar.
 ;     BlockCommentLexeme`'s moduledoc has the full mechanics)
 ;   - bare identifiers + dot-path, backtick-escaped on keyword collision
 ;     (`` `select` ``, §3)
@@ -28,10 +28,10 @@
 ;     radix integers (`0x`/`0o`/`0b`), list literals (`[...]`, usable
 ;     anywhere a literal is, not just inside `in [...]`), atom literals
 ;     (`:name`, tagged `{:atom, name}` rather than a real Elixir atom --
-;     ScryCore.Actions' own handle_token(:ATOM, ...) explains why), ISO
+;     Scry.Core.Actions' own handle_token(:ATOM, ...) explains why), ISO
 ;     8601 date/timestamp literals (a real `Date`/`NaiveDateTime`/
 ;     `DateTime`, per what's present -- calendar validation happens via
-;     the stdlib in ScryCore.Actions, not in the grammar), regex sigils
+;     the stdlib in Scry.Core.Actions, not in the grammar), regex sigils
 ;     (`@r/.../ `, any single-byte delimiter -- `SIGIL`'s own comment has
 ;     the mechanics, via Aether's `@native`/`CustomLexeme` escape hatch)
 ;     paired with the `~` match operator,
@@ -39,7 +39,7 @@
 ;     `BYTE_SIZE`'s own comments have the concrete unit vocabulary
 ;     chosen, mirrored in lang_spec.md itself) -- the rest of the
 ;     exact-rational tower's own remaining gap is `inexact`/float
-;     coexistence specifically (see ScryCore.Rational's own moduledoc);
+;     coexistence specifically (see Scry.Core.Rational's own moduledoc);
 ;     arithmetic *expressions* are implemented (§5.10, `expression`'s
 ;     own comment below)
 ;   - `select`/`where`, `and`/`or`/`not`, comparisons, `in [...]`, and the
@@ -47,7 +47,7 @@
 ;     `order by`/`limit ... offset`, in their required fixed order) (§5)
 ;     -- `group by ... rollup`/`... cube` and the "having requires an
 ;     aggregate expression in the body" *compile-time* check (it's
-;     enforced at *execution* time now -- ScryCore.Executor's own
+;     enforced at *execution* time now -- Scry.Core.Executor's own
 ;     `aggregate_query?/1` -- but nothing statically validates it during
 ;     parsing) still deferred. §5's own aggregates/casts/window functions
 ;     (`sum`/`avg`/`count`/`min`/`max`/`stddev_*`/`var_*`/`percentile`,
@@ -71,7 +71,7 @@
 ;
 ; Every deferral above is a real gap, not a design decision -- each one
 ; needs its own pass. See impl_spec.md §8 for how this file's own
-; composition gets tested (ScryCore.GrammarCompose + its test suite).
+; composition gets tested (Scry.Core.GrammarCompose + its test suite).
 
 @grammar "scry_core"
 @root document
@@ -83,7 +83,7 @@
 COMMENT := "#" (!"\n" .)*
 TRIVIA  := (SPACE | COMMENT)*
 
-; `;` block comments (lang_spec §3) -- ScryCore.Grammar.BlockCommentLexeme's
+; `;` block comments (lang_spec §3) -- Scry.Core.Grammar.BlockCommentLexeme's
 ; own moduledoc has the full mechanics (Aether's `@native`/`CustomLexeme`
 ; escape hatch, verified via scratch grammar first, the same way `SIGIL`'s
 ; own "any delimiter" support was). Genuinely a context-free construct
@@ -105,7 +105,7 @@ TRIVIA  := (SPACE | COMMENT)*
 ; this project's own test suite runs against, not just the native
 ; codegen backend a first pass verified against and wrongly trusted was
 ; equivalent).
-BLOCK_COMMENT := @native("ScryCore.Grammar.BlockCommentLexeme", "scan")
+BLOCK_COMMENT := @native("Scry.Core.Grammar.BlockCommentLexeme", "scan")
 
 ; ---- identifiers / keywords ----
 ;
@@ -117,7 +117,7 @@ BLOCK_COMMENT := @native("ScryCore.Grammar.BlockCommentLexeme", "scan")
 ; @refine, not @keywords: @keywords' table lookup is an exact,
 ; case-sensitive match against the token's raw text, and does not pick
 ; up @case_insensitive -- confirmed empirically, not a guess (see
-; ScryCore.Grammar.KeywordRefiner's moduledoc). @refine hands the whole
+; Scry.Core.Grammar.KeywordRefiner's moduledoc). @refine hands the whole
 ; decision to that module instead, which downcases first.
 ;
 ; No `-` in the trailing character class (nor in ESCAPED_IDENT/ATOM/
@@ -131,7 +131,7 @@ BLOCK_COMMENT := @native("ScryCore.Grammar.BlockCommentLexeme", "scan")
 ; `quantity` -- silently making subtraction impossible to write without
 ; spaces around it. Fixed at the source instead of routed around.
 IDENT := [[:alpha:]_][[:alnum:]_]*
-  @refine("ScryCore.Grammar.KeywordRefiner", "refine",
+  @refine("Scry.Core.Grammar.KeywordRefiner", "refine",
           KW_SELECT, KW_WHERE, KW_AND, KW_OR, KW_NOT, KW_IN,
           KW_NIL, KW_TRUE, KW_FALSE,
           KW_GROUP, KW_BY, KW_HAVING, KW_DISTINCT, KW_ORDER,
@@ -166,9 +166,9 @@ ATOM := ":" [[:alpha:]_][[:alnum:]_]*
 ; string-interpolated into query text -- a real injection-safety
 ; property, not style. `$` doesn't collide with anything else declared
 ; in this file. Parsing only ever produces the placeholder
-; `{:param, name}` (ScryCore.Actions' own handle_token(:PARAM, ...));
+; `{:param, name}` (Scry.Core.Actions' own handle_token(:PARAM, ...));
 ; resolving it against a real caller-supplied value happens entirely
-; at execution time, in ScryCore.Executor -- see its own moduledoc.
+; at execution time, in Scry.Core.Executor -- see its own moduledoc.
 PARAM := "$" [[:alpha:]_][[:alnum:]_]*
 
 ; ---- literals ----
@@ -201,8 +201,8 @@ RADIX   := "0" [xX] HEX+
 ; is the concrete vocabulary chosen to fill that gap, mirrored in
 ; lang_spec.md itself so the two stay in sync). Both collapse into the
 ; ordinary exact-rational tower exactly like `RADIX` already does
-; (`ScryCore.Actions`' own `handle_token` multiplies the magnitude by
-; the unit's own canonical value via `ScryCore.Rational.mul/2`) -- a
+; (`Scry.Core.Actions`' own `handle_token` multiplies the magnitude by
+; the unit's own canonical value via `Scry.Core.Rational.mul/2`) -- a
 ; canonical *base* unit each (seconds for duration, bytes for byte
 ; size), not a distinct wrapper type; `500ms` is simply the exact value
 ; `1/2`, indistinguishable from writing that fraction directly, the
@@ -245,7 +245,7 @@ BYTE_SIZE := DIGIT+ ("." DIGIT+)?
 ; lexically permissive on purpose, not a full calendar-aware match
 ; (real ISO 8601 has more shapes than are worth spelling out char by
 ; char here: fractional seconds, a numeric UTC offset instead of `Z`,
-; date-only with no time part at all). `ScryCore.Actions` hands
+; date-only with no time part at all). `Scry.Core.Actions` hands
 ; whatever this matches to Elixir's own `Date`/`NaiveDateTime`/
 ; `DateTime`.from_iso8601/1 -- genuine calendar validation (rejecting
 ; `2026-02-30`, say) happens there, confirmed empirically to surface
@@ -300,15 +300,15 @@ ESCAPE := "\\" ("\"" | "'" | "\\" | "n" | "t" | "u" HEX HEX HEX HEX)
 ; and neither Aether's native token primitives nor its own regex-sigil
 ; desugaring support those (the latter rejects `\1`-`\9` outright, per
 ; guides/aether/AETHER.md's own "Regex literals" section). Handed to
-; `ScryCore.Grammar.SigilLexeme.scan/3` via Aether's own `@native`/
+; `Scry.Core.Grammar.SigilLexeme.scan/3` via Aether's own `@native`/
 ; `Ichor.CustomLexeme` escape hatch (real Elixir code plugged into the
 ; lexer) -- that module's own moduledoc has the full mechanics,
 ; confirmed via a scratch grammar before landing this shape (a `nil`
 ; capture override correctly falls through to the ordinary per-token
-; path, so `ScryCore.Actions.handle_token/3`'s own `:SIGIL` clause needs
+; path, so `Scry.Core.Actions.handle_token/3`'s own `:SIGIL` clause needs
 ; only a small generalization -- reading the delimiter from the matched
 ; text itself -- not a rewrite).
-SIGIL := @native("ScryCore.Grammar.SigilLexeme", "scan")
+SIGIL := @native("Scry.Core.Grammar.SigilLexeme", "scan")
 
 ; ---- operators / delimiters ----
 
@@ -381,13 +381,13 @@ NEVER := []
 ; query text with no top-level `FRAGMENT`.
 ;
 ; A `FRAGMENT`'s own `...spread` references are resolved by
-; `ScryCore.FragmentResolver`, not here or in `ScryCore.Actions` --
+; `Scry.Core.FragmentResolver`, not here or in `Scry.Core.Actions` --
 ; that's a whole-document concern (a spread can reference a `FRAGMENT`
 ; declared *after* it, and a `FRAGMENT` can itself spread another one),
 ; not expressible as this rule walks bottom-up during an ordinary single
 ; pass. `document`'s own handler is what invokes it, once both
 ; `fragment_decl` and `select` have already been evaluated into real
-; terms (`ScryCore.Actions`' own moduledoc has the fuller story).
+; terms (`Scry.Core.Actions`' own moduledoc has the fuller story).
 ; Trailing `TRIVIA?` fixes the "did not expect more input here" gap
 ; `body_list`'s own comment flags (a real, found-not-fixed-until-now
 ; issue: `SELECT x { y }` followed by so much as one trailing newline
@@ -404,7 +404,7 @@ NEVER := []
 ; trailing trivia -- confirmed this is really what does the work, not
 ; `TRIVIA?` matching anything itself (a bare reference to the grammar's
 ; own `@skip` token produces no capture at all, matched or not, so this
-; is invisible to `ScryCore.Actions`' own `document` handler either
+; is invisible to `Scry.Core.Actions`' own `document` handler either
 ; way). Only `document` (the real root) needs this -- every other rule
 ; in this file is always followed by more input from its own caller,
 ; never genuinely at the end of the stream.
@@ -442,7 +442,7 @@ NEVER := []
 ; declaration kind, so it goes first, the same "a fixed relative order
 ; between declaration kinds, not something lang_spec mandates one way
 ; or the other" reasoning `fragment_decl*`/`with_decl*`'s own ordering
-; already has (their own comment nearby). `ScryCore.Actions`' own
+; already has (their own comment nearby). `Scry.Core.Actions`' own
 ; `document` handler stores every parsed `type_decl` in a `name =>
 ; type_decl` map on the resulting query/combined query, the same shape
 ; `with_bindings` already has -- but, deliberately, *only* stored, never
@@ -464,7 +464,7 @@ NEVER := []
 ; Each wrapper is a plain, unrenamed, bare alternation (`type_decl |
 ; BLOCK_COMMENT`) repeated the same way `body_item` itself already is
 ; inside `body_list`'s own `(COMMA tail:body_item)*` -- proven safe
-; already, not a new shape. `ScryCore.Actions`' own `document` handler
+; already, not a new shape. `Scry.Core.Actions`' own `document` handler
 ; filters each resulting list down to just the real declarations
 ; (`is_tuple/1` -- a real one is always `{name, value}`; a matched
 ; `BLOCK_COMMENT`'s own default passthrough is a bare token string)
@@ -487,7 +487,7 @@ with_or_comment := with_decl | BLOCK_COMMENT
 ; same established finding `additive_tail*`/`fragment_decl*` already
 ; have, this file's own first draft of this rule got it wrong before
 ; catching it empirically), folded left-associative in
-; `ScryCore.Actions` (`fold_combinators/2`) -- the exact same shape
+; `Scry.Core.Actions` (`fold_combinators/2`) -- the exact same shape
 ; `expression`'s own `additive_tail*` already proves safe (a dedicated
 ; wrapper rule per repeated element, not an inline
 ; `(op:(...) ...)*` group, see `additive_tail`'s own comment for why
@@ -505,7 +505,7 @@ with_or_comment := with_decl | BLOCK_COMMENT
 ; would need to be combinable, and it's an explicitly separate, later
 ; increment (its own fixpoint-iteration logic, plus the graph variant's
 ; `VIA`, per its own worked example); revisit this boundary then, not
-; before. See `ScryCore.CombinedQuery`'s own moduledoc for the fuller
+; before. See `Scry.Core.CombinedQuery`'s own moduledoc for the fuller
 ; reasoning, including why this is a real, separate result type rather
 ; than a field on `select`/`Query.t()` itself.
 combined_select := head:select combinator_tail*
@@ -523,7 +523,7 @@ combined_select := head:select combinator_tail*
 ; alternatives are just as easy to write and already proven throughout
 ; this file. `all:KW_ALL?` is a bare optional *token* reference --
 ; always produces a capture, the literal empty string when absent,
-; checked by value (`ScryCore.Actions` tells `UNION` from `UNION ALL`
+; checked by value (`Scry.Core.Actions` tells `UNION` from `UNION ALL`
 ; this way, same convention `order_item`'s own `dir:(KW_DESC|KW_ASC)?`
 ; already uses for a different optional token).
 combinator_tail := union:KW_UNION all:KW_ALL? right:select
@@ -570,7 +570,7 @@ type_field := name:field_name COLON expr:type_expr
 ; capture" finding `additive_tail*`/`combinator_tail*` already prove,
 ; confirmed to bite here too via scratch grammar before catching it).
 ; A single operand with no `union_tail` collapses to just that
-; operand's own value directly (`ScryCore.Actions`' own handler), no
+; operand's own value directly (`Scry.Core.Actions`' own handler), no
 ; `{:union, [...]}` wrapper for the trivial one-member case -- the same
 ; "don't wrap what didn't need wrapping" convention `expression`'s own
 ; head-with-no-`additive_tail` already has.
@@ -590,7 +590,7 @@ type_operand := nullable:QUESTION? base:base_type
 ; Three alternatives, each independently named (`shape`/`list`/`name`)
 ; rather than two bare passthroughs plus one named one -- the same
 ; "every alternative gets its own capture key" shape `in_lhs` above
-; already proves safe (`ScryCore.Actions` tells them apart by which key
+; already proves safe (`Scry.Core.Actions` tells them apart by which key
 ; is present, not by mixing a bare-rule-reference default passthrough
 ; with a named one in the same rule). `name:IDENT type_param?` covers
 ; every bare type name (`Int`, `String`, a reference to another
@@ -645,11 +645,11 @@ select := KW_SELECT source:path select_ep1a? where_clause? group_by_clause?
 ; `deep` (document) both nominating the same position, and a build can
 ; legitimately load both kinds at once. `select_ep1a` therefore always
 ; has a real definition (`NEVER` immediately below, when no kind
-; contributes here) that `ScryCore.GrammarCompose.merge/2` unions each
+; contributes here) that `Scry.Core.GrammarCompose.merge/2` unions each
 ; loaded fragment's own contribution into, rather than a dangling
 ; reference exactly one fragment is allowed to supply. See that
 ; module's own moduledoc for the full reasoning and
-; `ScryCore.GrammarComposeTest` for both a one-fragment and a
+; `Scry.Core.GrammarComposeTest` for both a one-fragment and a
 ; two-simultaneous-fragment proof.
 select_ep1a := NEVER
 
@@ -664,7 +664,7 @@ select_ep1a := NEVER
 ; whether "absent" is even detectable the same way: a *renamed* optional
 ; always produces a capture (raw text `""` when absent); the *bare*
 ; form produces no capture key at all when absent, only ever appearing
-; when it actually matched. ScryCore.Actions relies on exactly that
+; when it actually matched. Scry.Core.Actions relies on exactly that
 ; distinction (`Map.has_key?/2`, not an `== ""` check) -- see its own
 ; moduledoc. Does not apply to optional *token* references (`KW_NOT?`
 ; below keeps its name fine) -- empirically, only rule references have
@@ -679,7 +679,7 @@ where_clause := KW_WHERE cond:predicate
 ; `cube` become real reserved words once added to IDENT's own @refine
 ; list above -- a field genuinely named `rollup`/`cube` needs the same
 ; backtick escape (ESCAPED_IDENT) any other keyword-colliding field
-; name would. Each alternative's own handler (ScryCore.Actions) tags
+; name would. Each alternative's own handler (Scry.Core.Actions) tags
 ; its result `{:plain, fields}`/`{:rollup, fields}`/`{:cube, fields}`
 ; -- `select`'s own handler destructures that tagged tuple into
 ; `Query.t()`'s own separate `group_bys`/`group_mode` fields.
@@ -707,7 +707,7 @@ order_item_list := head:order_item (COMMA tail:order_item)*
 ; optional *rule* reference needs. It also produces a second, harmless
 ; spurious capture under whichever of `KW_DESC`/`KW_ASC` actually
 ; matched (same class of finding as `select_ep1a?`'s own history, just
-; not a problem here since ScryCore.Actions only ever reads `dir`).
+; not a problem here since Scry.Core.Actions only ever reads `dir`).
 order_item := field:path dir:(KW_DESC | KW_ASC)?
 
 limit_clause  := KW_LIMIT n:INTEGER offset_clause?
@@ -743,7 +743,7 @@ negation    := neg:KW_NOT? expr:comparison
 ; "Every comparison's right-hand side may be another field path, not
 ; only a literal" -- `WHERE price > cost` compares two fields of the
 ; same row; this is also the mechanism a nested SELECT uses to
-; correlate to an enclosing row, ScryCore.Executor's own moduledoc).
+; correlate to an enclosing row, Scry.Core.Executor's own moduledoc).
 ; `left:predicate_lhs`, not `left:path` -- lang_spec §5.8's own worked
 ; `HAVING sum(total) > 200` needs a function call on a comparison's
 ; *left*-hand side, which `path` alone can never be. `predicate_lhs`
@@ -777,12 +777,12 @@ negation    := neg:KW_NOT? expr:comparison
 ; (a plain path like `metadata` and a call like `json(metadata)` are
 ; only lexically distinguishable by whether `(` follows, so trying the
 ; more specific shapes first and letting backtracking fall through is
-; required, not incidental). `ScryCore.Actions`' own handler tells the
+; required, not incidental). `Scry.Core.Actions`' own handler tells the
 ; four `in` alternatives apart by capture-key name alone (`items` vs
 ; `items_expr`), the same "different alternatives, different capture
 ; keys" convention `right`/`right_field` above already established --
 ; confirmed the parser dispatches to the right one for all four shapes
-; via the same scratch grammar. `ScryCore.Executor`'s own `{:in, lhs,
+; via the same scratch grammar. `Scry.Core.Executor`'s own `{:in, lhs,
 ; values}` predicate tag is what actually resolves either shape at
 ; execution time (a real Elixir list of elements vs a single expr()
 ; expected to resolve to the whole list) -- see its own moduledoc.
@@ -799,13 +799,13 @@ negation    := neg:KW_NOT? expr:comparison
 ; matters there, already covered). `literal`'s own `list` alternative
 ; (`[1, 2] in ...`) is real overlap risk here: both a plain field path
 ; and a literal list literal are, once resolved, an ordinary Elixir
-; list -- `ScryCore.Executor.resolve_predicate_lhs/4`'s existing
+; list -- `Scry.Core.Executor.resolve_predicate_lhs/4`'s existing
 ; catch-all clause already treats *any* plain list it receives as field-
 ; path segments to walk into the row, so a raw `[1, 2]` literal handed
 ; to it unwrapped would be silently misinterpreted as a two-segment
 ; field path, not a value -- wrong, not just uncaught. `in_lhs`'s own
 ; `lhs_literal:literal` alternative is wrapped `{:literal, value}` by
-; `ScryCore.Actions` specifically to prevent that collision (a 2-tuple
+; `Scry.Core.Actions` specifically to prevent that collision (a 2-tuple
 ; never matches the existing bare-list/`{:call, ...}`/`{:dot, ...}`
 ; clauses), confirmed via the same scratch grammar as the `items_expr`
 ; finding above -- `predicate_lhs`'s own three shapes stay completely
@@ -834,7 +834,7 @@ list := LBRACK items:literal_list? RBRACK
 ; convention elsewhere). Deliberately plain-INTEGER-only on both sides
 ; (not DECIMAL) -- lang_spec.md §4's own example is `2/3`, not a
 ; division of two arbitrary exact rationals, which would need real
-; division, not just `ScryCore.Rational.new/2`'s construct-and-reduce.
+; division, not just `Scry.Core.Rational.new/2`'s construct-and-reduce.
 ;
 ; `list` recurses back into `literal` (a list of lists, `[[1,2],[3]]`,
 ; is valid) -- ordinary PEG recursion, not left-recursive (`list`
@@ -922,7 +922,7 @@ primary := literal | window_call | call_with_path | call | path | when_expr
 ; `count`/`min`/`max`/`stddev_samp`/`stddev_pop`/`var_samp`/`var_pop`/
 ; `percentile`, `string`/`int`/`exact`/`inexact`/`json`, plus the 4
 ; window-only names below). Which names are actually executable is
-; `ScryCore.Executor`'s own concern (`eval_aggregate/5`/`apply_cast/2`),
+; `Scry.Core.Executor`'s own concern (`eval_aggregate/5`/`apply_cast/2`),
 ; not the grammar's -- same split as `body_item_ep1`/`:variant`
 ; elsewhere in this file.
 ;
@@ -935,7 +935,7 @@ primary := literal | window_call | call_with_path | call | path | when_expr
 ; capture under the new name, while the real dispatch still only ever
 ; happens under the rule's own implicit name (`call_args`, not `args`)
 ; -- confirmed (again) via scratch grammar before committing to this
-; shape. `ScryCore.Actions`' own `call` handler reads it the same way
+; shape. `Scry.Core.Actions`' own `call` handler reads it the same way
 ; `list`'s own handler already reads `:literal_list` (`Map.has_key?/2`,
 ; absent -> `[]`), not a value it happens to call `args`.
 call := name:IDENT LPAREN call_args? RPAREN
@@ -946,7 +946,7 @@ call := name:IDENT LPAREN call_args? RPAREN
 ; ordinary dot-path afterward. Not gated to the name "json" specifically
 ; at the grammar level, the same "grammar stays permissive, execution
 ; rejects misuse" posture `DISTINCT` (`call_arg`, above) already has --
-; `ScryCore.Executor`'s own `{:dot, ...}` resolution is what actually
+; `Scry.Core.Executor`'s own `{:dot, ...}` resolution is what actually
 ; requires the base value be map-shaped, whatever produced it. Reuses
 ; `path` directly for everything after the first `DOT` (confirmed
 ; empirically, scratch grammar, that ordered-choice backtracking falls
@@ -958,7 +958,7 @@ call_with_path := call:call DOT path:path
 ; is allowed syntactically as a prefix on *any* call argument here, not
 ; just `count`'s own single one, the same "grammar stays permissive,
 ; execution rejects misuse with a clear error" posture `call` itself
-; already has for an unknown function name (`ScryCore.Executor.
+; already has for an unknown function name (`Scry.Core.Executor.
 ; eval_aggregate/5`'s own comment). Reuses `KW_DISTINCT` directly -- the
 ; exact same token `distinct_clause` (`select`'s own header modifier)
 ; already reclassifies from `IDENT`, no new keyword needed. The
@@ -979,7 +979,7 @@ call_arg := distinct:KW_DISTINCT expr:expression | expression
 ; posture `DISTINCT`/`call_with_path` already have (a non-window
 ; function used with `OVER`, or a window-only function like
 ; `row_number` used *without* it, both raise a clear error at execution
-; time -- `ScryCore.Executor`'s own concern). No parens around
+; time -- `Scry.Core.Executor`'s own concern). No parens around
 ; `over_spec` itself -- lang_spec's own worked examples never show any
 ; (`row_number() OVER PARTITION BY department ORDER BY salary DESC`),
 ; unlike SQL's `OVER (...)`.
@@ -1019,7 +1019,7 @@ frame_clause := KW_ROWS KW_BETWEEN start:frame_bound KW_AND stop:frame_bound
 ; (`prec_or_foll:(KW_PRECEDING | KW_FOLLOWING)`, a named *token* choice
 ; group -- proven safe by `order_item`'s own `dir:(KW_DESC | KW_ASC)?`
 ; immediately above, the same shape) rather than 4 separate
-; alternatives, since `ScryCore.Actions` needs to know which of the two
+; alternatives, since `Scry.Core.Actions` needs to know which of the two
 ; matched either way and a token choice group doesn't have the
 ; capture-scrambling problem a *rule* choice group nested in a
 ; *repeated* group has (this file's own `additive_tail` comment) --
@@ -1067,10 +1067,10 @@ when_clause := KW_WHEN cond:predicate KW_THEN then_expr:expression
 ; alternatives follow).
 body_item := select | body_item_ep1 | spread | field_body_item
 
-; `{:spread, name}` (`ScryCore.Actions`' own handle_rule) is a
-; placeholder, not a real body-item shape -- `ScryCore.FragmentResolver`
+; `{:spread, name}` (`Scry.Core.Actions`' own handle_rule) is a
+; placeholder, not a real body-item shape -- `Scry.Core.FragmentResolver`
 ; replaces every one with the named FRAGMENT's own (already-resolved)
-; body-item list before `ScryCore.parse/1` ever returns, so it never
+; body-item list before `Scry.Core.parse/1` ever returns, so it never
 ; reaches `Query.body_item()`'s own public type. See `document`'s own
 ; comment above for why resolution can't happen locally, right here,
 ; the way every other body-item shape resolves itself.

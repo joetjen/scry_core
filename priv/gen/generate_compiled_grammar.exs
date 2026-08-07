@@ -1,4 +1,4 @@
-# Generator source for `lib/scry_core/grammar/compiled.ex` -- that file
+# Generator source for `lib/scry/core/grammar/compiled.ex` -- that file
 # is generated, checked in, and must never be hand-edited (see its own
 # banner). Run this script (`mix run priv/gen/generate_compiled_grammar.exs`)
 # after changing `priv/grammar.aether`, then re-run the test suite.
@@ -29,9 +29,9 @@
 # extra step; this one doesn't need it since there's nothing to merge
 # core with).
 
-{:ok, source} = File.read(ScryCore.Grammar.grammar_path())
+{:ok, source} = File.read(Scry.Core.Grammar.grammar_path())
 
-body = Ichor.generate(source, ScryCore.Grammar.grammar_path(), ScryCore.Actions)
+body = Ichor.generate(source, Scry.Core.Grammar.grammar_path(), Scry.Core.Actions)
 
 # `publicize/1`: every `defp` the codegen backend emits becomes `def` --
 # through `use Ichor` these come from macro expansion, which Elixir's
@@ -49,7 +49,7 @@ end
 
 text =
   quote do
-    defmodule ScryCore.Grammar.Compiled do
+    defmodule Scry.Core.Grammar.Compiled do
       @moduledoc false
       unquote(publicize.(body))
     end
@@ -67,7 +67,7 @@ banner = """
 # command above and the test suite instead.
 """
 
-out = Path.join(__DIR__, "../../lib/scry_core/grammar/compiled.ex") |> Path.expand()
+out = Path.join(__DIR__, "../../lib/scry/core/grammar/compiled.ex") |> Path.expand()
 File.mkdir_p!(Path.dirname(out))
 File.write!(out, banner <> text <> "\n")
 Mix.shell().info("* creating #{out}")

@@ -1,4 +1,4 @@
-defmodule ScryCore.MixProject do
+defmodule Scry.Core.MixProject do
   use Mix.Project
 
   @version "0.1.0"
@@ -21,7 +21,7 @@ defmodule ScryCore.MixProject do
       deps: deps(),
       description: description(),
       package: package(),
-      name: "ScryCore",
+      name: "Scry.Core",
       docs: docs(),
       aliases: aliases(),
       test_coverage: [tool: ExCoveralls],
@@ -31,7 +31,7 @@ defmodule ScryCore.MixProject do
       # a `runtime: false` dependency is deliberately excluded from
       # (it's not meant to be part of the running application), even
       # though it's still genuinely present and compiled in this
-      # (`:test`) env, and `ScryCore.Grammar`/`ScryCore.GrammarCompose`
+      # (`:test`) env, and `Scry.Core.Grammar`/`Scry.Core.GrammarCompose`
       # still reference its types (`Aether.Grammar.t/0`, ...) directly.
       dialyzer: [plt_add_apps: [:mix, :ichor]]
     ]
@@ -56,9 +56,9 @@ defmodule ScryCore.MixProject do
       # combinators.
       #
       # `ichor` was originally unscoped here (a real, non-`only:` dep):
-      # `ScryCore.Grammar`/`ScryCore.GrammarCompose` used to call Ichor's
+      # `Scry.Core.Grammar`/`Scry.Core.GrammarCompose` used to call Ichor's
       # "raw pipeline" (Aether.Parser + Grammar.Analysis + Grammar.VM)
-      # directly at runtime, on every `ScryCore.parse/1` call, making
+      # directly at runtime, on every `Scry.Core.parse/1` call, making
       # `ichor` a genuine compile-time requirement of scry_core's own
       # `lib/` -- confirmed empirically at the time: even with `ichor`
       # also declared directly in a downstream package's own deps, `mix
@@ -66,10 +66,10 @@ defmodule ScryCore.MixProject do
       # `Aether.Grammar`, because Mix does not propagate an `only:`-
       # scoped dependency transitively -- compiling scry_core as a
       # dependency only ever draws on scry_core's own declared
-      # dependency graph. Fixed: `ScryCore.parse/1` now runs queries
-      # through `ScryCore.Grammar.Compiled`, a checked-in, pre-generated
+      # dependency graph. Fixed: `Scry.Core.parse/1` now runs queries
+      # through `Scry.Core.Grammar.Compiled`, a checked-in, pre-generated
       # module (`priv/gen/generate_compiled_grammar.exs` is its
-      # generator, run by hand, never automatically -- see `ScryCore.
+      # generator, run by hand, never automatically -- see `Scry.Core.
       # Grammar`'s own moduledoc for why an automatic Mix compiler step
       # can't solve this, only a script that's never itself compiled as
       # part of anyone's `lib/` can). The generated module only calls
@@ -102,7 +102,7 @@ defmodule ScryCore.MixProject do
   # Fast/cheap checks first so a broken commit fails quickly; dialyzer
   # (slowest, especially its first PLT build) runs last.
   #
-  # No automated check here for `lib/scry_core/grammar/compiled.ex`
+  # No automated check here for `lib/scry/core/grammar/compiled.ex`
   # being stale relative to `priv/grammar.aether` -- tried a regenerate-
   # and-diff step first, but the codegen backend iterates `%Aether.
   # Grammar{}`'s own `tokens`/`rules` maps to emit functions, and Elixir
