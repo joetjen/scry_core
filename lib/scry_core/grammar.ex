@@ -46,6 +46,23 @@ defmodule ScryCore.Grammar do
   own root, not `scry_core`'s.
   """
 
+  # `Aether.Parser.parse/2`/`Grammar.Analysis.run/1` (below) are
+  # genuinely undefined when this module compiles as a dependency of a
+  # package that never declares `ichor` itself (its own `only: [:dev,
+  # :test]` scoping in *this* package's `mix.exs` deliberately isn't
+  # propagated transitively -- see that file's own deps comment) --
+  # expected, not a bug: neither function is ever actually *called* by
+  # such a consumer (`ScryCore.parse/1`'s own production path doesn't
+  # reach either one anymore either way). Without this, every such
+  # consumer's own `mix compile`/any Mix task that triggers one prints
+  # two scary-looking "is undefined" warnings for something that's
+  # never a real problem -- `@compile {:no_warn_undefined, ...}` is
+  # Elixir's own documented mechanism for exactly this (`Module`'s own
+  # moduledoc; the standard library uses it the same way, e.g. `Regex`'s
+  # own `{:re, :import, 1}`), not a suppression hack.
+  @compile {:no_warn_undefined, {Aether.Parser, :parse, 2}}
+  @compile {:no_warn_undefined, {Grammar.Analysis, :run, 1}}
+
   # Registered (not a bare `@sobelow_skip [...]`) so the Elixir
   # compiler treats it as a real, persisted attribute rather than
   # flagging it "set but never used" -- which `mix compile

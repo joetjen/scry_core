@@ -11,7 +11,27 @@ defmodule ScryCore.Grammar.KeywordRefiner do
   downcased text instead of the raw one.
   """
 
-  @behaviour Ichor.TokenRefiner
+  # `Ichor.TokenRefiner` is genuinely undefined when this module
+  # compiles as a dependency of a package that never declares `ichor`
+  # itself -- expected, not a bug, same root cause `ScryCore.Grammar`'s
+  # own `@compile {:no_warn_undefined, ...}` comment documents.
+  # `no_warn_undefined` doesn't reach a `@behaviour` declaration itself
+  # (a different compiler check than the plain-remote-call one it
+  # covers) or the `@impl true` below, which has nothing to verify
+  # against once the behaviour isn't declared -- `Code.ensure_loaded?/1`
+  # (evaluated at compile time, an established Elixir idiom for exactly
+  # this "declare a behaviour only when its module is actually
+  # available" case) is the real fix: declares the behaviour (and
+  # `@impl`'s own check below) only when `ichor`'s genuinely present,
+  # silent no-op otherwise. `refine/4`'s own runtime dispatch (`Grammar.
+  # Lexer.apply_refiner/3` calling it directly by name) is entirely
+  # unaffected either way -- `@behaviour`/`@impl` are compile-time-only,
+  # never consulted at runtime.
+  @ichor_token_refiner_loaded? Code.ensure_loaded?(Ichor.TokenRefiner)
+
+  if @ichor_token_refiner_loaded? do
+    @behaviour Ichor.TokenRefiner
+  end
 
   @keywords %{
     "select" => :KW_SELECT,
@@ -55,7 +75,10 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "type" => :KW_TYPE
   }
 
-  @impl true
+  if @ichor_token_refiner_loaded? do
+    @impl true
+  end
+
   def refine(raw_name, raw_text, _pos, _preceding) do
     # Unlike @keywords' own table-lookup path (which can short-circuit to
     # a bare `nil` capture meaning "no override"), Grammar.Lexer always
