@@ -238,5 +238,37 @@ defmodule ScryCore.Executor.LazyExecutionTest do
       assert Enum.sort(Cursor.to_list(cursor)) ==
                Enum.sort([%{"customer_id" => 1, "p" => 50}, %{"customer_id" => 3, "p" => 20}])
     end
+
+    test "a window function layered on a streaming-capable GROUP BY still streams the source scan" do
+      # `run_grouped_with_windows/7` reuses `streaming_aggregate_plan/1`
+      # against the window-stripped select before ever falling back to
+      # the eager path -- this is the source-scan step-counted proof
+      # that a window function doesn't silently force that fallback.
+      counter = :counters.new(1, [])
+      conn = {%{["orders"] => @orders}, counter}
+
+      query = %Query{
+        source: ["orders"],
+        group_bys: [["customer_id"]],
+        select: [
+          {:field, ["customer_id"]},
+          {:computed, "total", {:call, "sum", [{:field, ["total"]}]}},
+          {:computed, "rank", {:window, {:call, "row_number", []}, [], [{["total"], :desc}], nil}}
+        ]
+      }
+
+      assert {:ok, cursor} = Executor.run(query, CountingEngine, conn)
+
+      assert Enum.sort(Cursor.to_list(cursor)) ==
+               Enum.sort([
+                 %{"customer_id" => 1, "total" => 125, "rank" => 1},
+                 %{"customer_id" => 3, "total" => 20, "rank" => 2}
+               ])
+
+      # 3 source rows total -- every one pulled exactly once, none of
+      # them re-fetched by the (small, group-count-sized) window pass
+      # that runs afterward.
+      assert :counters.get(counter, 1) == 3
+    end
   end
 end

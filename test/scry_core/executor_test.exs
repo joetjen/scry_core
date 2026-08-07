@@ -2233,22 +2233,29 @@ defmodule ScryCore.ExecutorTest do
       assert length(rows) == length(@employees)
     end
 
-    test "combining a real GROUP BY with a window function raises a clear error" do
+    test "combining a real GROUP BY with a window function executes -- the window runs over the grouped output rows, not the raw source rows" do
       query = %Query{
         source: ["employees"],
         group_bys: [["department"]],
         select: [
           {:field, ["department"]},
-          {:computed, "n", {:window, {:call, "row_number", []}, [["department"]], [], nil}}
+          {:computed, "total", {:call, "sum", [{:field, ["salary"]}]}},
+          {:computed, "rank", {:window, {:call, "row_number", []}, [], [{["total"], :desc}], nil}}
         ]
       }
 
-      assert_raise ArgumentError, ~r/GROUP BY.*window function.*isn.t supported yet/, fn ->
-        run(query)
-      end
+      assert {:ok, rows} = run(query)
+
+      # eng: 100+120+120=340, sales: 90+110=200 -- eng ranks first by its
+      # own already-aggregated total, not by anything from a raw row.
+      assert Enum.sort(rows) ==
+               Enum.sort([
+                 %{"department" => "eng", "total" => 340, "rank" => 1},
+                 %{"department" => "sales", "total" => 200, "rank" => 2}
+               ])
     end
 
-    test "combining an ordinary (non-windowed) aggregate call with a window function also raises" do
+    test "combining a flat (ungrouped) aggregate with a window function executes -- the window runs over the single flat-aggregate row" do
       query = %Query{
         source: ["employees"],
         select: [
@@ -2257,7 +2264,105 @@ defmodule ScryCore.ExecutorTest do
         ]
       }
 
-      assert_raise ArgumentError, ~r/GROUP BY.*window function.*isn.t supported yet/, fn ->
+      assert {:ok, [row]} = run(query)
+      assert row == %{"total" => 540, "n" => 1}
+    end
+
+    test "HAVING filters groups before the window function ever sees them, not after" do
+      query = %Query{
+        source: ["employees"],
+        group_bys: [["department"]],
+        havings: [{:cmp, :gt, {:call, "sum", [{:field, ["salary"]}]}, 300}],
+        select: [
+          {:field, ["department"]},
+          {:computed, "total", {:call, "sum", [{:field, ["salary"]}]}},
+          {:computed, "rn", {:window, {:call, "row_number", []}, [], [], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      # Only "eng" (340 > 300) survives HAVING -- "sales" (200) never
+      # reaches the window pass at all, so its absence can't be mistaken
+      # for a window-side filter.
+      assert rows == [%{"department" => "eng", "total" => 340, "rn" => 1}]
+    end
+
+    test "an aggregate-as-window function resolves its own argument against the grouped output's own alias, not the original per-row field" do
+      query = %Query{
+        source: ["employees"],
+        group_bys: [["department"]],
+        select: [
+          {:field, ["department"]},
+          {:computed, "total", {:call, "sum", [{:field, ["salary"]}]}},
+          {:computed, "running",
+           {:window, {:call, "sum", [{:field, ["total"]}]}, [], [{["department"], :asc}],
+            {:unbounded_preceding, :current_row}}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      # "eng" < "sales" lexically: eng (340) first, then sales (200) --
+      # `sum(total)` here means "running sum of the *group's own* total
+      # column," not the original per-row `salary`.
+      assert Enum.into(rows, %{}, &{&1["department"], &1["running"]}) == %{
+               "eng" => 340,
+               "sales" => 540
+             }
+    end
+
+    test "streaming-capable aggregates combined with a window function still produce the correct result" do
+      # sum/count/avg/min/max (this query's own "total") are all
+      # streaming-capable (streaming_aggregate_plan/1) -- confirms the
+      # window pass composes correctly with either the streaming or the
+      # eager grouped-aggregation path, not just the eager one.
+      query = %Query{
+        source: ["employees"],
+        group_bys: [["department"]],
+        select: [
+          {:field, ["department"]},
+          {:computed, "total", {:call, "sum", [{:field, ["salary"]}]}},
+          {:computed, "rank", {:window, {:call, "row_number", []}, [], [{["total"], :desc}], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.sort(rows) ==
+               Enum.sort([
+                 %{"department" => "eng", "total" => 340, "rank" => 1},
+                 %{"department" => "sales", "total" => 200, "rank" => 2}
+               ])
+    end
+
+    test "combining ROLLUP with a window function still raises a clear error -- that combination remains out of scope" do
+      query = %Query{
+        source: ["employees"],
+        group_bys: [["department"]],
+        group_mode: :rollup,
+        select: [
+          {:field, ["department"]},
+          {:computed, "n", {:window, {:call, "row_number", []}, [], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/ROLLUP\/CUBE.*window function.*isn.t supported yet/, fn ->
+        run(query)
+      end
+    end
+
+    test "combining CUBE with a window function still raises a clear error -- that combination remains out of scope" do
+      query = %Query{
+        source: ["employees"],
+        group_bys: [["department"]],
+        group_mode: :cube,
+        select: [
+          {:field, ["department"]},
+          {:computed, "n", {:window, {:call, "row_number", []}, [], [], nil}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/ROLLUP\/CUBE.*window function.*isn.t supported yet/, fn ->
         run(query)
       end
     end

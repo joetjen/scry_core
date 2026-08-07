@@ -486,10 +486,24 @@ defmodule ScryCore.Executor do
     {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
 
     cond do
-      windows != [] and aggregate_query?(query) ->
+      windows != [] and aggregate_query?(query) and query.group_mode != :plain ->
         raise ArgumentError,
-              "combining GROUP BY/an aggregate query with a window function in the same " <>
-                "SELECT isn't supported yet"
+              "combining ROLLUP/CUBE with a window function in the same SELECT isn't " <>
+                "supported yet"
+
+      windows != [] and aggregate_query?(query) ->
+        with {:ok, rows} <-
+               run_grouped_with_windows(
+                 query,
+                 own_name,
+                 scope,
+                 params,
+                 with_bindings,
+                 engine_module,
+                 conn
+               ) do
+          {:ok, Cursor.new(rows)}
+        end
 
       aggregate_query?(query) and query.group_mode == :plain ->
         case streaming_aggregate_plan(query) do
@@ -875,6 +889,29 @@ defmodule ScryCore.Executor do
   # (automatic on any exception), this is a plain recursive pull loop, so
   # cleanup has to be explicit here.
   defp run_grouped_streaming(query, plan, scope, params, with_bindings, engine_module, conn) do
+    with {:ok, rows} <-
+           grouped_base_rows_streaming(
+             query,
+             plan,
+             scope,
+             params,
+             with_bindings,
+             engine_module,
+             conn
+           ) do
+      {:ok,
+       rows
+       |> sort_rows(query.order_bys, [])
+       |> maybe_dedupe(query.distinct)
+       |> paginate(query.limit, query.offset)}
+    end
+  end
+
+  # The `HAVING`-filtered, finalized group rows -- before `ORDER BY`/
+  # `DISTINCT`/`LIMIT`+`OFFSET` -- same "factored out for `run_grouped_
+  # with_windows/6` to reuse" reasoning `grouped_base_rows/6` above has,
+  # for the streaming-aggregation path specifically.
+  defp grouped_base_rows_streaming(query, plan, scope, params, with_bindings, engine_module, conn) do
     with {:ok, source_cursor} <-
            fetch_rows(query, scope, params, with_bindings, engine_module, conn),
          {:ok, groups, order} <-
@@ -886,11 +923,7 @@ defmodule ScryCore.Executor do
           finalize_grouped_row(query, group_state, scope, params)
         end
 
-      {:ok,
-       rows
-       |> sort_rows(query.order_bys, [])
-       |> maybe_dedupe(query.distinct)
-       |> paginate(query.limit, query.offset)}
+      {:ok, rows}
     end
   end
 
@@ -1138,6 +1171,27 @@ defmodule ScryCore.Executor do
   # already relies on), which is exactly right: a projected/grouped row
   # has no ancestor scope chain of its own to speak of.
   defp run_grouped(query, filtered, own_name, scope, params, engine_module, conn) do
+    with {:ok, projected} <-
+           grouped_base_rows(query, filtered, own_name, scope, params, engine_module, conn) do
+      {:ok,
+       projected
+       |> sort_rows(query.order_bys, [])
+       |> maybe_dedupe(query.distinct)
+       |> paginate(query.limit, query.offset)}
+    end
+  end
+
+  # The HAVING-filtered, projected group rows -- one map per group,
+  # keyed by each `select` item's own alias -- *before* `ORDER BY`/
+  # `DISTINCT`/`LIMIT`+`OFFSET` are applied. Factored out of `run_
+  # grouped/6` above so `run_grouped_with_windows/6` (below) can reuse
+  # the exact same grouping/`HAVING`/projection logic and apply window
+  # functions to these rows *before* that trailing sort/dedupe/paginate
+  # step runs -- a window function's own `PARTITION BY`/`ORDER BY`/frame
+  # need the *whole*, unpaginated group-row set to make sense of, the
+  # same reason `run_plain/8` computes window values against `filtered`
+  # rather than the final `sorted`/paginated rows.
+  defp grouped_base_rows(query, filtered, own_name, scope, params, engine_module, conn) do
     grouped =
       query.group_bys
       |> group_levels(query.group_mode)
@@ -1147,14 +1201,119 @@ defmodule ScryCore.Executor do
         |> Enum.map(&{active_fields, &1})
       end)
 
-    with {:ok, projected} <-
-           project_groups(query, grouped, own_name, scope, params, engine_module, conn) do
+    project_groups(query, grouped, own_name, scope, params, engine_module, conn)
+  end
+
+  # `select`'s own window-containing items (lang_spec.md §5.5/§5.8)
+  # combined with a real `GROUP BY`/aggregate query in the same
+  # `select` -- real SQL applies a window function *after* `GROUP BY`/
+  # `HAVING` collapse the source rows into one row per group, over
+  # that already-grouped/aggregated result set, not the original
+  # per-source rows; this mirrors that. `query.group_mode == :plain`
+  # is guaranteed by `run/6`'s own dispatch above (`ROLLUP`/`CUBE`
+  # combined with a window function still raises there, unchanged) --
+  # multiple simultaneous per-level grouping *and* per-level window
+  # computation is real, additional complexity deliberately left out
+  # of this increment's own scope.
+  #
+  # `collect_and_rewrite_window_calls/1` walks every `select` item, not
+  # just the ones containing a window -- a plain `{:field, path}` item,
+  # or a `{:computed, alias, expr}` item with no window anywhere inside
+  # `expr`, comes back byte-identical to how it went in (confirmed by
+  # construction: `rewrite_body_item/2`'s own fallback clause returns
+  # its argument unchanged, and every recursive `rewrite_expr/2` clause
+  # reconstructs an equal term when nothing inside actually changed).
+  # That structural equality is exactly how `plain_select`/`window_
+  # select` below are told apart -- no separate "does this item contain
+  # a window" walk duplicated here.
+  #
+  # `plain_select` drives an ordinary `GROUP BY`/aggregate pass (reusing
+  # `grouped_base_rows/7`/`grouped_base_rows_streaming/7` verbatim,
+  # streaming when `streaming_aggregate_plan/1` allows it, exactly the
+  # same choice `run/6` already makes for a windowless aggregate query)
+  # to produce one output row per group, keyed by each plain item's own
+  # alias -- a window's own aggregate-as-window call (`sum(total) OVER
+  # (...)`, say) is never part of this pass, so it can never accidentally
+  # feed a `HAVING`/grouping decision meant only for real, per-group
+  # aggregates. `augment_with_window_values/4` then treats those base
+  # rows exactly the way `run_plain/8` already treats raw filtered rows
+  # -- an ordinary list of flat maps to partition/sort/frame -- so a
+  # window's own `PARTITION BY`/`ORDER BY`/aggregate-as-window `args`
+  # correctly resolve against the *group's own output columns* (real SQL
+  # semantics: you can `PARTITION BY`/`ORDER BY` a `GROUP BY` key or a
+  # `SELECT`-list alias, not an original per-source-row field that no
+  # longer exists once grouping has collapsed multiple rows into one).
+  defp run_grouped_with_windows(
+         query,
+         own_name,
+         scope,
+         params,
+         with_bindings,
+         engine_module,
+         conn
+       ) do
+    {windows, rewritten_select} = collect_and_rewrite_window_calls(query.select)
+
+    {plain_select, window_select} =
+      query.select
+      |> Enum.zip(rewritten_select)
+      |> Enum.split_with(fn {original, rewritten} -> original == rewritten end)
+
+    plain_select = Enum.map(plain_select, &elem(&1, 1))
+    window_select = Enum.map(window_select, &elem(&1, 1))
+    base_query = %{query | select: plain_select}
+
+    base_result =
+      case streaming_aggregate_plan(base_query) do
+        {:ok, plan} ->
+          grouped_base_rows_streaming(
+            base_query,
+            plan,
+            scope,
+            params,
+            with_bindings,
+            engine_module,
+            conn
+          )
+
+        :not_streamable ->
+          with {:ok, filtered} <-
+                 fetch_and_filter(query, scope, params, with_bindings, engine_module, conn) do
+            grouped_base_rows(base_query, filtered, own_name, scope, params, engine_module, conn)
+          end
+      end
+
+    with {:ok, base_rows} <- base_result do
+      final_rows =
+        base_rows
+        |> augment_with_window_values(windows, [], params)
+        |> Enum.map(&finalize_windowed_row(&1, window_select, windows, params))
+
       {:ok,
-       projected
+       final_rows
        |> sort_rows(query.order_bys, [])
        |> maybe_dedupe(query.distinct)
        |> paginate(query.limit, query.offset)}
     end
+  end
+
+  # Resolves each window item's own (rewritten) expr against `row`
+  # (already carrying every plain item's own value, under its real
+  # alias, *plus* each window's own precomputed value under its
+  # synthetic key -- `augment_with_window_values/4`'s own contract),
+  # then drops the synthetic keys before returning -- the same "rewrite
+  # the AST, augment the rows, project, then the synthetic keys were
+  # only ever an implementation detail" posture `run_plain/8` already
+  # has, just with the projection step split from the augmentation step
+  # here since the plain items were already projected by `grouped_base_
+  # rows/7`/`grouped_base_rows_streaming/7` before augmentation ever ran.
+  defp finalize_windowed_row(row, window_select, windows, params) do
+    with_window_values =
+      Enum.reduce(window_select, row, fn {:computed, alias_name, expr}, acc ->
+        Map.put(acc, alias_name, resolve_rhs(expr, acc, [], params))
+      end)
+
+    Map.drop(with_window_values, Enum.map(0..(length(windows) - 1)//1, &window_key/1))
   end
 
   # The list of *grouping levels* `query.group_mode` needs -- each an
@@ -2455,14 +2614,15 @@ defmodule ScryCore.Executor do
   # IDENT | ESCAPED_IDENT` are both `[[:alpha:]_][[:alnum:]_]*` shaped,
   # so a real field name can never start with a digit.
   #
-  # Deliberately scoped to an *ungrouped* query only -- `run/6` above
-  # raises a clear error if a query both has a window function anywhere
-  # in `select` and would otherwise route to `run_grouped/6` (a real
-  # `GROUP BY`, or an ordinary, non-windowed aggregate call elsewhere in
-  # the same `select`). Real SQL supports a window function over an
-  # already-grouped result; this increment doesn't yet -- a documented,
-  # deliberate gap, not a silent mishandling. Only reachable from
-  # `select` at the grammar level to begin with (`predicate_lhs`/
+  # Combined with a real `GROUP BY`/aggregate query (`query.group_mode
+  # == :plain` only -- `ROLLUP`/`CUBE` combined with a window function
+  # still raises a clear "not supported yet" from `run/6`, a deliberate
+  # gap, not a silent mishandling), `run_grouped_with_windows/7` (below
+  # `run_grouped/6`) reuses this exact same collect/rewrite/augment
+  # machinery a second time, against the already-grouped/aggregated
+  # *output* rows rather than raw filtered ones -- its own moduledoc
+  # comment has the full reasoning. Only reachable from `select` at the
+  # grammar level to begin with (`predicate_lhs`/
   # `in_lhs`, and `comparison`'s own `right`/`right_field`/`items`/
   # `items_expr` alternatives, never reference `window_call`/`primary`
   # directly), so a window function can never actually reach `where`/

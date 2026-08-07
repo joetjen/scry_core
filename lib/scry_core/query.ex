@@ -216,9 +216,12 @@ defmodule ScryCore.Query do
   window function's value depends on the *whole* filtered row set, which
   none of those positions have (real SQL has the identical restriction).
   Combining a real `GROUP BY`/aggregate query with a window function in
-  the same `select` is deliberately not supported yet either (a real,
-  documented gap, not silently mishandled) -- `ScryCore.Executor`'s own
-  moduledoc has the reasoning. `frame_bound()` (below) mirrors
+  the same `select` (`group_mode: :plain` only -- `ROLLUP`/`CUBE`
+  combined with a window function is still a real, documented "not
+  supported yet" gap) applies the window function *after* `GROUP BY`/
+  `HAVING`, over the already-grouped/aggregated output rows -- real SQL
+  semantics, and `ScryCore.Executor.run_grouped_with_windows/7`'s own
+  moduledoc has the full reasoning. `frame_bound()` (below) mirrors
   lang_spec's own 5-shape enumeration exactly (`UNBOUNDED PRECEDING`,
   `<n> PRECEDING`, `CURRENT ROW`, `<n> FOLLOWING`, `UNBOUNDED
   FOLLOWING`) -- a plain tagged value, not a struct, matching this
