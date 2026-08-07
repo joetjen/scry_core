@@ -115,4 +115,29 @@ defmodule ScryCore.Cursor do
       :done -> Enum.reverse(acc)
     end
   end
+
+  @doc """
+  Stops pulling from the underlying enumerable *before* it's exhausted --
+  the real reason this exists rather than just letting a cursor go
+  unreferenced: for a `Stream.resource/3`-backed source (a real database
+  connection, an open file, ...), simply abandoning the continuation never
+  runs its own `after_fun` (confirmed directly -- a `Stream.resource/3`
+  with a real `after_fun` flipping a tracked flag, abandoned mid-stream
+  without calling this function, never flips it), a genuine resource leak
+  for anything that stops early (`ScryCore.Executor`'s own `LIMIT`-bound
+  streaming path, once it has enough rows, is exactly this case). Resumes
+  the continuation with `{:halt, nil}` instead of `{:cont, nil}` --
+  `Enumerable.reduce/3`'s own documented, guaranteed way an `after_fun`
+  runs on early termination, the same signal `Enum.take/2`/`Enum.find/2`
+  and friends already send when they stop consuming a `Stream` early.
+  Safe to call on an already-exhausted (`:done`) cursor -- a no-op, not
+  an error, since there's nothing left to halt.
+  """
+  @spec close(t()) :: :ok
+  def close(%__MODULE__{continuation: :done}), do: :ok
+
+  def close(%__MODULE__{continuation: cont}) do
+    cont.({:halt, nil})
+    :ok
+  end
 end

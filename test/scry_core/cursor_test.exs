@@ -4,8 +4,11 @@ defmodule ScryCore.CursorTest do
   beyond the requested element (a side-effecting generator proves it,
   not just the types lining up), `take/2` terminates against a real
   infinite stream, `skip/1,2` and `to_list/1` compose on top of
-  `next/1` correctly, and exhaustion (`:done`) behaves the same way
-  regardless of what kind of `Enumerable.t()` was wrapped.
+  `next/1` correctly, exhaustion (`:done`) behaves the same way
+  regardless of what kind of `Enumerable.t()` was wrapped, and
+  `close/1` genuinely triggers a `Stream.resource/3`-backed source's
+  own cleanup on early termination (proven against a real `after_fun`,
+  not just that the call doesn't crash).
   """
 
   use ExUnit.Case, async: true
@@ -112,5 +115,51 @@ defmodule ScryCore.CursorTest do
     assert Cursor.new([1, 2, 3]) |> Cursor.to_list() == [1, 2, 3]
     assert Cursor.new(1..3) |> Cursor.to_list() == [1, 2, 3]
     assert Cursor.new(Stream.map([1, 2, 3], & &1)) |> Cursor.to_list() == [1, 2, 3]
+  end
+
+  test "close/1 triggers a Stream.resource/3-backed source's own after_fun, even mid-stream" do
+    {:ok, agent} = Agent.start_link(fn -> false end)
+
+    stream =
+      Stream.resource(
+        fn -> :the_resource end,
+        fn
+          :the_resource -> {[1, 2, 3, 4, 5], :exhausted}
+          :exhausted -> {:halt, :exhausted}
+        end,
+        fn _state -> Agent.update(agent, fn _ -> true end) end
+      )
+
+    cursor = Cursor.new(stream)
+    assert {:ok, 1, cursor} = Cursor.next(cursor)
+    refute Agent.get(agent, & &1)
+
+    assert :ok = Cursor.close(cursor)
+    assert Agent.get(agent, & &1)
+  end
+
+  test "merely abandoning a cursor (no close/1) does NOT run after_fun -- the exact leak close/1 exists to prevent" do
+    {:ok, agent} = Agent.start_link(fn -> false end)
+
+    stream =
+      Stream.resource(
+        fn -> :the_resource end,
+        fn
+          :the_resource -> {[1, 2, 3], :exhausted}
+          :exhausted -> {:halt, :exhausted}
+        end,
+        fn _state -> Agent.update(agent, fn _ -> true end) end
+      )
+
+    cursor = Cursor.new(stream)
+    assert {:ok, 1, _cursor} = Cursor.next(cursor)
+    # No close/1 call -- confirms the leak close/1 is meant to fix is real.
+    refute Agent.get(agent, & &1)
+  end
+
+  test "close/1 on an already-exhausted cursor is a safe no-op" do
+    cursor = Cursor.new([])
+    :done = Cursor.next(cursor)
+    assert :ok = Cursor.close(cursor)
   end
 end

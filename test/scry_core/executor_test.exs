@@ -1,7 +1,8 @@
 defmodule ScryCore.ExecutorTest do
   use ExUnit.Case, async: true
 
-  alias ScryCore.{CombinedQuery, Executor, Query, Rational}
+  alias ScryCore.{CombinedQuery, Cursor, Executor, Query, Rational}
+  alias ScryCore.Executor.QueryError
 
   # A minimal fixture, not the real static engine (that's
   # scry_test_engine_core, a separate package -- scry_core can't
@@ -192,9 +193,25 @@ defmodule ScryCore.ExecutorTest do
     ["sales"] => @sales
   }
 
-  defp run(query), do: Executor.run(query, FakeEngine, @data)
-  defp run(query, params), do: Executor.run(query, FakeEngine, @data, params)
-  defp run_via_stream(query), do: Executor.run(query, StreamEngine, @data)
+  # `Executor.run/3,4` returns `{:ok, Cursor.t()}` now, not `{:ok, [row()]}`
+  # (`ScryCore.Cursor`'s own moduledoc has the full reasoning) --
+  # `materialize/1` drains it back to this suite's own long-established
+  # `{:ok, [row()]} | {:error, reason}` shape, converting a lazily-raised
+  # `QueryError` (a failure only discoverable mid-pull -- an unsupported
+  # body item, today's only case) back into the classic tuple, so every
+  # existing test calling `run/1,2`/`run_via_stream/1` below needs zero
+  # changes of its own.
+  defp run(query), do: query |> Executor.run(FakeEngine, @data) |> materialize()
+  defp run(query, params), do: query |> Executor.run(FakeEngine, @data, params) |> materialize()
+  defp run_via_stream(query), do: query |> Executor.run(StreamEngine, @data) |> materialize()
+
+  defp materialize({:error, _} = err), do: err
+
+  defp materialize({:ok, cursor}) do
+    {:ok, Cursor.to_list(cursor)}
+  rescue
+    e in QueryError -> {:error, e.reason}
+  end
 
   test "no wheres, projects the selected fields" do
     query = %Query{source: ["users"], select: [{:field, ["name"]}]}
@@ -1722,7 +1739,9 @@ defmodule ScryCore.ExecutorTest do
       }
 
       data = Map.put(@data, ["measurements"], grouped)
-      assert {:ok, [%{"grp" => "a", "sd" => 1.0}]} = Executor.run(query, FakeEngine, data)
+
+      assert {:ok, [%{"grp" => "a", "sd" => 1.0}]} =
+               Executor.run(query, FakeEngine, data) |> materialize()
     end
 
     test "distinct on a new aggregate raises the same clear error sum/avg/min/max already do" do
@@ -1777,7 +1796,7 @@ defmodule ScryCore.ExecutorTest do
         ]
       }
 
-      assert {:ok, [%{"p50" => 4}]} = Executor.run(query, FakeEngine, data)
+      assert {:ok, [%{"p50" => 4}]} = Executor.run(query, FakeEngine, data) |> materialize()
     end
 
     test "percentile hard-errors on a nil value in its value argument" do
@@ -1900,7 +1919,7 @@ defmodule ScryCore.ExecutorTest do
       }
 
       assert_raise ArgumentError, ~r/could not parse this value as JSON/, fn ->
-        Executor.run(query, FakeEngine, bad_data)
+        Executor.run(query, FakeEngine, bad_data) |> elem(1) |> Cursor.to_list()
       end
     end
 
@@ -1961,7 +1980,8 @@ defmodule ScryCore.ExecutorTest do
           %{"name" => "Bob", "status" => "pending", "status_allowlist" => ["active"]}
         ])
 
-      assert {:ok, [%{"name" => "Alice"}]} = Executor.run(query, FakeEngine, data)
+      assert {:ok, [%{"name" => "Alice"}]} =
+               Executor.run(query, FakeEngine, data) |> materialize()
     end
 
     test "a call narrowed by a dot-path as the computed list -- json(<field>).path composes with in" do
@@ -1985,7 +2005,7 @@ defmodule ScryCore.ExecutorTest do
         select: [{:field, ["id"]}]
       }
 
-      assert {:ok, [%{"id" => 1}]} = Executor.run(query, FakeEngine, data)
+      assert {:ok, [%{"id" => 1}]} = Executor.run(query, FakeEngine, data) |> materialize()
     end
 
     test "a resolved value that isn't a list raises a clear error, not Enum.member?'s own crash" do
@@ -2302,7 +2322,7 @@ defmodule ScryCore.ExecutorTest do
         ]
       }
 
-      assert {:ok, [%{"top" => nil}]} = Executor.run(query, FakeEngine, data)
+      assert {:ok, [%{"top" => nil}]} = Executor.run(query, FakeEngine, data) |> materialize()
     end
 
     test "an aggregate-as-window-function over a nil value still hard-errors, reusing eval_aggregate's own message" do
@@ -2318,7 +2338,7 @@ defmodule ScryCore.ExecutorTest do
       }
 
       assert_raise ArgumentError, ~r/encountered a nil value/, fn ->
-        Executor.run(query, FakeEngine, data)
+        Executor.run(query, FakeEngine, data) |> elem(1) |> Cursor.to_list()
       end
     end
 

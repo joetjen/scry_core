@@ -36,6 +36,18 @@ defmodule ScryCore.QueryTest do
     %{conn: %{["users"] => @users}}
   end
 
+  # `ScryCore.Executor.run/3,4` returns `{:ok, ScryCore.Cursor.t()}` now,
+  # not `{:ok, [row()]}` -- drains it back to this suite's own
+  # long-established shape, converting a lazily-raised `ScryCore.
+  # Executor.QueryError` back into the classic `{:error, reason}` tuple.
+  defp materialize({:error, _} = err), do: err
+
+  defp materialize({:ok, cursor}) do
+    {:ok, ScryCore.Cursor.to_list(cursor)}
+  rescue
+    e in ScryCore.Executor.QueryError -> {:error, e.reason}
+  end
+
   test "new/1 starts an otherwise-empty query against source" do
     query = Query.new(["users"])
     assert query.source == ["users"]
@@ -55,7 +67,7 @@ defmodule ScryCore.QueryTest do
     assert {:ok, parsed} = ScryCore.parse(~s(SELECT users WHERE age > 18 { name }))
     assert built.wheres == parsed.wheres
 
-    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
     assert rows == [%{"name" => "Alice"}, %{"name" => "Carol"}]
   end
 
@@ -66,7 +78,7 @@ defmodule ScryCore.QueryTest do
       |> Query.where({:cmp, :eq, ["status"], "active"})
       |> Query.select([{:field, ["name"]}])
 
-    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
     assert rows == [%{"name" => "Alice"}]
   end
 
@@ -80,7 +92,7 @@ defmodule ScryCore.QueryTest do
         {:computed, "total", {:call, "count", [{:field, ["name"]}]}}
       ])
 
-    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
     assert rows == [%{"status" => "active", "total" => 2}]
   end
 
@@ -99,7 +111,7 @@ defmodule ScryCore.QueryTest do
       |> Query.offset(1)
       |> Query.select([{:field, ["name"]}])
 
-    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
     assert rows == [%{"name" => "Alice"}]
   end
 
@@ -108,7 +120,7 @@ defmodule ScryCore.QueryTest do
     assert {:ok, parsed} = ScryCore.parse(~s(SELECT users { name, age }))
     assert built.select == parsed.select
 
-    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
 
     assert rows == [
              %{"name" => "Alice", "age" => 30},
@@ -128,7 +140,7 @@ defmodule ScryCore.QueryTest do
       Query.new(["users"]) |> Query.group_by_rollup([["status"]]) |> Query.select(select)
 
     assert rollup.group_mode == :rollup
-    assert {:ok, rollup_rows} = ScryCore.Executor.run(rollup, StaticEngine, conn)
+    assert {:ok, rollup_rows} = ScryCore.Executor.run(rollup, StaticEngine, conn) |> materialize()
 
     assert Enum.sort(rollup_rows) ==
              Enum.sort([
@@ -140,7 +152,7 @@ defmodule ScryCore.QueryTest do
     cube = Query.new(["users"]) |> Query.group_by_cube([["status"]]) |> Query.select(select)
 
     assert cube.group_mode == :cube
-    assert {:ok, cube_rows} = ScryCore.Executor.run(cube, StaticEngine, conn)
+    assert {:ok, cube_rows} = ScryCore.Executor.run(cube, StaticEngine, conn) |> materialize()
     # A single-column CUBE has the same two grouping levels ROLLUP does
     # (the full column, then the grand total) -- CUBE's own extra
     # subsets only appear starting at two columns.
@@ -160,8 +172,8 @@ defmodule ScryCore.QueryTest do
     assert {:ok, parsed} =
              ScryCore.parse(~s(SELECT users WHERE age > 18 ORDER BY name LIMIT 2 { name }))
 
-    assert {:ok, built_rows} = ScryCore.Executor.run(built, StaticEngine, conn)
-    assert {:ok, parsed_rows} = ScryCore.Executor.run(parsed, StaticEngine, conn)
+    assert {:ok, built_rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
+    assert {:ok, parsed_rows} = ScryCore.Executor.run(parsed, StaticEngine, conn) |> materialize()
     assert built_rows == parsed_rows
   end
 end

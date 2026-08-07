@@ -314,6 +314,7 @@ defmodule ScryCore.Executor do
   """
 
   alias ScryCore.{CombinedQuery, Cursor, EngineBehaviour, Query, Rational}
+  alias ScryCore.Executor.QueryError
 
   @typedoc "One `{ancestor_source_name, ancestor_row}` per enclosing query, nearest first."
   @type scope :: [{String.t(), EngineBehaviour.row()}]
@@ -338,9 +339,28 @@ defmodule ScryCore.Executor do
   pipeline order, the correlation/`REQUIRED`/external-parameter/`WITH`/
   combinator semantics, and the full `GROUP BY`/`HAVING`/aggregate-
   function story.
+
+  Returns a `ScryCore.Cursor.t()`, not a materialized list -- pull from
+  it (`Cursor.next/1`/`take/2`/`to_list/1`) to actually get rows. A query
+  that's genuinely stream-eligible (no `GROUP BY`/aggregate, no window
+  function, no real `ORDER BY`, no `DISTINCT`) stays lazy all the way
+  from the underlying `EngineBehaviour.fetch/2` source to whatever pulls
+  from the returned cursor -- nothing in between materializes the whole
+  row set. Everything else (real sorting/deduping/windows, or an
+  aggregate this module can't stream incrementally -- `percentile`/
+  `stddev*`/`var*`, or `ROLLUP`/`CUBE`) still computes its own result
+  eagerly internally exactly as before, then wraps that finished list in
+  a cursor at the very end -- correct either way, genuinely lazy only
+  where it's actually achievable. A failure discoverable only mid-pull
+  (today: a kind's own unrecognized EP1(b)/(c)/(d) body-item construct
+  inside `select`) surfaces as a raised `ScryCore.Executor.QueryError`
+  when the caller pulls far enough to reach it, not as an `{:error, _}`
+  return from this function -- `ScryCore.Cursor`'s own moduledoc and
+  `QueryError`'s own moduledoc both have the fuller "why a raise, not a
+  tuple, for this one case" reasoning.
   """
   @spec run(Query.t() | CombinedQuery.t(), module(), term(), params()) ::
-          {:ok, [EngineBehaviour.row()]} | {:error, term()}
+          {:ok, Cursor.t()} | {:error, term()}
   def run(query_or_combined, engine_module, conn, params \\ %{}),
     do:
       run_any(
@@ -372,7 +392,7 @@ defmodule ScryCore.Executor do
           module(),
           term()
         ) ::
-          {:ok, [EngineBehaviour.row()]} | {:error, term()}
+          {:ok, Cursor.t()} | {:error, term()}
   defp run_any(%Query{} = query, scope, params, with_bindings, engine_module, conn),
     do: run(query, scope, params, with_bindings, engine_module, conn)
 
@@ -387,7 +407,12 @@ defmodule ScryCore.Executor do
   # moduledoc already documents elsewhere. `left`/`right` are each
   # `Query.t() | CombinedQuery.t()` (`CombinedQuery`'s own moduledoc),
   # so this recurses through `run_any/6` again for an arbitrarily deep
-  # chain, not just a single combinator.
+  # chain, not just a single combinator. `combine_rows/3` (`Enum.uniq`/
+  # `MapSet`-based set semantics) inherently needs both sides fully
+  # materialized -- `drain_result/1` does that, converting a lazily-
+  # raised `QueryError` from either side back into this module's own
+  # ordinary `{:error, reason}` tuple first, so a genuinely broken *side*
+  # of a combinator still surfaces the same way it always has.
   defp run_combined(
          %CombinedQuery{op: op, left: left, right: right},
          scope,
@@ -396,10 +421,32 @@ defmodule ScryCore.Executor do
          engine_module,
          conn
        ) do
-    with {:ok, left_rows} <- run_any(left, scope, params, with_bindings, engine_module, conn),
-         {:ok, right_rows} <- run_any(right, scope, params, with_bindings, engine_module, conn) do
-      {:ok, combine_rows(op, left_rows, right_rows)}
+    with {:ok, left_rows} <-
+           left |> run_any(scope, params, with_bindings, engine_module, conn) |> drain_result(),
+         {:ok, right_rows} <-
+           right |> run_any(scope, params, with_bindings, engine_module, conn) |> drain_result() do
+      {:ok, Cursor.new(combine_rows(op, left_rows, right_rows))}
     end
+  end
+
+  # Materializes a `Cursor` back into this module's own long-established
+  # `{:ok, [row()]} | {:error, reason}` tuple shape -- used at every
+  # *internal* boundary that needs a concrete result right away (a
+  # combinator's own two sides, above; a nested `SELECT`'s own embedded
+  # result, `project_item/8` below), converting a lazily-raised `Query
+  # Error` (the only way an error can surface once execution is
+  # genuinely lazy -- `QueryError`'s own moduledoc has the reasoning)
+  # back into a tuple, so every pre-existing internal caller built on
+  # that tuple contract (`REQUIRED`, `combine_rows/3`) needs zero further
+  # changes of its own.
+  @spec drain_result({:ok, Cursor.t()} | {:error, term()}) ::
+          {:ok, [EngineBehaviour.row()]} | {:error, term()}
+  defp drain_result({:error, _} = err), do: err
+
+  defp drain_result({:ok, cursor}) do
+    {:ok, Cursor.to_list(cursor)}
+  rescue
+    e in QueryError -> {:error, e.reason}
   end
 
   # `union`/`intersect`/`except` (not `_all`) dedupe their own *result*,
@@ -433,25 +480,84 @@ defmodule ScryCore.Executor do
   end
 
   @spec run(Query.t(), scope(), params(), %{String.t() => Query.t()}, module(), term()) ::
-          {:ok, [EngineBehaviour.row()]} | {:error, term()}
+          {:ok, Cursor.t()} | {:error, term()}
   defp run(%Query{} = query, scope, params, with_bindings, engine_module, conn) do
-    with {:ok, rows} <- fetch_rows(query, scope, params, with_bindings, engine_module, conn) do
-      filtered = Enum.filter(rows, &matches_all?(&1, query.wheres, scope, params))
-      own_name = List.last(query.source)
-      {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
+    own_name = List.last(query.source)
+    {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
 
-      cond do
-        windows != [] and aggregate_query?(query) ->
-          raise ArgumentError,
-                "combining GROUP BY/an aggregate query with a window function in the same " <>
-                  "SELECT isn't supported yet"
+    cond do
+      windows != [] and aggregate_query?(query) ->
+        raise ArgumentError,
+              "combining GROUP BY/an aggregate query with a window function in the same " <>
+                "SELECT isn't supported yet"
 
-        aggregate_query?(query) ->
-          run_grouped(query, filtered, own_name, scope, params, engine_module, conn)
+      aggregate_query?(query) and query.group_mode == :plain ->
+        case streaming_aggregate_plan(query) do
+          {:ok, plan} ->
+            with {:ok, rows} <-
+                   run_grouped_streaming(
+                     query,
+                     plan,
+                     scope,
+                     params,
+                     with_bindings,
+                     engine_module,
+                     conn
+                   ) do
+              {:ok, Cursor.new(rows)}
+            end
 
-        true ->
-          run_plain(query, filtered, own_name, scope, params, with_bindings, engine_module, conn)
-      end
+          :not_streamable ->
+            with {:ok, filtered} <-
+                   fetch_and_filter(query, scope, params, with_bindings, engine_module, conn),
+                 {:ok, rows} <-
+                   run_grouped(query, filtered, own_name, scope, params, engine_module, conn) do
+              {:ok, Cursor.new(rows)}
+            end
+        end
+
+      aggregate_query?(query) ->
+        with {:ok, filtered} <-
+               fetch_and_filter(query, scope, params, with_bindings, engine_module, conn),
+             {:ok, rows} <-
+               run_grouped(query, filtered, own_name, scope, params, engine_module, conn) do
+          {:ok, Cursor.new(rows)}
+        end
+
+      windows == [] and query.order_bys == [] and not query.distinct ->
+        run_plain_streaming(query, own_name, scope, params, with_bindings, engine_module, conn)
+
+      true ->
+        with {:ok, filtered} <-
+               fetch_and_filter(query, scope, params, with_bindings, engine_module, conn),
+             {:ok, rows} <-
+               run_plain(
+                 query,
+                 filtered,
+                 own_name,
+                 scope,
+                 params,
+                 with_bindings,
+                 engine_module,
+                 conn
+               ) do
+          {:ok, Cursor.new(rows)}
+        end
+    end
+  end
+
+  # Shared by every path that still needs the *whole* filtered row set
+  # materialized up front (real `ORDER BY`/`DISTINCT`/window functions on
+  # the plain side; anything grouped that `streaming_aggregate_plan/1`
+  # can't handle incrementally) -- `Cursor.to_list/1` here is the exact
+  # same eager materialization `fetch_and_materialize/3` used to do
+  # unconditionally, just now only reached when actually needed.
+  defp fetch_and_filter(query, scope, params, with_bindings, engine_module, conn) do
+    with {:ok, cursor} <- fetch_rows(query, scope, params, with_bindings, engine_module, conn) do
+      filtered =
+        cursor |> Cursor.to_list() |> Enum.filter(&matches_all?(&1, query.wheres, scope, params))
+
+      {:ok, filtered}
     end
   end
 
@@ -478,32 +584,123 @@ defmodule ScryCore.Executor do
   defp fetch_rows(%Query{source: [name]}, scope, params, with_bindings, engine_module, conn) do
     case Map.fetch(with_bindings, name) do
       {:ok, bound_query} ->
+        # `run_any/6` already returns `{:ok, Cursor.t()}` -- no extra
+        # wrapping needed here, this is already the exact shape
+        # `fetch_rows/6`'s own callers expect.
         run_any(bound_query, scope, params, with_bindings, engine_module, conn)
 
       :error ->
-        fetch_and_materialize(engine_module, conn, [name])
+        fetch_lazy(engine_module, conn, [name])
     end
   end
 
   defp fetch_rows(%Query{source: source}, _scope, _params, _with_bindings, engine_module, conn),
-    do: fetch_and_materialize(engine_module, conn, source)
+    do: fetch_lazy(engine_module, conn, source)
 
   # `engine_module.fetch/2` may return any `Enumerable.t()` now, not just
   # a plain list (`ScryCore.EngineBehaviour`'s own moduledoc has the
-  # reasoning) -- materialized here, immediately, through `ScryCore.
-  # Cursor.to_list/1` (not `Enum.to_list/1` directly, so this genuinely
-  # exercises the same pull-based path any other consumer of the widened
-  # contract would). Every stage downstream of this point (`GROUP BY`/
-  # `ORDER BY`/`DISTINCT`/window functions/set combinators) is inherently
-  # blocking regardless of how `fetch/2` returned its data, so staying
-  # lazy any further than this one boundary buys this module's own
-  # pipeline nothing today -- see `ScryCore.Cursor`'s own moduledoc for
-  # the fuller reasoning on why the *contract* still widened anyway.
-  defp fetch_and_materialize(engine_module, conn, source) do
+  # reasoning) -- wrapped here in a `ScryCore.Cursor` and handed back
+  # *unmaterialized*. Whether this actually stays lazy any further
+  # depends entirely on the caller: `run/6`'s own dispatch either drains
+  # it immediately via `fetch_and_filter/6` (real `ORDER BY`/`DISTINCT`/
+  # window functions, or a grouped query `streaming_aggregate_plan/1`
+  # can't handle incrementally -- all inherently need the whole set
+  # regardless of how `fetch/2` returned its data), or pulls from it one
+  # row at a time (`run_plain_streaming/8`, `run_grouped_streaming/8`) --
+  # this function itself stays agnostic to which.
+  defp fetch_lazy(engine_module, conn, source) do
     with {:ok, enumerable} <- engine_module.fetch(conn, source) do
-      {:ok, enumerable |> Cursor.new() |> Cursor.to_list()}
+      {:ok, Cursor.new(enumerable)}
     end
   end
+
+  # The genuinely lazy plain-query path -- reached only when nothing
+  # downstream needs the whole row set materialized first (`run/6`'s own
+  # dispatch: no window call, no real `ORDER BY`, no `DISTINCT`). Returns
+  # `{:ok, Cursor.t()}` directly, built via `Stream.resource/3` over the
+  # fetch cursor -- *not* a recursive accumulator returning a finished
+  # list, so nothing downstream of this function ever forces the whole
+  # row set into memory either; a caller pulling just a few rows (or a
+  # `LIMIT`-bound query, enforced below as part of the stream itself)
+  # genuinely only pulls that many rows from the underlying source.
+  # Reuses the *exact same* per-row `matches_all?/4`/`project/8`
+  # functions the eager `run_plain/8` path already has below -- behavior
+  # stays identical by construction, only the iteration strategy
+  # differs. `Stream.resource/3`'s own `after_fun` (`Cursor.close/1` on
+  # the source cursor) is *guaranteed* to run whether the stream reaches
+  # its own natural end, is halted early (`LIMIT` satisfied, or the
+  # caller simply stops pulling), or an exception propagates out of
+  # `next_fun` -- confirmed against Elixir's own documented `Stream.
+  # resource/3` contract, the same guarantee `ScryCore.Cursor`'s own
+  # moduledoc already relies on for `close/1` itself.
+  defp run_plain_streaming(query, own_name, scope, params, with_bindings, engine_module, conn) do
+    with {:ok, source_cursor} <-
+           fetch_rows(query, scope, params, with_bindings, engine_module, conn) do
+      ctx = {query, own_name, scope, params, with_bindings, engine_module, conn}
+
+      stream =
+        Stream.resource(
+          fn -> {source_cursor, query.offset || 0, 0} end,
+          fn state -> plain_stream_step(state, ctx) end,
+          fn {cursor, _to_skip, _emitted} -> Cursor.close(cursor) end
+        )
+
+      {:ok, Cursor.new(stream)}
+    end
+  end
+
+  # `Stream.resource/3`'s own `next_fun` -- `{[row], new_state}` to emit
+  # exactly one row and continue, or `{:halt, state}` to stop. Loops
+  # internally (an ordinary recursive call, not itself re-entering
+  # `Stream.resource`) past a row failing `WHERE` or a `:skip` (`REQUIRED`
+  # -dropped) projection, since a single call has to return *something*
+  # -- there's no "try again" signal back to `Stream.resource` itself.
+  defp plain_stream_step({cursor, to_skip, emitted}, {query, _, _, _, _, _, _})
+       when query.limit != nil and emitted >= query.limit do
+    {:halt, {cursor, to_skip, emitted}}
+  end
+
+  defp plain_stream_step({cursor, to_skip, emitted}, ctx) do
+    case Cursor.next(cursor) do
+      :done -> {:halt, {cursor, to_skip, emitted}}
+      {:ok, row, cursor2} -> plain_stream_row(row, cursor2, to_skip, emitted, ctx)
+    end
+  end
+
+  defp plain_stream_row(
+         row,
+         cursor2,
+         to_skip,
+         emitted,
+         {query, own_name, scope, params, with_bindings, engine_module, conn} = ctx
+       ) do
+    if matches_all?(row, query.wheres, scope, params) do
+      row
+      |> project(query.select, own_name, scope, params, with_bindings, engine_module, conn)
+      |> plain_stream_projected(cursor2, to_skip, emitted, ctx)
+    else
+      plain_stream_step({cursor2, to_skip, emitted}, ctx)
+    end
+  end
+
+  defp plain_stream_projected({:ok, _projected}, cursor2, to_skip, emitted, ctx)
+       when to_skip > 0,
+       do: plain_stream_step({cursor2, to_skip - 1, emitted}, ctx)
+
+  defp plain_stream_projected({:ok, projected}, cursor2, 0, emitted, _ctx),
+    do: {[projected], {cursor2, 0, emitted + 1}}
+
+  defp plain_stream_projected(:skip, cursor2, to_skip, emitted, ctx),
+    do: plain_stream_step({cursor2, to_skip, emitted}, ctx)
+
+  # `project/8`'s own `{:error, reason}` (today: only its `{:variant, _}`
+  # clause) has no room in `next_fun`'s own `{[row], state} | {:halt,
+  # state}` contract -- raised instead, `QueryError`'s own moduledoc has
+  # the full "why a raise, not a tuple, for this one case" reasoning.
+  # `Stream.resource/3`'s own `after_fun` still runs (see this function's
+  # own caller, above) -- the source cursor gets closed either way.
+  defp plain_stream_projected({:error, reason}, _cursor2, _to_skip, _emitted, _ctx),
+    do: raise(QueryError, reason: reason)
 
   # Today's ungrouped path, unchanged for a query with no window
   # function anywhere in its own `select` -- `collect_and_rewrite_
@@ -541,6 +738,383 @@ defmodule ScryCore.Executor do
        |> paginate(query.limit, query.offset)}
     end
   end
+
+  # ---- Streaming aggregation (group_mode: :plain only) --------------------
+  #
+  # `sum`/`avg`/`count`/`min`/`max` (`count(distinct ...)` included) are
+  # all mathematically computable one row at a time -- a running total per
+  # group, never a kept list of member rows -- unlike `percentile` (needs
+  # every value, sorted; no single-pass algorithm exists for exact
+  # percentile) or `stddev*`/`var*` (this module's own existing two-pass
+  # computation would need Welford's algorithm to go single-pass, real
+  # numerical-stability work deliberately not attempted here). This
+  # section covers only the common, realistic shape -- a streaming-capable
+  # aggregate call as the *entire* value of a `{:computed, ...}` select
+  # item, or as an entire side of a `HAVING` comparison -- never nested
+  # inside arithmetic/a cast/a `WHEN` (`avg(x) * 2`, say); anything wider
+  # falls back to `run_grouped/6` below, unchanged. `ROLLUP`/`CUBE`
+  # (multiple simultaneous per-level accumulators, one streaming pass)
+  # are real, more complex, deliberately deferred -- `group_mode: :plain`
+  # only, checked by this section's own caller in `run/6`.
+  @streaming_capable_aggregate_names ~w(sum avg count min max)
+
+  # `{:ok, [{name, args}]}` -- the distinct aggregate calls this query's
+  # own select/havings actually need streamed -- or `:not_streamable`,
+  # the safe "fall back to the fully eager path" answer for anything
+  # wider than the shape this section covers (checked above).
+  @spec streaming_aggregate_plan(Query.t()) :: {:ok, [{String.t(), [term()]}]} | :not_streamable
+  defp streaming_aggregate_plan(query) do
+    with {:ok, select_calls} <- streaming_select_calls(query.select),
+         {:ok, having_calls} <- streaming_having_calls(query.havings) do
+      {:ok, Enum.uniq(select_calls ++ having_calls)}
+    end
+  end
+
+  defp streaming_select_calls(items) do
+    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
+      case streaming_body_item_calls(item) do
+        {:ok, calls} -> {:cont, {:ok, calls ++ acc}}
+        :not_streamable -> {:halt, :not_streamable}
+      end
+    end)
+  end
+
+  defp streaming_body_item_calls({:field, _path}), do: {:ok, []}
+
+  defp streaming_body_item_calls({:computed, _alias, {:call, name, args}})
+       when name in @streaming_capable_aggregate_names,
+       do: {:ok, [{name, args}]}
+
+  defp streaming_body_item_calls({:computed, _alias, expr}) do
+    if expr_has_aggregate_call?(expr), do: :not_streamable, else: {:ok, []}
+  end
+
+  # A nested `SELECT`/`{:field, path, condition}` (`IF $param`)/
+  # `{:variant, _}` body item -- `project_group_item/8`'s own catch-all
+  # (below) already unconditionally rejects all three inside a grouped
+  # `select`, so this is the same "not supported in a grouped select"
+  # answer, just decided before ever fetching a single row instead of
+  # after collecting every group's own member rows for nothing.
+  defp streaming_body_item_calls(_other), do: :not_streamable
+
+  defp streaming_having_calls(havings) do
+    Enum.reduce_while(havings, {:ok, []}, fn pred, {:ok, acc} ->
+      case streaming_predicate_calls(pred) do
+        {:ok, calls} -> {:cont, {:ok, calls ++ acc}}
+        :not_streamable -> {:halt, :not_streamable}
+      end
+    end)
+  end
+
+  defp streaming_predicate_calls({:cmp, _op, lhs, rhs}) do
+    combine_streaming(streaming_side_calls(lhs), streaming_side_calls(rhs))
+  end
+
+  defp streaming_predicate_calls({:in, lhs, values}) when is_list(values) do
+    Enum.reduce_while(values, streaming_side_calls(lhs), fn value, acc ->
+      case combine_streaming(acc, streaming_side_calls(value)) do
+        {:ok, _} = ok -> {:cont, ok}
+        :not_streamable -> {:halt, :not_streamable}
+      end
+    end)
+  end
+
+  defp streaming_predicate_calls({:in, lhs, list_expr}),
+    do: combine_streaming(streaming_side_calls(lhs), streaming_side_calls(list_expr))
+
+  defp streaming_predicate_calls({:and, l, r}),
+    do: combine_streaming(streaming_predicate_calls(l), streaming_predicate_calls(r))
+
+  defp streaming_predicate_calls({:or, l, r}),
+    do: combine_streaming(streaming_predicate_calls(l), streaming_predicate_calls(r))
+
+  defp streaming_predicate_calls({:not, p}), do: streaming_predicate_calls(p)
+
+  defp combine_streaming({:ok, a}, {:ok, b}), do: {:ok, a ++ b}
+  defp combine_streaming(_a, _b), do: :not_streamable
+
+  # A predicate's own `lhs`/`rhs` (`Query.predicate()`'s own narrower
+  # shapes, not a full `expr()`) -- a bare path (`lhs`'s own `[String.
+  # t()]` shape) or a literal never has a call in it at all; a direct
+  # streaming-capable aggregate call is exactly what this whole section
+  # exists to handle; anything else defers to `expr_has_aggregate_call?/1`
+  # (the same walker `aggregate_query?/1` itself already uses) to decide
+  # whether it's aggregate-free (fine, representative-evaluated) or has
+  # one buried inside something wider (not streamable).
+  defp streaming_side_calls(path) when is_list(path), do: {:ok, []}
+  defp streaming_side_calls({:literal, _value}), do: {:ok, []}
+
+  defp streaming_side_calls({:call, name, args})
+       when name in @streaming_capable_aggregate_names,
+       do: {:ok, [{name, args}]}
+
+  defp streaming_side_calls({:call, _name, _args}), do: :not_streamable
+
+  defp streaming_side_calls({:dot, base, _path}) do
+    if expr_has_aggregate_call?(base), do: :not_streamable, else: {:ok, []}
+  end
+
+  defp streaming_side_calls(expr) do
+    if expr_has_aggregate_call?(expr), do: :not_streamable, else: {:ok, []}
+  end
+
+  # Pulls one row at a time from the fetch `Cursor`, filtering
+  # (`matches_all?/4`, unchanged) and folding each surviving row into its
+  # own group's *accumulator* (`update_agg/5` below) -- never a kept list
+  # of member rows, so peak memory here is `O(distinct groups)`, not
+  # `O(matching rows)`, for every aggregate `streaming_aggregate_plan/1`
+  # accepted. `groups` is a plain map (`group_key => %{representative:
+  # row, aggs: %{{name, args} => acc}}`); `order` tracks first-appearance
+  # order the same way `group_rows/3`'s own manual reduce already does,
+  # for the same "well-defined even when not required" determinism this
+  # module's `sort_rows/3` comment already documents elsewhere. Exceptions
+  # (a `nil` operand hitting an aggregate, same hard-error every other
+  # aggregate path already has; a `WHERE`/group-key evaluation error) are
+  # caught locally, closing the *current* source cursor before re-raising
+  # -- unlike the plain path's own `Stream.resource/3`-based cleanup
+  # (automatic on any exception), this is a plain recursive pull loop, so
+  # cleanup has to be explicit here.
+  defp run_grouped_streaming(query, plan, scope, params, with_bindings, engine_module, conn) do
+    with {:ok, source_cursor} <-
+           fetch_rows(query, scope, params, with_bindings, engine_module, conn),
+         {:ok, groups, order} <-
+           accumulate_groups(source_cursor, query, plan, scope, params, %{}, []) do
+      rows =
+        for key <- order,
+            group_state = Map.fetch!(groups, key),
+            having_matches_streaming?(query.havings, group_state, scope, params) do
+          finalize_grouped_row(query, group_state, scope, params)
+        end
+
+      {:ok,
+       rows
+       |> sort_rows(query.order_bys, [])
+       |> maybe_dedupe(query.distinct)
+       |> paginate(query.limit, query.offset)}
+    end
+  end
+
+  defp accumulate_groups(cursor, query, plan, scope, params, groups, order) do
+    case Cursor.next(cursor) do
+      :done ->
+        {groups2, order2} = ensure_flat_group(query.group_bys, plan, groups, order)
+        {:ok, groups2, Enum.reverse(order2)}
+
+      {:ok, row, cursor2} ->
+        accumulate_row(row, cursor2, query, plan, scope, params, groups, order)
+    end
+  end
+
+  # `group_rows/3`'s own `group_rows(rows, [], _scope), do: [rows]` --
+  # a *flat* aggregate (no explicit `GROUP BY` at all) always collapses
+  # to exactly one output row, even over zero matching rows (`count = 0`,
+  # `sum`/`avg`/`min`/`max` = `nil` -- this module's own moduledoc's own
+  # "well-defined output row" framing) -- a real `GROUP BY` with zero
+  # matching rows correctly stays zero output rows instead (SQL
+  # convention; only the flat-aggregate case gets this treatment).
+  # `accumulate_row/8` never creates a group for a source with zero
+  # surviving rows at all, so this seeds exactly one, in its own already-
+  # empty initial accumulator state, if (and only if) `group_bys == []`
+  # and nothing created one already.
+  defp ensure_flat_group([], plan, groups, _order) when map_size(groups) == 0 do
+    empty_state = %{
+      representative: %{},
+      aggs: Map.new(plan, fn {name, args} -> {{name, args}, init_agg(name, args)} end)
+    }
+
+    {%{[] => empty_state}, [[]]}
+  end
+
+  defp ensure_flat_group(_group_bys, _plan, groups, order), do: {groups, order}
+
+  defp accumulate_row(row, cursor2, query, plan, scope, params, groups, order) do
+    if matches_all?(row, query.wheres, scope, params) do
+      key = Enum.map(query.group_bys, &get_path(row, scope, &1))
+
+      {groups2, order2} =
+        case Map.fetch(groups, key) do
+          {:ok, state} ->
+            {Map.put(groups, key, update_group(state, plan, row, scope, params)), order}
+
+          :error ->
+            {Map.put(groups, key, new_group(row, plan, scope, params)), [key | order]}
+        end
+
+      accumulate_groups(cursor2, query, plan, scope, params, groups2, order2)
+    else
+      accumulate_groups(cursor2, query, plan, scope, params, groups, order)
+    end
+  rescue
+    e ->
+      Cursor.close(cursor2)
+      reraise e, __STACKTRACE__
+  end
+
+  defp new_group(row, plan, scope, params) do
+    aggs =
+      Map.new(plan, fn {name, args} ->
+        {{name, args}, update_agg(init_agg(name, args), name, args, row, scope, params)}
+      end)
+
+    %{representative: row, aggs: aggs}
+  end
+
+  defp update_group(%{representative: rep, aggs: aggs}, plan, row, scope, params) do
+    aggs2 =
+      Map.new(plan, fn {name, args} ->
+        {{name, args}, update_agg(Map.fetch!(aggs, {name, args}), name, args, row, scope, params)}
+      end)
+
+    %{representative: rep, aggs: aggs2}
+  end
+
+  defp init_agg("avg", _args), do: {:empty, 0}
+  defp init_agg("count", [{:distinct, _arg}]), do: MapSet.new()
+  defp init_agg("count", _args), do: 0
+  defp init_agg(_name, _args), do: :empty
+
+  defp update_agg(acc, "count", [{:distinct, arg}], row, scope, params) do
+    value = resolve_rhs(arg, row, scope, params)
+    if is_nil(value), do: raise_aggregate_nil_error("count(distinct ...)")
+    MapSet.put(acc, value)
+  end
+
+  defp update_agg(acc, "count", [arg], row, scope, params) do
+    value = resolve_rhs(arg, row, scope, params)
+    if is_nil(value), do: raise_aggregate_nil_error("count(...)")
+    acc + 1
+  end
+
+  defp update_agg({sum_acc, count}, "avg", [arg], row, scope, params) do
+    value = resolve_rhs(arg, row, scope, params)
+    if is_nil(value), do: raise_aggregate_nil_error("avg(...)")
+    {add_to_running_sum(sum_acc, value), count + 1}
+  end
+
+  defp update_agg(acc, "sum", [arg], row, scope, params) do
+    value = resolve_rhs(arg, row, scope, params)
+    if is_nil(value), do: raise_aggregate_nil_error("sum(...)")
+    add_to_running_sum(acc, value)
+  end
+
+  defp update_agg(acc, "min", [arg], row, scope, params) do
+    value = resolve_rhs(arg, row, scope, params)
+    if is_nil(value), do: raise_aggregate_nil_error("min(...)")
+    if acc == :empty, do: value, else: pick_min(acc, value)
+  end
+
+  defp update_agg(acc, "max", [arg], row, scope, params) do
+    value = resolve_rhs(arg, row, scope, params)
+    if is_nil(value), do: raise_aggregate_nil_error("max(...)")
+    if acc == :empty, do: value, else: pick_max(acc, value)
+  end
+
+  # Matches `eval_aggregate/5`'s own two catch-all error clauses exactly
+  # -- `sum(distinct x)`/etc. (`distinct` is only ever valid inside
+  # `count(distinct ...)`) and any streaming-capable aggregate called
+  # with anything other than exactly one argument. Declared *after*
+  # every real per-name clause above, same reasoning `eval_aggregate/5`
+  # itself already documents for its own identically-ordered clauses.
+  defp update_agg(_acc, name, [{:distinct, _arg}], _row, _scope, _params) do
+    raise ArgumentError, "distinct is only valid inside count(distinct ...), not #{name}(...)"
+  end
+
+  defp update_agg(_acc, name, args, _row, _scope, _params) do
+    raise ArgumentError, "aggregate #{name}/1 expects exactly one argument, got #{length(args)}"
+  end
+
+  defp add_to_running_sum(:empty, value), do: value
+  defp add_to_running_sum(existing, value), do: Rational.add(existing, value)
+
+  # Matches `eval_aggregate/5`'s own nil-hard-error message exactly
+  # (lang_spec.md's own "Aggregates over nullable fields hard-error the
+  # same way" -- no silent nil-skipping, filter it out explicitly first).
+  defp raise_aggregate_nil_error(call_text) do
+    raise ArgumentError,
+          "aggregate #{call_text} encountered a nil value -- lang_spec.md's own " <>
+            "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
+            "nil-skipping); filter it out explicitly first"
+  end
+
+  defp having_matches_streaming?(havings, group_state, scope, params),
+    do: Enum.all?(havings, &eval_having_streaming?(&1, group_state, scope, params))
+
+  defp eval_having_streaming?({:cmp, op, lhs, rhs}, group_state, scope, params) do
+    left = finalize_side(lhs, group_state, scope, params)
+
+    case finalize_side(rhs, group_state, scope, params) do
+      %Regex{} = regex when op == :match -> Regex.match?(regex, left)
+      right -> compare(op, left, right)
+    end
+  end
+
+  defp eval_having_streaming?({:in, lhs, values}, group_state, scope, params)
+       when is_list(values) do
+    left = finalize_side(lhs, group_state, scope, params)
+    left in Enum.map(values, &finalize_side(&1, group_state, scope, params))
+  end
+
+  defp eval_having_streaming?({:in, lhs, list_expr}, group_state, scope, params) do
+    left = finalize_side(lhs, group_state, scope, params)
+
+    case finalize_side(list_expr, group_state, scope, params) do
+      list when is_list(list) -> left in list
+      other -> raise ArgumentError, "in ... expects a list value, got: #{inspect(other)}"
+    end
+  end
+
+  defp eval_having_streaming?({:and, l, r}, group_state, scope, params),
+    do:
+      eval_having_streaming?(l, group_state, scope, params) and
+        eval_having_streaming?(r, group_state, scope, params)
+
+  defp eval_having_streaming?({:or, l, r}, group_state, scope, params),
+    do:
+      eval_having_streaming?(l, group_state, scope, params) or
+        eval_having_streaming?(r, group_state, scope, params)
+
+  defp eval_having_streaming?({:not, p}, group_state, scope, params),
+    do: not eval_having_streaming?(p, group_state, scope, params)
+
+  defp finalize_side(path, %{representative: rep}, scope, _params) when is_list(path),
+    do: get_path(rep, scope, path)
+
+  defp finalize_side({:literal, value}, _group_state, _scope, _params), do: value
+
+  defp finalize_side({:call, name, args}, group_state, _scope, _params)
+       when name in @streaming_capable_aggregate_names,
+       do: finalize_agg(Map.fetch!(group_state.aggs, {name, args}), name)
+
+  defp finalize_side(expr, %{representative: rep}, scope, params),
+    do: resolve_rhs(expr, rep, scope, params)
+
+  defp finalize_grouped_row(query, group_state, scope, params),
+    do: Map.new(query.select, &finalize_body_item(&1, group_state, scope, params))
+
+  defp finalize_body_item({:field, path}, %{representative: rep}, scope, _params),
+    do: {List.last(path), get_path(rep, scope, path)}
+
+  defp finalize_body_item({:computed, alias_name, expr}, group_state, scope, params),
+    do: {alias_name, finalize_expr(expr, group_state, scope, params)}
+
+  defp finalize_expr({:call, name, args}, group_state, _scope, _params)
+       when name in @streaming_capable_aggregate_names,
+       do: finalize_agg(Map.fetch!(group_state.aggs, {name, args}), name)
+
+  defp finalize_expr(expr, %{representative: rep}, scope, params),
+    do: resolve_rhs(expr, rep, scope, params)
+
+  # `:empty` (a group with zero contributing rows) can't actually occur
+  # -- a group only ever exists because at least one row created it
+  # (`new_group/3`) -- but matches `apply_aggregate/2`'s own defined
+  # "empty" answer defensively rather than leaving it a `FunctionClause
+  # Error` waiting to happen if that invariant is ever weakened later.
+  defp finalize_agg(:empty, _name), do: nil
+  defp finalize_agg(value, name) when name in ["sum", "min", "max"], do: value
+  defp finalize_agg(count, "count") when is_integer(count), do: count
+  defp finalize_agg(%MapSet{} = set, "count"), do: MapSet.size(set)
+  defp finalize_agg({:empty, _count}, "avg"), do: nil
+  defp finalize_agg({sum, count}, "avg"), do: Rational.div(sum, count)
 
   # `GROUP BY`/aggregate-function path (lang_spec.md §5.2/§5.8, "Groups
   # filtered rows" / the fixed built-in-function set). No explicit
@@ -1706,7 +2280,10 @@ defmodule ScryCore.Executor do
          engine_module,
          conn
        ) do
-    case run(nested, [{own_name, row} | scope], params, with_bindings, engine_module, conn) do
+    nested
+    |> run([{own_name, row} | scope], params, with_bindings, engine_module, conn)
+    |> drain_result()
+    |> case do
       {:ok, []} when required -> :skip
       {:ok, nested_rows} -> {:ok, List.last(nested.source), nested_rows}
       {:error, _} = err -> err

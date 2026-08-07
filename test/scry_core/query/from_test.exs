@@ -23,6 +23,18 @@ defmodule ScryCore.Query.FromTest do
     end
   end
 
+  # `ScryCore.Executor.run/3,4` returns `{:ok, ScryCore.Cursor.t()}` now,
+  # not `{:ok, [row()]}` -- drains it back to this suite's own
+  # long-established shape, converting a lazily-raised `ScryCore.
+  # Executor.QueryError` back into the classic `{:error, reason}` tuple.
+  defp materialize({:error, _} = err), do: err
+
+  defp materialize({:ok, cursor}) do
+    {:ok, ScryCore.Cursor.to_list(cursor)}
+  rescue
+    e in ScryCore.Executor.QueryError -> {:error, e.reason}
+  end
+
   @users [
     %{"id" => 1, "name" => "Alice", "age" => 30, "status" => "active"},
     %{"id" => 2, "name" => "Bob", "age" => 17, "status" => "active"},
@@ -50,8 +62,8 @@ defmodule ScryCore.Query.FromTest do
     assert built.select == parsed.select
     assert built.wheres == parsed.wheres
 
-    assert {:ok, built_rows} = ScryCore.Executor.run(built, StaticEngine, conn)
-    assert {:ok, parsed_rows} = ScryCore.Executor.run(parsed, StaticEngine, conn)
+    assert {:ok, built_rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
+    assert {:ok, parsed_rows} = ScryCore.Executor.run(parsed, StaticEngine, conn) |> materialize()
     assert built_rows == parsed_rows
     assert built_rows == [%{"name" => "Alice"}, %{"name" => "Carol"}]
   end
@@ -62,6 +74,7 @@ defmodule ScryCore.Query.FromTest do
 
     assert {:ok, rows} =
              ScryCore.Executor.run(query, StaticEngine, conn, %{"min_age" => min_age})
+             |> materialize()
 
     assert rows == [%{"name" => "Alice"}, %{"name" => "Carol"}]
   end
@@ -74,7 +87,7 @@ defmodule ScryCore.Query.FromTest do
         select: %{status: u.status, total: count(u.name)}
       )
 
-    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
     assert rows == [%{"status" => "active", "total" => 2}]
   end
 
@@ -87,7 +100,7 @@ defmodule ScryCore.Query.FromTest do
         select: %{name: u.name}
       )
 
-    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
     assert rows == [%{"name" => "Alice"}]
   end
 
@@ -105,7 +118,7 @@ defmodule ScryCore.Query.FromTest do
         }
       )
 
-    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
 
     assert rows == [
              %{"name" => "Alice", "bucket" => "adult"},
@@ -122,7 +135,7 @@ defmodule ScryCore.Query.FromTest do
         select: %{status: u.status}
       )
 
-    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+    assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
     assert Enum.sort(rows) == Enum.sort([%{"status" => "active"}, %{"status" => "inactive"}])
   end
 
@@ -152,7 +165,7 @@ defmodule ScryCore.Query.FromTest do
           }
         )
 
-      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
 
       assert rows == [
                %{"name" => "Alice", "orders" => [%{"id" => 10, "total" => 80}]},
@@ -170,7 +183,7 @@ defmodule ScryCore.Query.FromTest do
           }
         )
 
-      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
 
       assert rows == [
                %{"name" => "Alice", "orders" => [%{"id" => 10}, %{"id" => 11}]},
@@ -227,7 +240,7 @@ defmodule ScryCore.Query.FromTest do
           }
         )
 
-      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
 
       assert Enum.sort_by(rows, &{&1["status"], &1["rank"]}) == [
                %{"name" => "Alice", "status" => "active", "rank" => 1},
@@ -253,8 +266,11 @@ defmodule ScryCore.Query.FromTest do
 
       assert built.select == parsed.select
 
-      assert {:ok, built_rows} = ScryCore.Executor.run(built, StaticEngine, conn)
-      assert {:ok, parsed_rows} = ScryCore.Executor.run(parsed, StaticEngine, conn)
+      assert {:ok, built_rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
+
+      assert {:ok, parsed_rows} =
+               ScryCore.Executor.run(parsed, StaticEngine, conn) |> materialize()
+
       assert Enum.sort(built_rows) == Enum.sort(parsed_rows)
     end
 
@@ -273,7 +289,7 @@ defmodule ScryCore.Query.FromTest do
           }
         )
 
-      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
 
       assert rows == [
                %{"name" => "Alice", "running_total" => 30},
@@ -288,7 +304,7 @@ defmodule ScryCore.Query.FromTest do
       assert {:ok, parsed} = ScryCore.parse(~s(SELECT users { name, age }))
       assert built.select == parsed.select
 
-      assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+      assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn) |> materialize()
 
       assert rows == [
                %{"name" => "Alice", "age" => 30},
@@ -299,7 +315,7 @@ defmodule ScryCore.Query.FromTest do
 
     test "a bare field mixed with an aliased computed entry", %{conn: conn} do
       query = from(o in "orders", select: [o.id, doubled: o.total * 2])
-      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
 
       assert rows == [
                %{"id" => 10, "doubled" => 160},
@@ -317,7 +333,7 @@ defmodule ScryCore.Query.FromTest do
           ]
         )
 
-      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn) |> materialize()
 
       assert rows == [
                %{
