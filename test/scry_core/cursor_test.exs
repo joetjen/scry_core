@@ -1,0 +1,116 @@
+defmodule ScryCore.CursorTest do
+  @moduledoc """
+  `ScryCore.Cursor` -- `next/1` genuinely doesn't force evaluation
+  beyond the requested element (a side-effecting generator proves it,
+  not just the types lining up), `take/2` terminates against a real
+  infinite stream, `skip/1,2` and `to_list/1` compose on top of
+  `next/1` correctly, and exhaustion (`:done`) behaves the same way
+  regardless of what kind of `Enumerable.t()` was wrapped.
+  """
+
+  use ExUnit.Case, async: true
+
+  alias ScryCore.Cursor
+
+  test "next/1 pulls exactly one element at a time, never forcing more than requested" do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+
+    lazy =
+      Stream.map(1..5, fn n ->
+        Agent.update(agent, &[n | &1])
+        n
+      end)
+
+    cursor = Cursor.new(lazy)
+
+    assert {:ok, 1, cursor} = Cursor.next(cursor)
+    assert Agent.get(agent, & &1) == [1]
+
+    assert {:ok, 2, cursor} = Cursor.next(cursor)
+    assert Agent.get(agent, & &1) == [2, 1]
+
+    assert {:ok, 3, _cursor} = Cursor.next(cursor)
+    assert Agent.get(agent, & &1) == [3, 2, 1]
+  end
+
+  test "next/1 returns :done once exhausted, and stays :done on further calls" do
+    cursor = Cursor.new([:a, :b])
+
+    assert {:ok, :a, cursor} = Cursor.next(cursor)
+    assert {:ok, :b, cursor} = Cursor.next(cursor)
+    assert :done = Cursor.next(cursor)
+    assert :done = Cursor.next(cursor)
+  end
+
+  test "next/1 on an empty enumerable is immediately :done" do
+    assert :done = Cursor.new([]) |> Cursor.next()
+  end
+
+  test "take/2 terminates against a genuinely infinite stream, returning exactly n" do
+    infinite = Stream.iterate(0, &(&1 + 1))
+    cursor = Cursor.new(infinite)
+
+    assert {[0, 1, 2], _rest} = Cursor.take(cursor, 3)
+  end
+
+  test "take/2 returns fewer than n, paired with an exhausted cursor, when the source runs out" do
+    cursor = Cursor.new([1, 2])
+
+    assert {[1, 2], rest} = Cursor.take(cursor, 5)
+    assert :done = Cursor.next(rest)
+  end
+
+  test "take/2 with n == 0 returns an empty list and the same cursor, unchanged" do
+    cursor = Cursor.new([1, 2, 3])
+    assert {[], rest} = Cursor.take(cursor, 0)
+    assert {:ok, 1, _} = Cursor.next(rest)
+  end
+
+  test "take/2 composed across calls picks up exactly where the previous one left off" do
+    cursor = Cursor.new(1..6)
+    assert {[1, 2], cursor} = Cursor.take(cursor, 2)
+    assert {[3, 4, 5], cursor} = Cursor.take(cursor, 3)
+    assert {[6], _cursor} = Cursor.take(cursor, 10)
+  end
+
+  test "skip/2 discards exactly n elements" do
+    cursor = Cursor.new([1, 2, 3, 4])
+    rest = Cursor.skip(cursor, 2)
+    assert {:ok, 3, _} = Cursor.next(rest)
+  end
+
+  test "skip/1 discards exactly one element" do
+    cursor = Cursor.new([1, 2, 3])
+    rest = Cursor.skip(cursor)
+    assert {:ok, 2, _} = Cursor.next(rest)
+  end
+
+  test "skip/2 past the end of the source is a well-defined exhausted cursor, not an error" do
+    cursor = Cursor.new([1, 2])
+    rest = Cursor.skip(cursor, 10)
+    assert :done = Cursor.next(rest)
+  end
+
+  test "to_list/1 drains the rest, matching Enum.to_list/1 on the same source" do
+    source = [1, 2, 3, 4, 5]
+    assert Cursor.new(source) |> Cursor.to_list() == Enum.to_list(source)
+  end
+
+  test "to_list/1 after a partial next/1, only the remaining elements" do
+    cursor = Cursor.new([1, 2, 3, 4])
+    {:ok, 1, cursor} = Cursor.next(cursor)
+    assert Cursor.to_list(cursor) == [2, 3, 4]
+  end
+
+  test "to_list/1 on an already-exhausted cursor is an empty list" do
+    cursor = Cursor.new([])
+    :done = Cursor.next(cursor)
+    assert Cursor.to_list(cursor) == []
+  end
+
+  test "works identically over a plain list, a Range, and a Stream -- any Enumerable.t()" do
+    assert Cursor.new([1, 2, 3]) |> Cursor.to_list() == [1, 2, 3]
+    assert Cursor.new(1..3) |> Cursor.to_list() == [1, 2, 3]
+    assert Cursor.new(Stream.map([1, 2, 3], & &1)) |> Cursor.to_list() == [1, 2, 3]
+  end
+end

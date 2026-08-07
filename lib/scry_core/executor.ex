@@ -313,7 +313,7 @@ defmodule ScryCore.Executor do
   `resolve_group_lhs/4` clauses below for the full mechanics.
   """
 
-  alias ScryCore.{CombinedQuery, EngineBehaviour, Query, Rational}
+  alias ScryCore.{CombinedQuery, Cursor, EngineBehaviour, Query, Rational}
 
   @typedoc "One `{ancestor_source_name, ancestor_row}` per enclosing query, nearest first."
   @type scope :: [{String.t(), EngineBehaviour.row()}]
@@ -481,12 +481,29 @@ defmodule ScryCore.Executor do
         run_any(bound_query, scope, params, with_bindings, engine_module, conn)
 
       :error ->
-        engine_module.fetch(conn, [name])
+        fetch_and_materialize(engine_module, conn, [name])
     end
   end
 
   defp fetch_rows(%Query{source: source}, _scope, _params, _with_bindings, engine_module, conn),
-    do: engine_module.fetch(conn, source)
+    do: fetch_and_materialize(engine_module, conn, source)
+
+  # `engine_module.fetch/2` may return any `Enumerable.t()` now, not just
+  # a plain list (`ScryCore.EngineBehaviour`'s own moduledoc has the
+  # reasoning) -- materialized here, immediately, through `ScryCore.
+  # Cursor.to_list/1` (not `Enum.to_list/1` directly, so this genuinely
+  # exercises the same pull-based path any other consumer of the widened
+  # contract would). Every stage downstream of this point (`GROUP BY`/
+  # `ORDER BY`/`DISTINCT`/window functions/set combinators) is inherently
+  # blocking regardless of how `fetch/2` returned its data, so staying
+  # lazy any further than this one boundary buys this module's own
+  # pipeline nothing today -- see `ScryCore.Cursor`'s own moduledoc for
+  # the fuller reasoning on why the *contract* still widened anyway.
+  defp fetch_and_materialize(engine_module, conn, source) do
+    with {:ok, enumerable} <- engine_module.fetch(conn, source) do
+      {:ok, enumerable |> Cursor.new() |> Cursor.to_list()}
+    end
+  end
 
   # Today's ungrouped path, unchanged for a query with no window
   # function anywhere in its own `select` -- `collect_and_rewrite_

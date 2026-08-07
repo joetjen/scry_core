@@ -20,6 +20,26 @@ defmodule ScryCore.ExecutorTest do
     end
   end
 
+  # Same data, same behaviour, but `fetch/2` returns a genuine `Stream`
+  # instead of a plain list -- proves `EngineBehaviour.fetch/2`'s own
+  # widened contract (any `Enumerable.t()`, not just a list) actually
+  # works end to end through `run/4`, not just that the type signature
+  # got wider. `ScryCore.Executor.fetch_rows/6` materializes through
+  # `ScryCore.Cursor` immediately either way, so results must be
+  # byte-identical to `FakeEngine`'s own.
+  defmodule StreamEngine do
+    @moduledoc false
+    @behaviour ScryCore.EngineBehaviour
+
+    @impl true
+    def fetch(data, source) do
+      case Map.fetch(data, source) do
+        {:ok, rows} -> {:ok, Stream.map(rows, & &1)}
+        :error -> {:error, {:no_such_source, source}}
+      end
+    end
+  end
+
   @users [
     %{"name" => "Alice", "age" => 30, "status" => "active"},
     %{"name" => "Bob", "age" => 17, "status" => "pending"},
@@ -174,6 +194,7 @@ defmodule ScryCore.ExecutorTest do
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
   defp run(query, params), do: Executor.run(query, FakeEngine, @data, params)
+  defp run_via_stream(query), do: Executor.run(query, StreamEngine, @data)
 
   test "no wheres, projects the selected fields" do
     query = %Query{source: ["users"], select: [{:field, ["name"]}]}
@@ -2331,6 +2352,55 @@ defmodule ScryCore.ExecutorTest do
 
       assert {:ok, rows} = run(query)
       assert length(rows) == length(@employees)
+    end
+  end
+
+  describe "fetch/2 returning a lazy Enumerable.t() instead of a plain list" do
+    test "a plain WHERE filter, byte-identical results whether fetch/2 returns a list or a Stream" do
+      query = %Query{
+        source: ["users"],
+        wheres: [{:cmp, :gt, ["age"], 18}],
+        select: [{:field, ["name"]}]
+      }
+
+      assert run(query) == run_via_stream(query)
+      assert {:ok, [%{"name" => "Alice"}, %{"name" => "Carol"}]} = run_via_stream(query)
+    end
+
+    test "GROUP BY/HAVING/an aggregate, byte-identical results whether fetch/2 returns a list or a Stream" do
+      query = %Query{
+        source: ["customer_orders"],
+        group_bys: [["customer_id"]],
+        order_bys: [{["customer_id"], :asc}],
+        select: [
+          {:field, ["customer_id"]},
+          {:computed, "total", {:call, "sum", [{:field, ["total"]}]}}
+        ]
+      }
+
+      assert run(query) == run_via_stream(query)
+    end
+
+    test "a nested SELECT (correlation), byte-identical results whether fetch/2 returns a list or a Stream" do
+      query = %Query{
+        source: ["customers"],
+        order_bys: [{["id"], :asc}],
+        select: [
+          {:field, ["name"]},
+          %Query{
+            source: ["customer_orders"],
+            wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+            select: [{:field, ["id"]}]
+          }
+        ]
+      }
+
+      assert run(query) == run_via_stream(query)
+    end
+
+    test "an unknown source still surfaces the same error" do
+      query = %Query{source: ["nonexistent"], select: [{:field, ["id"]}]}
+      assert run_via_stream(query) == {:error, {:no_such_source, ["nonexistent"]}}
     end
   end
 end
