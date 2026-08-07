@@ -2,10 +2,10 @@ defmodule ScryCore.Query do
   @moduledoc """
   The shared target both Scry front ends converge on -- the text grammar
   (`priv/grammar.aether` + `ScryCore.Actions`) and the Elixir-native
-  builder (impl_spec.md §7: a macro DSL, not implemented yet, sugaring
-  over the composable functional API below it, which is). Adapters and
-  tier-4 extensions only ever see this struct; neither knows or needs to
-  know which front end produced it.
+  builder (impl_spec.md §7: `from/2`, a macro DSL sugaring over the
+  composable functional API below it). Adapters and tier-4 extensions
+  only ever see this struct; neither knows or needs to know which front
+  end produced it.
 
   Field shapes here match the full design in impl_spec.md §7, not just
   what `priv/grammar.aether`'s current Phase 1 subset can populate.
@@ -26,9 +26,9 @@ defmodule ScryCore.Query do
   matters most for dynamic query building" per that section's own
   framing. Every function operates on this module's own field shapes
   directly (a predicate is the exact `predicate()` shape `ScryCore.
-  parse/1` already produces, not a friendlier surface syntax) --
-  Layer 2's macro DSL, sugaring over these, is what a more ergonomic
-  surface belongs to, not implemented here.
+  parse/1` already produces, not a friendlier surface syntax). `from/2`,
+  last, is Layer 2 (v1) -- the macro DSL sugaring over Layer 1, with a
+  more ergonomic surface syntax; see its own doc for the v1 scope.
 
   `wheres` is a list, combined with `and`, even though the current
   grammar only ever produces zero or one entry (one `WHERE` clause per
@@ -503,4 +503,38 @@ defmodule ScryCore.Query do
   """
   @spec select(t(), [body_item()]) :: t()
   def select(%__MODULE__{} = query, shape) when is_list(shape), do: %{query | select: shape}
+
+  @doc """
+  impl_spec.md §7's own Layer 2, v1 -- the macro DSL sugaring over
+  every function above, modeled on `Ecto.Query`'s own `from`
+  (`ScryCore.Query.From`, and its own `ScryCore.Query.Escape`, have the
+  full design and its two real divergences from Ecto's own model:
+  Scry has no table-aliasing concept, and `^pin` maps to a *named*
+  deferred parameter matching `$name`, not Ecto's positional one).
+
+      import ScryCore.Query
+
+      query =
+        from u in "users",
+          where: u.age > ^min_age,
+          group_by: [u.status],
+          having: count(u.name) > 1,
+          order_by: [desc: u.age],
+          limit: 10,
+          select: %{status: u.status, total: count(u.name)}
+
+  Expands entirely at compile time into a pipeline of the plain
+  functions above (`new/1 |> where/2 |> group_by/2 |> ...`) -- the
+  expanded code never calls back into this macro or `ScryCore.Query.
+  Escape` at runtime, only ordinary Layer 1 functions.
+
+  **v1 scope**: exactly one bound variable in scope -- no nested
+  `from` (needed for correlating to an *outer* query, or for a
+  nested-query `select` value), no list-shaped `select`, no window
+  functions. `ScryCore.Query.Escape`'s own moduledoc has the reasoning
+  for each; deferred, not forgotten.
+  """
+  defmacro from(binding, opts \\ []) do
+    ScryCore.Query.From.build(binding, opts, __CALLER__)
+  end
 end
