@@ -1,6 +1,6 @@
 defmodule ScryCore.Query.FromTest do
   @moduledoc """
-  `ScryCore.Query.from/2` (impl_spec.md §7 Layer 2, v1) -- confirms a
+  `ScryCore.Query.from/2` (impl_spec.md §7 Layer 2) -- confirms a
   macro-built query executes identically to the equivalent text query,
   the same "both front ends converge on one struct" property `query_
   test.exs` already confirms for Layer 1.
@@ -24,13 +24,19 @@ defmodule ScryCore.Query.FromTest do
   end
 
   @users [
-    %{"name" => "Alice", "age" => 30, "status" => "active"},
-    %{"name" => "Bob", "age" => 17, "status" => "active"},
-    %{"name" => "Carol", "age" => 65, "status" => "inactive"}
+    %{"id" => 1, "name" => "Alice", "age" => 30, "status" => "active"},
+    %{"id" => 2, "name" => "Bob", "age" => 17, "status" => "active"},
+    %{"id" => 3, "name" => "Carol", "age" => 65, "status" => "inactive"}
+  ]
+
+  @orders [
+    %{"id" => 10, "user_id" => 1, "total" => 80},
+    %{"id" => 11, "user_id" => 1, "total" => 20},
+    %{"id" => 12, "user_id" => 3, "total" => 5}
   ]
 
   setup do
-    %{conn: %{["users"] => @users}}
+    %{conn: %{["users"] => @users, ["orders"] => @orders}}
   end
 
   test "a bare source string is wrapped into a single-element source path" do
@@ -139,6 +145,85 @@ defmodule ScryCore.Query.FromTest do
           from(u in "users", select: [:name])
         end
       )
+    end
+  end
+
+  describe "nested from (correlation)" do
+    test "impl_spec.md §7's own worked example, executed end to end", %{conn: conn} do
+      query =
+        from(u in "users",
+          where: u.age > 18,
+          select: %{
+            name: u.name,
+            orders:
+              from(o in "orders",
+                where: o.total > 50 and o.user_id == u.id,
+                select: %{id: o.id, total: o.total}
+              )
+          }
+        )
+
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+
+      assert rows == [
+               %{"name" => "Alice", "orders" => [%{"id" => 10, "total" => 80}]},
+               %{"name" => "Carol", "orders" => []}
+             ]
+    end
+
+    test "the nested query's own where correctly correlates to the outer's literal source name",
+         %{conn: conn} do
+      query =
+        from(u in "users",
+          select: %{
+            name: u.name,
+            orders: from(o in "orders", where: o.user_id == u.id, select: %{id: o.id})
+          }
+        )
+
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+
+      assert rows == [
+               %{"name" => "Alice", "orders" => [%{"id" => 10}, %{"id" => 11}]},
+               %{"name" => "Bob", "orders" => []},
+               %{"name" => "Carol", "orders" => [%{"id" => 12}]}
+             ]
+    end
+
+    test "a select: map key that doesn't match the nested from's own source is a clear error" do
+      assert_raise ArgumentError, ~r/doesn't match the nested `from`'s own source/, fn ->
+        Code.eval_quoted(
+          quote do
+            import ScryCore.Query
+
+            from(u in "users",
+              select: %{
+                wrong_key: from(o in "orders", where: o.user_id == u.id, select: %{id: o.id})
+              }
+            )
+          end
+        )
+      end
+    end
+
+    test "a nested from under a non-compile-time-known outer source is a clear error" do
+      assert_raise ArgumentError,
+                   ~r/needs its own outer `from`'s source to be a compile-time-known/,
+                   fn ->
+                     Code.eval_quoted(
+                       quote do
+                         import ScryCore.Query
+                         source = "users"
+
+                         from(u in source,
+                           select: %{
+                             orders:
+                               from(o in "orders", where: o.user_id == u.id, select: %{id: o.id})
+                           }
+                         )
+                       end
+                     )
+                   end
     end
   end
 end

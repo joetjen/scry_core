@@ -3,9 +3,11 @@ defmodule ScryCore.Query.EscapeTest do
 
   alias ScryCore.Query.Escape
 
-  defp predicate(ast), do: ast |> Escape.escape_predicate(:u, __ENV__) |> eval()
-  defp expr(ast), do: ast |> Escape.escape_expr(:u, __ENV__) |> eval()
-  defp path(ast), do: ast |> Escape.escape_path(:u, __ENV__) |> eval()
+  defp predicate(ast, vars \\ %{u: :self}),
+    do: ast |> Escape.escape_predicate(vars, __ENV__) |> eval()
+
+  defp expr(ast, vars \\ %{u: :self}), do: ast |> Escape.escape_expr(vars, __ENV__) |> eval()
+  defp path(ast, vars \\ %{u: :self}), do: ast |> Escape.escape_path(vars, __ENV__) |> eval()
   defp eval(quoted), do: quoted |> Code.eval_quoted() |> elem(0)
 
   describe "escape_predicate/3" do
@@ -66,8 +68,8 @@ defmodule ScryCore.Query.EscapeTest do
       end
     end
 
-    test "a variable not matching the bound variable is a clear error" do
-      assert_raise ArgumentError, ~r/doesn't resolve to the bound variable `u`/, fn ->
+    test "a variable not matching any bound variable in scope is a clear error, listing what is" do
+      assert_raise ArgumentError, ~r/expected one of: `u`/, fn ->
         predicate(quote(do: other.name == "x"))
       end
     end
@@ -158,6 +160,35 @@ defmodule ScryCore.Query.EscapeTest do
 
     test "a bare bound variable with no field is a clear error" do
       assert_raise ArgumentError, ~r/isn't a valid field path/, fn -> path(quote(do: u)) end
+    end
+  end
+
+  describe "multi-entry vars (nested from / correlation)" do
+    @vars %{o: :self, u: "users"}
+
+    test "the :self entry resolves to a bare, unqualified path" do
+      assert expr(quote(do: o.total), @vars) == {:field, ["total"]}
+      assert path(quote(do: o.total), @vars) == ["total"]
+    end
+
+    test "an ancestor entry resolves to a path seeded with its own literal qualifier" do
+      assert expr(quote(do: u.id), @vars) == {:field, ["users", "id"]}
+      assert path(quote(do: u.id), @vars) == ["users", "id"]
+    end
+
+    test "a predicate correlating an ancestor field to the current one" do
+      assert predicate(quote(do: o.user_id == u.id), @vars) ==
+               {:cmp, :eq, ["user_id"], {:field, ["users", "id"]}}
+    end
+
+    test "an unbound variable error lists every name actually in scope" do
+      error =
+        assert_raise ArgumentError, fn ->
+          expr(quote(do: other.name), @vars)
+        end
+
+      assert error.message =~ "`o`"
+      assert error.message =~ "`u`"
     end
   end
 end

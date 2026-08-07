@@ -19,22 +19,29 @@ defmodule ScryCore.Query.Escape do
   running inside a `quote` block the way every function below is
   free to.
 
-  **Single bound variable only, `v1` (see `scry_core`'s own plan/
-  changelog for the full reasoning)**: unlike Ecto, which lets an
-  arbitrary alias (`u`) stand for one of several joined sources
-  (disambiguated via a compile-time `vars` list mapping each alias to
-  a positional index), Scry's own language has no table-aliasing
-  concept at all -- `ScryCore.Query`'s own moduledoc is explicit that
+  **No table-aliasing concept, unlike Ecto** -- Ecto's own arbitrary
+  alias (`u`) stands for one of several joined sources, disambiguated
+  via a compile-time `vars` list mapping each alias to a positional
+  index (`&0`, `&1`, ...). Scry's own language has no table-aliasing
+  concept at all: `ScryCore.Query`'s own moduledoc is explicit that
   correlation resolves by matching a path's leading segment against an
-  *ancestor's own literal source name*, at execution time, not parse
-  time. A nested `from` (needed to let an inner query's own `where`
-  correlate to an outer one, `impl_spec.md` §7's own `select:`-nested-
-  `from` example) would need this module to track each ancestor
-  binding's real source string, not just its Elixir-side alias --
-  genuinely separate work, not implemented here. Every function below
-  takes exactly one `bound_var` (the single atom `from var in source`
-  bound), and a `var.a.b` path whose leading segment doesn't match it
-  is a clear compile error, not a silent misinterpretation.
+  *ancestor's own literal source name*, at execution time
+  (`ScryCore.Executor`'s own `get_path/3`, matched via `List.keyfind/3`
+  against a runtime `scope`), not a parser-time alias. Every function
+  below takes a `vars()` map instead of Ecto's own positional list --
+  `%{u: :self, o: "orders"}`, say, inside a nested `from o in "orders"`
+  under an outer `from u in ..., select: %{orders: from o in ...}}` --
+  `:self` means "this query's own bound variable, translate to a bare,
+  unqualified path"; a string means "an ancestor's own bound variable,
+  translate to a path seeded with its own literal source name" (which
+  is why `ScryCore.Query.From` requires an outer `from`'s own `source`
+  to be a compile-time-known string whenever a nested `from` actually
+  correlates to it -- there is no other way for *this* module to know
+  what literal string to bake into the path, `ScryCore.Executor`'s own
+  scope-threading being fully dynamic notwithstanding). A `var.a.b`
+  path whose leading segment doesn't match any name in `vars` is a
+  clear compile error listing every name actually in scope, never a
+  silent misinterpretation.
 
   **`^var` is a *named* deferred parameter, not Ecto's own positional
   one** -- `impl_spec.md` §7's own divergence table says the pin is
@@ -60,6 +67,14 @@ defmodule ScryCore.Query.Escape do
   type -- not attempted here; see this module's own catch-all errors.
   """
 
+  @typedoc """
+  Maps each bound variable currently in scope to `:self` (this query's
+  own bound variable) or its own ancestor's literal source name (a
+  `String.t()`) -- see this module's own moduledoc for the full
+  reasoning. `ScryCore.Query.From` builds and threads this.
+  """
+  @type vars :: %{atom() => :self | String.t()}
+
   @call_names ~w(
     sum avg count min max stddev_samp stddev_pop var_samp var_pop percentile
     string int exact inexact json
@@ -70,8 +85,8 @@ defmodule ScryCore.Query.Escape do
   Escapes `ast` as a `predicate()` -- `where:`/`having:`/a `cond`
   clause's own condition.
   """
-  @spec escape_predicate(Macro.t(), atom(), Macro.Env.t()) :: Macro.t()
-  def escape_predicate({op, _, [left, right]}, bound_var, env)
+  @spec escape_predicate(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
+  def escape_predicate({op, _, [left, right]}, vars, env)
       when op in [:==, :!=, :<, :>, :<=, :>=] do
     cmp_op =
       case op do
@@ -83,36 +98,36 @@ defmodule ScryCore.Query.Escape do
         :>= -> :ge
       end
 
-    lhs = escape_predicate_lhs(left, bound_var, env)
-    rhs = escape_predicate_rhs(right, bound_var, env)
+    lhs = escape_predicate_lhs(left, vars, env)
+    rhs = escape_predicate_rhs(right, vars, env)
     quote do: {:cmp, unquote(cmp_op), unquote(lhs), unquote(rhs)}
   end
 
-  def escape_predicate({:and, _, [left, right]}, bound_var, env) do
+  def escape_predicate({:and, _, [left, right]}, vars, env) do
     quote do
-      {:and, unquote(escape_predicate(left, bound_var, env)),
-       unquote(escape_predicate(right, bound_var, env))}
+      {:and, unquote(escape_predicate(left, vars, env)),
+       unquote(escape_predicate(right, vars, env))}
     end
   end
 
-  def escape_predicate({:or, _, [left, right]}, bound_var, env) do
+  def escape_predicate({:or, _, [left, right]}, vars, env) do
     quote do
-      {:or, unquote(escape_predicate(left, bound_var, env)),
-       unquote(escape_predicate(right, bound_var, env))}
+      {:or, unquote(escape_predicate(left, vars, env)),
+       unquote(escape_predicate(right, vars, env))}
     end
   end
 
-  def escape_predicate({:not, _, [pred]}, bound_var, env) do
-    quote do: {:not, unquote(escape_predicate(pred, bound_var, env))}
+  def escape_predicate({:not, _, [pred]}, vars, env) do
+    quote do: {:not, unquote(escape_predicate(pred, vars, env))}
   end
 
-  def escape_predicate({:in, _, [left, values_ast]}, bound_var, env) do
-    lhs = escape_predicate_lhs(left, bound_var, env)
-    values = escape_in_values(values_ast, bound_var, env)
+  def escape_predicate({:in, _, [left, values_ast]}, vars, env) do
+    lhs = escape_predicate_lhs(left, vars, env)
+    values = escape_in_values(values_ast, vars, env)
     quote do: {:in, unquote(lhs), unquote(values)}
   end
 
-  def escape_predicate(other, _bound_var, _env) do
+  def escape_predicate(other, _vars, _env) do
     raise ArgumentError,
           "`#{Macro.to_string(other)}` is not a valid predicate -- expected a comparison " <>
             "(==, !=, <, >, <=, >=), `and`/`or`/`not`, or `in`"
@@ -122,17 +137,17 @@ defmodule ScryCore.Query.Escape do
   Escapes `ast` as an `expr()` -- `select:`'s own values, an
   arithmetic operand, a `cond` clause's own result.
   """
-  @spec escape_expr(Macro.t(), atom(), Macro.Env.t()) :: Macro.t()
-  def escape_expr({:^, _, [var]}, _bound_var, _env) do
+  @spec escape_expr(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
+  def escape_expr({:^, _, [var]}, _vars, _env) do
     quote do: {:param, unquote(pinned_var_name!(var))}
   end
 
-  def escape_expr({{:., _, [_base, field]}, _, []} = ast, bound_var, _env)
+  def escape_expr({{:., _, [_base, field]}, _, []} = ast, vars, _env)
       when is_atom(field) do
-    quote do: {:field, unquote(resolve_path!(ast, bound_var))}
+    quote do: {:field, unquote(resolve_path!(ast, vars))}
   end
 
-  def escape_expr({op, _, [left, right]}, bound_var, env)
+  def escape_expr({op, _, [left, right]}, vars, env)
       when op in [:+, :-, :*, :/, :**] do
     arith_op =
       case op do
@@ -144,30 +159,30 @@ defmodule ScryCore.Query.Escape do
       end
 
     quote do
-      {:arith, unquote(arith_op), unquote(escape_expr(left, bound_var, env)),
-       unquote(escape_expr(right, bound_var, env))}
+      {:arith, unquote(arith_op), unquote(escape_expr(left, vars, env)),
+       unquote(escape_expr(right, vars, env))}
     end
   end
 
-  def escape_expr({:cond, _, [[do: clauses]]}, bound_var, env) do
-    escape_cond(clauses, bound_var, env)
+  def escape_expr({:cond, _, [[do: clauses]]}, vars, env) do
+    escape_cond(clauses, vars, env)
   end
 
-  def escape_expr({name, _, args}, bound_var, env) when is_atom(name) and is_list(args) do
-    escape_call!(name, args, bound_var, env)
+  def escape_expr({name, _, args}, vars, env) when is_atom(name) and is_list(args) do
+    escape_call!(name, args, vars, env)
   end
 
-  def escape_expr(literal, _bound_var, _env)
+  def escape_expr(literal, _vars, _env)
       when is_number(literal) or is_binary(literal) or is_boolean(literal) or is_nil(literal) or
              is_atom(literal) do
     literal
   end
 
-  def escape_expr(list, bound_var, env) when is_list(list) do
-    Enum.map(list, &escape_expr(&1, bound_var, env))
+  def escape_expr(list, vars, env) when is_list(list) do
+    Enum.map(list, &escape_expr(&1, vars, env))
   end
 
-  def escape_expr(other, _bound_var, _env) do
+  def escape_expr(other, _vars, _env) do
     raise ArgumentError, "`#{Macro.to_string(other)}` is not a valid Scry expression"
   end
 
@@ -176,58 +191,58 @@ defmodule ScryCore.Query.Escape do
   entries -- `ScryCore.Query.group_by/2`/`order_by/2` expect
   `[String.t()]`, not a wrapped `{:field, ...}` expr()).
   """
-  @spec escape_path(Macro.t(), atom(), Macro.Env.t()) :: Macro.t()
-  def escape_path(ast, bound_var, _env), do: resolve_path!(ast, bound_var)
+  @spec escape_path(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
+  def escape_path(ast, vars, _env), do: resolve_path!(ast, vars)
 
   # ---------------------------------------------------------------------
   # predicate() lhs/rhs -- narrower than a full expr(), see this
   # module's own moduledoc for why.
 
-  defp escape_predicate_lhs({name, _, args}, bound_var, env)
+  defp escape_predicate_lhs({name, _, args}, vars, env)
        when is_atom(name) and is_list(args) do
-    escape_call!(name, args, bound_var, env)
+    escape_call!(name, args, vars, env)
   end
 
-  defp escape_predicate_lhs(ast, bound_var, _env), do: resolve_path!(ast, bound_var)
+  defp escape_predicate_lhs(ast, vars, _env), do: resolve_path!(ast, vars)
 
   # Shared by escape_expr/3's own function-call clause and
   # escape_predicate_lhs/3's own -- the exact same recognition + arg-
   # escaping logic either way, `predicate()`'s own `lhs` widening to
   # `{:call, ...}` specifically to let `HAVING sum(total) > 200`
   # (lang_spec §11's own worked example) parse at all.
-  defp escape_call!(name, args, bound_var, env) do
+  defp escape_call!(name, args, vars, env) do
     unless to_string(name) in @call_names do
       raise ArgumentError,
             "`#{name}` is not a recognized Scry function (expected one of: " <>
               "#{Enum.join(@call_names, ", ")})"
     end
 
-    escaped_args = Enum.map(args, &escape_expr(&1, bound_var, env))
+    escaped_args = Enum.map(args, &escape_expr(&1, vars, env))
     quote do: {:call, unquote(to_string(name)), unquote(escaped_args)}
   end
 
-  defp escape_predicate_rhs({:^, _, [var]}, _bound_var, _env) do
+  defp escape_predicate_rhs({:^, _, [var]}, _vars, _env) do
     quote do: {:param, unquote(pinned_var_name!(var))}
   end
 
-  defp escape_predicate_rhs({{:., _, [_base, field]}, _, []} = ast, bound_var, _env)
+  defp escape_predicate_rhs({{:., _, [_base, field]}, _, []} = ast, vars, _env)
        when is_atom(field) do
-    quote do: {:field, unquote(resolve_path!(ast, bound_var))}
+    quote do: {:field, unquote(resolve_path!(ast, vars))}
   end
 
-  defp escape_predicate_rhs({name, _, ctx}, _bound_var, _env)
+  defp escape_predicate_rhs({name, _, ctx}, _vars, _env)
        when is_atom(name) and is_atom(ctx) do
     raise ArgumentError,
           "bare variable `#{name}` on a predicate's own right-hand side is ambiguous -- " <>
             "did you mean `^#{name}` (a parameter)?"
   end
 
-  defp escape_predicate_rhs(literal, _bound_var, _env)
+  defp escape_predicate_rhs(literal, _vars, _env)
        when is_number(literal) or is_binary(literal) or is_boolean(literal) or is_nil(literal) do
     literal
   end
 
-  defp escape_predicate_rhs(other, _bound_var, _env) do
+  defp escape_predicate_rhs(other, _vars, _env) do
     raise ArgumentError,
           "`#{Macro.to_string(other)}` is not a valid predicate right-hand side -- expected a " <>
             "literal, a field path, or a `^pinned` parameter"
@@ -239,30 +254,29 @@ defmodule ScryCore.Query.Escape do
   # to check membership against (ScryCore.Query's own `{:in, lhs,
   # values}` -- `values :: [term() | {:param, ...}] | {:field, ...} |
   # {:call, ...} | {:dot, ...}`).
-  defp escape_in_values(list, bound_var, env) when is_list(list) do
-    Enum.map(list, &escape_predicate_rhs(&1, bound_var, env))
+  defp escape_in_values(list, vars, env) when is_list(list) do
+    Enum.map(list, &escape_predicate_rhs(&1, vars, env))
   end
 
-  defp escape_in_values(ast, bound_var, env), do: escape_expr(ast, bound_var, env)
+  defp escape_in_values(ast, vars, env), do: escape_expr(ast, vars, env)
 
   # ---------------------------------------------------------------------
   # cond -> {:when, clauses, else_expr}. lang_spec's own ELSE is
   # mandatory, enforced here at compile time (a non-`true` final clause
   # is a clear error) rather than left to Elixir's own `cond`, which
   # merely crashes at runtime with no matching clause.
-  defp escape_cond(clauses, bound_var, env) do
+  defp escape_cond(clauses, vars, env) do
     {when_clauses, else_clause} = split_cond_clauses!(clauses)
 
     escaped_when_clauses =
       Enum.map(when_clauses, fn {:->, _, [[pred], expr]} ->
         quote do
-          {unquote(escape_predicate(pred, bound_var, env)),
-           unquote(escape_expr(expr, bound_var, env))}
+          {unquote(escape_predicate(pred, vars, env)), unquote(escape_expr(expr, vars, env))}
         end
       end)
 
     {:->, _, [[true], else_expr]} = else_clause
-    escaped_else = escape_expr(else_expr, bound_var, env)
+    escaped_else = escape_expr(else_expr, vars, env)
 
     quote do: {:when, unquote(escaped_when_clauses), unquote(escaped_else)}
   end
@@ -280,46 +294,57 @@ defmodule ScryCore.Query.Escape do
   end
 
   # ---------------------------------------------------------------------
-  # Shared path resolution -- var.a.b, walked recursively back to the
-  # bound variable. Every intermediate segment must itself be a plain
-  # zero-arg dot-access (never a call), and the base must be exactly
-  # `bound_var` -- anything else is a clear "unbound variable" compile
-  # error, never silently misread as something else. (Known, accepted
-  # imprecision: a genuine zero-arg *module*-qualified call, e.g.
-  # `SomeModule.func()`, has the identical AST shape to field access
-  # and would hit this same error rather than a more specific one --
-  # v1's 19 recognized call names are all bare, unqualified calls, so
-  # this never comes up in practice; not worth the extra complexity to
-  # disambiguate for a case that can't currently arise.)
-  defp resolve_path!(ast, bound_var) do
-    case collect_path(ast, bound_var) do
-      {:ok, []} ->
+  # Shared path resolution -- var.a.b, walked recursively back to
+  # whichever bound variable `var` names. Every intermediate segment
+  # must itself be a plain zero-arg dot-access (never a call), and the
+  # base must be a name present in `vars` -- anything else is a clear
+  # "unbound variable" compile error, never silently misread as
+  # something else. (Known, accepted imprecision: a genuine zero-arg
+  # *module*-qualified call, e.g. `SomeModule.func()`, has the identical
+  # AST shape to field access and would hit this same error rather than
+  # a more specific one -- v1's 19 recognized call names are all bare,
+  # unqualified calls, so this never comes up in practice; not worth
+  # the extra complexity to disambiguate for a case that can't
+  # currently arise.)
+  #
+  # `vars[name]` is `:self` (this query's own bound variable -- the
+  # resulting path is bare, unqualified) or a `String.t()` (an
+  # *ancestor's* own literal source name, seeded as the path's own
+  # leading segment -- `ScryCore.Query.From`'s own moduledoc has the
+  # full reasoning for why this has to be a literal string baked in at
+  # macro-expansion time, not anything resolved later).
+  defp resolve_path!(ast, vars) do
+    case collect_path(ast, vars) do
+      {:ok, [], var_name} ->
         raise ArgumentError,
-              "bare `#{bound_var}` isn't a valid field path -- did you mean `#{bound_var}.something`?"
+              "bare `#{var_name}` isn't a valid field path -- did you mean `#{var_name}.something`?"
 
-      {:ok, segments} ->
+      {:ok, segments, _var_name} ->
         segments
 
       :error ->
         raise ArgumentError,
-              "`#{Macro.to_string(ast)}` doesn't resolve to the bound variable `#{bound_var}` -- " <>
-                "Scry's own native builder supports exactly one bound variable in scope (v1); " <>
-                "correlating to an outer query isn't supported yet"
+              "`#{Macro.to_string(ast)}` doesn't resolve to a bound variable in scope -- " <>
+                "expected one of: #{vars |> Map.keys() |> Enum.map_join(", ", &"`#{&1}`")}"
     end
   end
 
-  defp collect_path({{:., _, [base, field]}, _, []}, bound_var) when is_atom(field) do
-    case collect_path(base, bound_var) do
-      {:ok, segments} -> {:ok, segments ++ [Atom.to_string(field)]}
+  defp collect_path({{:., _, [base, field]}, _, []}, vars) when is_atom(field) do
+    case collect_path(base, vars) do
+      {:ok, segments, var_name} -> {:ok, segments ++ [Atom.to_string(field)], var_name}
       :error -> :error
     end
   end
 
-  defp collect_path({name, _, ctx}, bound_var) when name == bound_var and is_atom(ctx) do
-    {:ok, []}
+  defp collect_path({name, _, ctx}, vars) when is_atom(name) and is_atom(ctx) do
+    case Map.fetch(vars, name) do
+      {:ok, :self} -> {:ok, [], name}
+      {:ok, qualifier} when is_binary(qualifier) -> {:ok, [qualifier], name}
+      :error -> :error
+    end
   end
 
-  defp collect_path(_other, _bound_var), do: :error
+  defp collect_path(_other, _vars), do: :error
 
   defp pinned_var_name!({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: to_string(name)
 

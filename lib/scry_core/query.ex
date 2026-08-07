@@ -27,8 +27,9 @@ defmodule ScryCore.Query do
   framing. Every function operates on this module's own field shapes
   directly (a predicate is the exact `predicate()` shape `ScryCore.
   parse/1` already produces, not a friendlier surface syntax). `from/2`,
-  last, is Layer 2 (v1) -- the macro DSL sugaring over Layer 1, with a
-  more ergonomic surface syntax; see its own doc for the v1 scope.
+  last, is Layer 2 -- the macro DSL sugaring over Layer 1, with a more
+  ergonomic surface syntax, nested `from` (correlation) included; see
+  its own doc for what's still out of scope.
 
   `wheres` is a list, combined with `and`, even though the current
   grammar only ever produces zero or one entry (one `WHERE` clause per
@@ -505,36 +506,56 @@ defmodule ScryCore.Query do
   def select(%__MODULE__{} = query, shape) when is_list(shape), do: %{query | select: shape}
 
   @doc """
-  impl_spec.md §7's own Layer 2, v1 -- the macro DSL sugaring over
-  every function above, modeled on `Ecto.Query`'s own `from`
-  (`ScryCore.Query.From`, and its own `ScryCore.Query.Escape`, have the
-  full design and its two real divergences from Ecto's own model:
-  Scry has no table-aliasing concept, and `^pin` maps to a *named*
-  deferred parameter matching `$name`, not Ecto's positional one).
+  impl_spec.md §7's own Layer 2 -- the macro DSL sugaring over every
+  function above, modeled on `Ecto.Query`'s own `from` (`ScryCore.
+  Query.From`, and its own `ScryCore.Query.Escape`, have the full
+  design and its two real divergences from Ecto's own model: Scry has
+  no table-aliasing concept, and `^pin` maps to a *named* deferred
+  parameter matching `$name`, not Ecto's positional one).
 
       import ScryCore.Query
 
       query =
         from u in "users",
-          where: u.age > ^min_age,
-          group_by: [u.status],
-          having: count(u.name) > 1,
+          where: u.age > 30,
           order_by: [desc: u.age],
-          limit: 10,
-          select: %{status: u.status, total: count(u.name)}
+          limit: 5,
+          select: %{
+            name: u.name,
+            email: u.email,
+            orders:
+              from(o in "orders",
+                where: o.total > 50 and o.user_id == u.id,
+                having: sum(o.total) > 200,
+                select: %{order_count: count(o.id), total_spent: sum(o.total)}
+              )
+          }
+
+  -- impl_spec.md §7's own worked example, translated directly (nesting
+  a `from` inside a `select:` shape is how a nested `SELECT { }` body
+  with correlation to its own enclosing query is expressed; no special
+  nested-block syntax needed, ordinary Elixir nesting already has the
+  right shape). **One real correction to that section's own prose**,
+  found by actually compiling this, not assumed: the nested `from`
+  needs the explicit parens shown above -- a no-parens call as a
+  container literal's own value is ambiguous to Elixir's parser (does
+  a `where:` two lines down belong to the inner `from` or the outer
+  `select:` map?), so `orders: from o in "orders", where: ...` alone,
+  as that section's own prose literally shows it, doesn't actually
+  compile.
 
   Expands entirely at compile time into a pipeline of the plain
   functions above (`new/1 |> where/2 |> group_by/2 |> ...`) -- the
   expanded code never calls back into this macro or `ScryCore.Query.
-  Escape` at runtime, only ordinary Layer 1 functions.
+  Escape` at runtime, only ordinary Layer 1 functions. A nested `from`
+  needs its own *outer* `from`'s `source` to be a compile-time-known
+  string (or list of strings) -- `ScryCore.Query.From`'s own moduledoc
+  has the reasoning; a `from` with no nested `from` inside it is
+  unaffected either way, `source` can still be any runtime expression.
 
-  **v1 scope**: exactly one bound variable in scope -- no nested
-  `from` (needed for correlating to an *outer* query, or for a
-  nested-query `select` value), no list-shaped `select`, no window
-  functions. `ScryCore.Query.Escape`'s own moduledoc has the reasoning
-  for each; deferred, not forgotten.
+  **Still out of scope**: a list-shaped `select`, window functions.
   """
   defmacro from(binding, opts \\ []) do
-    ScryCore.Query.From.build(binding, opts, __CALLER__)
+    ScryCore.Query.From.build(binding, opts, %{}, __CALLER__)
   end
 end
