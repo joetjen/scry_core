@@ -1,22 +1,34 @@
 defmodule ScryCore.Query do
   @moduledoc """
   The shared target both Scry front ends converge on -- the text grammar
-  (`priv/grammar.aether` + `ScryCore.Actions`) and, eventually, the
-  Elixir-native builder (impl_spec.md §7: a macro DSL plus a composable
-  functional API, neither implemented yet). Adapters and tier-4
-  extensions only ever see this struct; neither knows or needs to know
-  which front end produced it.
+  (`priv/grammar.aether` + `ScryCore.Actions`) and the Elixir-native
+  builder (impl_spec.md §7: a macro DSL, not implemented yet, sugaring
+  over the composable functional API below it, which is). Adapters and
+  tier-4 extensions only ever see this struct; neither knows or needs to
+  know which front end produced it.
 
   Field shapes here match the full design in impl_spec.md §7, not just
   what `priv/grammar.aether`'s current Phase 1 subset can populate.
   `group_bys`/`havings`/`distinct`/`order_bys`/`limit`/`offset` are all
   populated now (the full lang_spec.md §5.2 header-modifier chain,
   minus `group by ... rollup`/`... cube`); `group_mode` is the one
-  exception still stuck at its `:plain` default either way -- rollup/cube
-  aren't in the grammar yet, so nothing ever sets it to anything else.
+  exception no *grammar* text can set to anything but its `:plain`
+  default -- `group_by_rollup/2`/`group_by_cube/2` below, the composable
+  builder's own counterpart, can, though nothing in `ScryCore.Executor`
+  can run the result yet (a clear, explicit error instead of a silently
+  wrong plain-grouped answer -- see that module's own moduledoc).
   `variant` is the extension slot an EP1(b)/(c)/(d)-shaped construct from
   a loaded kind populates (impl_spec.md §2); core itself never writes to
   it.
+
+  `new/1` through `select/2`, below the struct definition, are impl_spec
+  .md §7's own Layer 1 -- the composable functional API, "the one that
+  matters most for dynamic query building" per that section's own
+  framing. Every function operates on this module's own field shapes
+  directly (a predicate is the exact `predicate()` shape `ScryCore.
+  parse/1` already produces, not a friendlier surface syntax) --
+  Layer 2's macro DSL, sugaring over these, is what a more ergonomic
+  surface belongs to, not implemented here.
 
   `wheres` is a list, combined with `and`, even though the current
   grammar only ever produces zero or one entry (one `WHERE` clause per
@@ -376,4 +388,119 @@ defmodule ScryCore.Query do
             variant: %{},
             with_bindings: %{},
             type_decls: %{}
+
+  @doc """
+  Starts a new, empty query against `source` -- impl_spec.md §7's
+  Layer 1, the composable functional counterpart to writing `SELECT
+  <source> { ... }` as text. Every other function below takes the
+  query it returns (or one already built up by another of them) as its
+  own first argument, so a full query is assembled via `|>`, the same
+  way `Ecto.Query`'s own functional API composes -- "the one that
+  matters most for dynamic query building" per that section's own
+  framing, since a caller already has well-typed data to hand these
+  functions directly, not source text to interpolate into.
+
+  Every function here operates on the exact same field shapes `t()`
+  itself already has (a predicate is the same `predicate()` shape
+  `ScryCore.parse/1` already produces, a field path is the same
+  `[String.t()]`, ...) rather than guessing at a friendlier surface
+  syntax -- that ergonomic layer is impl_spec.md §7's own Layer 2 (a
+  macro DSL built *on top of* these, not implemented yet), which this
+  layer is the deliberately more mechanical foundation for.
+  """
+  @spec new([String.t()]) :: t()
+  def new(source) when is_list(source), do: %__MODULE__{source: source}
+
+  @doc """
+  Adds one predicate to `query`'s own `wheres`, combined with every
+  other one already there via `and` (`wheres` being a list is exactly
+  for this -- see this module's own moduledoc). Each call adds one more
+  clause on top of whatever's already there; call it more than once to
+  build a conjunction up incrementally, the same composable way
+  `Ecto.Query.where/3` does.
+  """
+  @spec where(t(), predicate()) :: t()
+  def where(%__MODULE__{} = query, predicate), do: %{query | wheres: query.wheres ++ [predicate]}
+
+  @doc """
+  The `HAVING`-clause counterpart to `where/2` -- adds one predicate to
+  `query`'s own `havings`, meaningful only alongside `group_by/2` (or
+  the implicit whole-result group a query with no `group_by/2` call at
+  all still gets, lang_spec.md §5.2), same as text `HAVING`.
+  """
+  @spec having(t(), predicate()) :: t()
+  def having(%__MODULE__{} = query, predicate),
+    do: %{query | havings: query.havings ++ [predicate]}
+
+  @doc """
+  Sets `query`'s own `group_bys` to `paths` -- a list of field paths,
+  each path itself a list of segments for a dot-nested field, matching
+  `t()`'s own `group_bys` type exactly rather than guessing at a
+  flatter convenience shape (`group_by(query, [["region"]])`, not
+  `group_by(query, ["region"])` -- the latter is genuinely ambiguous
+  between "one two-segment nested path" and "two top-level fields," so
+  this module doesn't try to guess). Replaces any prior `group_by/2`
+  call rather than accumulating across calls the way `where/2`
+  accumulates predicates -- lang_spec.md §5.2's own `GROUP BY <field>[,
+  ...]` is one clause naming several fields, not several clauses.
+  """
+  @spec group_by(t(), [[String.t()]]) :: t()
+  def group_by(%__MODULE__{} = query, paths) when is_list(paths),
+    do: %{query | group_bys: paths, group_mode: :plain}
+
+  @doc """
+  `group_by/2`, with `group_mode: :rollup` (lang_spec.md §5.2's own
+  `GROUP BY ... ROLLUP`, hierarchical subtotal rows in addition to the
+  fully-grouped ones). **Not yet executable** -- building a query with
+  this raises nothing here, but `ScryCore.Executor.run/3` does, with a
+  clear, explicit error rather than a silently wrong (plain-grouped)
+  answer; see that module's own moduledoc for why ROLLUP/CUBE's own
+  subtotal-row generation is real, separate, unimplemented work.
+  """
+  @spec group_by_rollup(t(), [[String.t()]]) :: t()
+  def group_by_rollup(%__MODULE__{} = query, paths) when is_list(paths),
+    do: %{query | group_bys: paths, group_mode: :rollup}
+
+  @doc "`group_by_rollup/2`, with `group_mode: :cube` instead -- same caveat."
+  @spec group_by_cube(t(), [[String.t()]]) :: t()
+  def group_by_cube(%__MODULE__{} = query, paths) when is_list(paths),
+    do: %{query | group_bys: paths, group_mode: :cube}
+
+  @doc """
+  Sets (not accumulates) `query`'s own `distinct` flag -- `true` unless
+  `bool` is passed explicitly, matching lang_spec.md §5.2's own bare
+  `DISTINCT` (no argument) header modifier.
+  """
+  @spec distinct(t(), boolean()) :: t()
+  def distinct(query, bool \\ true)
+
+  def distinct(%__MODULE__{} = query, bool) when is_boolean(bool), do: %{query | distinct: bool}
+
+  @doc """
+  Sets (not accumulates) `query`'s own `order_bys` to `order_bys` --
+  `{path, direction}` pairs matching `t()`'s own type exactly, the same
+  "one clause, several keys" shape `group_by/2` has, since `ORDER BY`
+  is a single clause with multiple keys too (lang_spec.md §5.2).
+  """
+  @spec order_by(t(), [{[String.t()], :asc | :desc}]) :: t()
+  def order_by(%__MODULE__{} = query, order_bys) when is_list(order_bys),
+    do: %{query | order_bys: order_bys}
+
+  @doc "Sets `query`'s own `limit`. `nil` clears a previously-set one."
+  @spec limit(t(), non_neg_integer() | nil) :: t()
+  def limit(%__MODULE__{} = query, n) when (is_integer(n) and n >= 0) or is_nil(n),
+    do: %{query | limit: n}
+
+  @doc "Sets `query`'s own `offset`. `nil` clears a previously-set one."
+  @spec offset(t(), non_neg_integer() | nil) :: t()
+  def offset(%__MODULE__{} = query, n) when (is_integer(n) and n >= 0) or is_nil(n),
+    do: %{query | offset: n}
+
+  @doc """
+  Sets `query`'s own `select` to `shape` -- a list of `body_item()`s,
+  the projection this query's own execution produces per output row,
+  the pipeable counterpart to writing `{ ... }` as text.
+  """
+  @spec select(t(), [body_item()]) :: t()
+  def select(%__MODULE__{} = query, shape) when is_list(shape), do: %{query | select: shape}
 end

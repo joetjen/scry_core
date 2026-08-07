@@ -25,7 +25,15 @@ defmodule ScryCore.Executor do
   `query.group_bys` is empty, which is exactly what makes lang_spec
   §11's own nested, un-grouped `SELECT orders { count(id), sum(total) }`
   work -- it collapses to one output row, the same mechanism `GROUP BY`
-  itself uses per distinct key.
+  itself uses per distinct key. `query.group_mode` other than `:plain`
+  (`:rollup`/`:cube`, lang_spec.md §5.2's own `GROUP BY ... ROLLUP`/
+  `... CUBE`) raises a clear, explicit error instead -- ROLLUP/CUBE's
+  own hierarchical-subtotal-row generation is real, separate,
+  unimplemented work, not something the plain grouped path happens to
+  get right or wrong; nothing in `priv/grammar.aether` can produce a
+  non-`:plain` `group_mode` yet, but `ScryCore.Query.group_by_rollup/2`/
+  `group_by_cube/2` (impl_spec.md §7's own composable builder API) can,
+  which is what makes this guard reachable for the first time.
 
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
   `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
@@ -425,6 +433,14 @@ defmodule ScryCore.Executor do
       {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
 
       cond do
+        query.group_mode != :plain ->
+          raise ArgumentError,
+                "GROUP BY ... #{String.upcase(to_string(query.group_mode))} isn't supported " <>
+                  "yet -- ROLLUP/CUBE's own hierarchical-subtotal-row generation is a real, " <>
+                  "separate feature this executor doesn't implement (ScryCore.Query." <>
+                  "group_by_rollup/2/group_by_cube/2 build a query with this set; nothing in " <>
+                  "priv/grammar.aether can set it from text yet either)"
+
         windows != [] and aggregate_query?(query) ->
           raise ArgumentError,
                 "combining GROUP BY/an aggregate query with a window function in the same " <>
