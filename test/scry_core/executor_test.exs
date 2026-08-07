@@ -1068,6 +1068,164 @@ defmodule ScryCore.ExecutorTest do
     end
   end
 
+  describe "null-safety (lang_spec.md §7)" do
+    @nullable_users [
+      %{"name" => "Alice", "age" => 30},
+      %{"name" => "Bob", "age" => nil},
+      %{"name" => "Carol", "age" => 65}
+    ]
+
+    @nullable_orders [%{"status" => "open", "priority" => nil, "total" => 10}]
+
+    test "comparing a nullable field directly against a typed value hard-errors when it's actually nil" do
+      query = %Query{
+        source: ["nullable_users"],
+        wheres: [{:cmp, :gt, ["age"], 20}],
+        select: [{:field, ["name"]}]
+      }
+
+      assert {:ok, cursor} =
+               Executor.run(query, FakeEngine, %{["nullable_users"] => @nullable_users})
+
+      assert_raise ArgumentError, ~r/comparing a nullable field.*hard error/s, fn ->
+        Cursor.to_list(cursor)
+      end
+    end
+
+    test "field = nil is the explicit null-check idiom -- never hard-errors" do
+      query = %Query{
+        source: ["nullable_users"],
+        wheres: [{:cmp, :eq, ["age"], nil}],
+        select: [{:field, ["name"]}]
+      }
+
+      assert {:ok, rows} =
+               run_against(query, %{["nullable_users"] => @nullable_users})
+
+      assert rows == [%{"name" => "Bob"}]
+    end
+
+    test "field != nil is the explicit non-null check -- never hard-errors, even for the non-nil rows it excludes nothing about" do
+      query = %Query{
+        source: ["nullable_users"],
+        wheres: [{:cmp, :not_eq, ["age"], nil}],
+        select: [{:field, ["name"]}]
+      }
+
+      assert {:ok, rows} =
+               run_against(query, %{["nullable_users"] => @nullable_users})
+
+      assert Enum.sort(rows) == Enum.sort([%{"name" => "Alice"}, %{"name" => "Carol"}])
+    end
+
+    test "AND-guarded flow-sensitive narrowing avoids the hard error -- lang_spec.md's own worked example" do
+      query = %Query{
+        source: ["nullable_users"],
+        wheres: [
+          {:and, {:not, {:cmp, :eq, ["age"], nil}}, {:cmp, :gt, ["age"], 20}}
+        ],
+        select: [{:field, ["name"]}]
+      }
+
+      assert {:ok, rows} =
+               run_against(query, %{["nullable_users"] => @nullable_users})
+
+      assert Enum.sort(rows) == Enum.sort([%{"name" => "Alice"}, %{"name" => "Carol"}])
+    end
+
+    test "OR short-circuit avoids the hard error -- lang_spec.md's own worked example" do
+      query = %Query{
+        source: ["nullable_users"],
+        wheres: [{:or, {:cmp, :eq, ["age"], nil}, {:cmp, :gt, ["age"], 20}}],
+        select: [{:field, ["name"]}]
+      }
+
+      assert {:ok, rows} =
+               run_against(query, %{["nullable_users"] => @nullable_users})
+
+      assert Enum.sort(rows) ==
+               Enum.sort([%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}])
+    end
+
+    test "a WHEN clause's own guard predicate hard-errors the same way, reusing eval_predicate/4 directly" do
+      query = %Query{
+        source: ["nullable_users"],
+        select: [
+          {:computed, "bucket", {:when, [{{:cmp, :gt, ["age"], 20}, "adult"}], "unknown"}}
+        ]
+      }
+
+      assert {:ok, cursor} =
+               Executor.run(query, FakeEngine, %{["nullable_users"] => @nullable_users})
+
+      assert_raise ArgumentError, ~r/comparing a nullable field.*hard error/s, fn ->
+        Cursor.to_list(cursor)
+      end
+    end
+
+    test "HAVING a bare grouped field unguarded hard-errors too, via the eager path (percentile forces :not_streamable)" do
+      query = %Query{
+        source: ["nullable_orders"],
+        group_bys: [["status"]],
+        havings: [{:cmp, :gt, ["priority"], 3}],
+        select: [
+          {:field, ["status"]},
+          {:computed, "p", {:call, "percentile", [{:field, ["total"]}, 0.5]}}
+        ]
+      }
+
+      assert_raise ArgumentError, ~r/comparing a nullable field.*hard error/s, fn ->
+        run_against(query, %{["nullable_orders"] => @nullable_orders})
+      end
+    end
+
+    test "HAVING a bare grouped field unguarded hard-errors too, via the streaming path" do
+      query = %Query{
+        source: ["nullable_orders"],
+        group_bys: [["status"]],
+        havings: [{:cmp, :gt, ["priority"], 3}],
+        select: [{:field, ["status"]}]
+      }
+
+      assert_raise ArgumentError, ~r/comparing a nullable field.*hard error/s, fn ->
+        run_against(query, %{["nullable_orders"] => @nullable_orders})
+      end
+    end
+
+    test "HAVING priority = nil is the explicit null-check idiom in a grouped context too -- never hard-errors" do
+      query = %Query{
+        source: ["nullable_orders"],
+        group_bys: [["status"]],
+        havings: [{:cmp, :eq, ["priority"], nil}],
+        select: [{:field, ["status"]}]
+      }
+
+      assert {:ok, rows} = run_against(query, %{["nullable_orders"] => @nullable_orders})
+      assert rows == [%{"status" => "open"}]
+    end
+
+    test "HAVING an AND-guarded grouped field avoids the hard error, streaming path included" do
+      query = %Query{
+        source: ["nullable_orders"],
+        group_bys: [["status"]],
+        havings: [
+          {:and, {:not, {:cmp, :eq, ["priority"], nil}}, {:cmp, :gt, ["priority"], 3}}
+        ],
+        select: [{:field, ["status"]}]
+      }
+
+      assert {:ok, rows} = run_against(query, %{["nullable_orders"] => @nullable_orders})
+      assert rows == []
+    end
+
+    defp run_against(query, conn) do
+      case Executor.run(query, FakeEngine, conn) do
+        {:ok, cursor} -> {:ok, Cursor.to_list(cursor)}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
   describe "GROUP BY ... ROLLUP / CUBE (lang_spec.md §5.2)" do
     @rollup_select [
       {:field, ["region"]},

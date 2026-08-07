@@ -311,6 +311,27 @@ defmodule ScryCore.Executor do
   own `{:in, lhs, values}` moduledoc paragraphs, and this module's own
   `eval_predicate/4`/`eval_group_predicate/4`/`resolve_predicate_lhs/4`/
   `resolve_group_lhs/4` clauses below for the full mechanics.
+
+  **Null-safety (lang_spec.md §7).** An ordinary comparison (`WHERE`/
+  `WHEN`, and both `HAVING` paths) hard-errors the moment either side
+  resolves to `nil` -- the same "no silent nil-skipping" rule this
+  module's own aggregates already enforce (`raise_aggregate_nil_error/1`),
+  just for a plain comparison instead of a reduction. One explicit
+  exemption, matched ahead of the general rule: a *literal* `nil` on a
+  `:cmp`'s own right-hand side (`field = nil`/`field != nil`, `KW_NIL`'s
+  only possible shape) is lang_spec's own null-check idiom, never
+  hard-erroring -- Elixir's own short-circuiting `and`/`or` (already how
+  `{:and, ...}`/`{:or, ...}` are evaluated here) is what makes both of
+  §7's own worked examples (`WHERE NOT (age = nil) AND age > 30`,
+  `WHERE age = nil OR age > 30`) flow-sensitively safe at runtime for
+  free, no separate narrowing pass needed. This is the *runtime* half of
+  §7's null-safety rule only -- it needs no schema/registry, since it's
+  about a row's own actual value, not a declared type; the *compile-time*
+  half (rejecting an unguarded nullable-field comparison statically,
+  wherever a schema is reachable) is real, separate work gated on
+  `ScryCore.Query`'s own `type_decls`/a registry hook existing at all,
+  neither of which do yet (`ScryCore.Query`'s own moduledoc has the full
+  "parsed, not yet consumed" scope reasoning).
   """
 
   alias ScryCore.{CombinedQuery, Cursor, EngineBehaviour, Query, Rational}
@@ -1072,10 +1093,18 @@ defmodule ScryCore.Executor do
   defp having_matches_streaming?(havings, group_state, scope, params),
     do: Enum.all?(havings, &eval_having_streaming?(&1, group_state, scope, params))
 
+  # Mirrors `eval_predicate/4`'s own literal-`nil`-rhs exemption --
+  # kept in parity with `eval_group_predicate/4`'s own identical clause,
+  # the eager `HAVING` path's counterpart to this streaming one.
+  defp eval_having_streaming?({:cmp, op, lhs, nil}, group_state, scope, params),
+    do: compare(op, finalize_side(lhs, group_state, scope, params), nil)
+
   defp eval_having_streaming?({:cmp, op, lhs, rhs}, group_state, scope, params) do
     left = finalize_side(lhs, group_state, scope, params)
 
     case finalize_side(rhs, group_state, scope, params) do
+      _ when is_nil(left) -> raise_null_safety_error()
+      nil -> raise_null_safety_error()
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
       right -> compare(op, left, right)
     end
@@ -1567,6 +1596,16 @@ defmodule ScryCore.Executor do
   defp matches_all?(row, wheres, scope, params),
     do: Enum.all?(wheres, &eval_predicate(&1, row, scope, params))
 
+  # `rhs` is the literal `nil` (`KW_NIL` always produces the bare atom
+  # `nil`, unwrapped, `ScryCore.Actions`' own `:literal` handler --
+  # never `{:literal, nil}` or any other tag) -- lang_spec.md §7's own
+  # explicit null-check idiom (`WHERE age = nil`, `WHERE NOT (age = nil)
+  # AND age > 30`), matched *before* the general clause below so it's
+  # always exempt from that clause's own null-safety hard-error, no
+  # matter what `left` resolves to.
+  defp eval_predicate({:cmp, op, lhs, nil}, row, scope, params),
+    do: compare(op, resolve_predicate_lhs(lhs, row, scope, params), nil)
+
   # `rhs` resolves first (the literal value as-is; another field's value
   # via `{:field, path}`, scope-aware so it can reach across a nesting
   # boundary, lang_spec §5.9; or an external parameter's bound value via
@@ -1582,10 +1621,22 @@ defmodule ScryCore.Executor do
   # predicate in this module already has (e.g. `<`/`>` against
   # mismatched types already "works" via Erlang's own total term order
   # without erroring, just not usefully).
+  #
+  # `left`/`right` resolving to `nil` here (unlike the literal-`nil`-rhs
+  # clause above) is never the explicit null-check idiom -- it's a
+  # nullable field genuinely reached unguarded (lang_spec.md §7's own
+  # null-safety rule: "comparing a nullable field directly against a
+  # typed value is a hard error -- always at runtime"), so it hard-
+  # errors the same way `eval_aggregate/5`'s own nil-hard-error already
+  # does for an aggregate argument, rather than silently comparing
+  # through Erlang's own total term order (`nil` sorting as just another
+  # atom, `nil > 30` quietly meaning something no query author intended).
   defp eval_predicate({:cmp, op, lhs, rhs}, row, scope, params) do
     left = resolve_predicate_lhs(lhs, row, scope, params)
 
     case resolve_rhs(rhs, row, scope, params) do
+      _ when is_nil(left) -> raise_null_safety_error()
+      nil -> raise_null_safety_error()
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
       right -> compare(op, left, right)
     end
@@ -1678,6 +1729,23 @@ defmodule ScryCore.Executor do
   defp resolve_predicate_lhs({:literal, value}, _row, _scope, _params), do: value
 
   defp compare(op, a, b), do: ordering_result(op, term_order(a, b))
+
+  # Matches `raise_aggregate_nil_error/1`'s own wording almost verbatim
+  # -- lang_spec.md §7's null-safety rule is the ordinary-comparison
+  # counterpart of §5.8's aggregate one ("no silent nil-skipping" for
+  # either), and shared verbatim by all three `{:cmp, ...}` evaluators
+  # this file has (`eval_predicate/4`, `eval_group_predicate/4`,
+  # `eval_having_streaming?/4`) so the message -- and the rule itself --
+  # stays in parity across all three, not just worded similarly by
+  # convention.
+  defp raise_null_safety_error do
+    raise ArgumentError,
+          "comparing a nullable field against a typed value encountered a nil value -- " <>
+            "lang_spec.md's own null-safety rule (\"comparing a nullable field directly " <>
+            "against a typed value is a hard error\") -- guard it first (e.g. " <>
+            "WHERE NOT (field = nil) AND field > ...), or compare against nil explicitly " <>
+            "(WHERE field = nil) to check nullness instead"
+  end
 
   # `%Rational{}`/integer/`float()` are compared exactly (cross-
   # multiplication via Rational.compare/2, ScryCore.Rational's own
@@ -1880,10 +1948,20 @@ defmodule ScryCore.Executor do
   # separate family, not unified via an extra parameter, the same way
   # `resolve_rhs`/`eval_predicate` themselves are already two parallel
   # families rather than one merged dispatcher.
+  # Mirrors `eval_predicate/4`'s own literal-`nil`-rhs exemption --
+  # lang_spec.md §7's null-check idiom applies just as much to `HAVING`
+  # (`HAVING count(x) = nil` doesn't really make sense, but a bare
+  # grouped field like `HAVING status = nil` does), matched before the
+  # general clause below for the same reason.
+  defp eval_group_predicate({:cmp, op, lhs, nil}, member_rows, scope, params),
+    do: compare(op, resolve_group_lhs(lhs, member_rows, scope, params), nil)
+
   defp eval_group_predicate({:cmp, op, lhs, rhs}, member_rows, scope, params) do
     left = resolve_group_lhs(lhs, member_rows, scope, params)
 
     case resolve_group_rhs(rhs, member_rows, scope, params) do
+      _ when is_nil(left) -> raise_null_safety_error()
+      nil -> raise_null_safety_error()
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
       right -> compare(op, left, right)
     end

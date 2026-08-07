@@ -149,15 +149,33 @@ defmodule ScryCore.Query do
   query") mirrors `with_bindings`' own shape and top-level-only scope --
   a `name => type_decl()` map, populated once by `document`'s own
   handler, meaningful only on the query/combined-query `ScryCore.parse/1`
-  hands back. Unlike `with_bindings`, **nothing in this codebase reads
-  it yet** -- lang_spec §7's full type system (union-type comparison
-  checking, flow-sensitive null-safety narrowing through `and`/`or`/
-  `not`, a schema-registry hook, `Json<Type>` field-access validation)
-  is a real, separate, much larger undertaking than parsing the
-  declaration shape; this is the same "grammar accepts it, nothing
-  consumes it yet" posture `body_item_ep1 := NEVER`/`:variant` already
-  have for an EP1(b)/(c)/(d) construct with no real kind contributing
-  one. `type_expr()` mirrors lang_spec's own EBNF verbatim (`<type> ::=
+  hands back. **Still nothing in this codebase reads it** -- lang_spec
+  §7's full *compile-time* type system (union-type comparison checking
+  against a declared field's own type, a schema-registry hook, `Json
+  <Type>` field-access validation, and compile-time flow-sensitive
+  narrowing specifically) is a real, separate, much larger undertaking
+  than parsing the declaration shape; this is the same "grammar accepts
+  it, nothing consumes it yet" posture `body_item_ep1 := NEVER`/
+  `:variant` already have for an EP1(b)/(c)/(d) construct with no real
+  kind contributing one.
+
+  §7's *runtime* null-safety rule ("comparing a nullable field directly
+  against a typed value is a hard error — always at runtime") **has**
+  landed, independently of `type_decls`/a registry -- it needs neither,
+  since it's about a row's own actual field *value* being `nil` at
+  execution time, not a schema's own declared nullability.
+  `ScryCore.Executor`'s three `{:cmp, ...}` evaluators (`WHERE`/`WHEN`,
+  and both the eager and streaming `HAVING` paths, kept in parity) all
+  hard-error the moment either side of an ordinary comparison resolves
+  to `nil`, with one explicit exemption: `field = nil`/`field != nil`
+  (a literal `nil` on the right, exactly the shape `KW_NIL` always
+  produces) is lang_spec's own null-check idiom, never hard-erroring
+  regardless of what the field's own value is -- the mechanism §7's
+  worked examples (`WHERE NOT (age = nil) AND age > 30`, `WHERE age =
+  nil OR age > 30`) rely on, and Elixir's own short-circuiting `and`/
+  `or` (already how `eval_predicate/4`'s own `{:and, ...}`/`{:or, ...}`
+  clauses are implemented) makes both flow-sensitive at runtime for
+  free, no extra narrowing logic needed on top. `type_expr()` mirrors lang_spec's own EBNF verbatim (`<type> ::=
   <base-type> | ?<base-type> | <type> | <type>`) -- `{:named, name,
   param}` covers every bare type name (`Int`, `String`, a reference to
   another declared `TYPE`, and `Json`/`Json<...>` uniformly, *not*
