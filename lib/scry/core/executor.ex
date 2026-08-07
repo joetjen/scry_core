@@ -633,7 +633,14 @@ defmodule Scry.Core.Executor do
   # sigil the way a `FRAGMENT` spread's own `...` has, so an
   # unrecognized bare name is just assumed to be a real source (`Query`'s
   # own moduledoc).
-  defp fetch_rows(%Query{source: [name]}, scope, params, with_bindings, engine_module, conn) do
+  defp fetch_rows(
+         %Query{source: [name]} = query,
+         scope,
+         params,
+         with_bindings,
+         engine_module,
+         conn
+       ) do
     case Map.fetch(with_bindings, name) do
       {:ok, bound_query} ->
         # `run_any/6` already returns `{:ok, Cursor.t()}` -- no extra
@@ -642,12 +649,19 @@ defmodule Scry.Core.Executor do
         run_any(bound_query, scope, params, with_bindings, engine_module, conn)
 
       :error ->
-        fetch_lazy(engine_module, conn, [name])
+        fetch_lazy(engine_module, conn, [name], query)
     end
   end
 
-  defp fetch_rows(%Query{source: source}, _scope, _params, _with_bindings, engine_module, conn),
-    do: fetch_lazy(engine_module, conn, source)
+  defp fetch_rows(
+         %Query{source: source} = query,
+         _scope,
+         _params,
+         _with_bindings,
+         engine_module,
+         conn
+       ),
+       do: fetch_lazy(engine_module, conn, source, query)
 
   # `engine_module.fetch/2` may return any `Enumerable.t()` now, not just
   # a plain list (`Scry.Core.EngineBehaviour`'s own moduledoc has the
@@ -664,8 +678,23 @@ defmodule Scry.Core.Executor do
   # than `limit + offset` of them held at once (`run_topk_streaming/7`,
   # for `ORDER BY` combined with `LIMIT`) -- this function itself stays
   # agnostic to which.
-  defp fetch_lazy(engine_module, conn, source) do
-    with {:ok, enumerable} <- engine_module.fetch(conn, source) do
+  #
+  # Prefers `engine_module.fetch/3` (the whole `query` too) when the
+  # engine implements it, falling back to `fetch/2` otherwise --
+  # `Scry.Core.EngineBehaviour`'s own moduledoc has the full pushdown
+  # contract and its own load-bearing safety invariant. Every engine
+  # that only implements `fetch/2` is completely unaffected: `function_
+  # exported?/3` is `false` for it, so this always takes the `fetch/2`
+  # branch, byte-identical to before `fetch/3` existed.
+  defp fetch_lazy(engine_module, conn, source, query) do
+    result =
+      if function_exported?(engine_module, :fetch, 3) do
+        engine_module.fetch(conn, source, query)
+      else
+        engine_module.fetch(conn, source)
+      end
+
+    with {:ok, enumerable} <- result do
       {:ok, Cursor.new(enumerable)}
     end
   end
