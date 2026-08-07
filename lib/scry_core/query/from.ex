@@ -93,18 +93,7 @@ defmodule ScryCore.Query.From do
   end
 
   defp clause_call(:order_by, value_ast, vars, _source_ast, env) when is_list(value_ast) do
-    escaped =
-      Enum.map(value_ast, fn
-        {dir, path_ast} when dir in [:asc, :desc] ->
-          path = Escape.escape_path(path_ast, vars, env)
-          quote do: {unquote(path), unquote(dir)}
-
-        other ->
-          raise ArgumentError,
-                "`order_by:` entries must be `asc: var.path` or `desc: var.path`, got " <>
-                  "`#{Macro.to_string(other)}`"
-      end)
-
+    escaped = Escape.escape_order_by_entries(value_ast, vars, env)
     quote do: ScryCore.Query.order_by(unquote(escaped))
   end
 

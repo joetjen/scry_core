@@ -191,4 +191,55 @@ defmodule ScryCore.Query.EscapeTest do
       assert error.message =~ "`u`"
     end
   end
+
+  describe "over/2 (window functions)" do
+    test "row_number() OVER PARTITION BY ... ORDER BY ..., lang_spec §11's own worked example" do
+      ast =
+        quote do
+          over(row_number(), partition_by: [u.department], order_by: [desc: u.salary])
+        end
+
+      assert expr(ast) ==
+               {:window, {:call, "row_number", []}, [["department"]], [{["salary"], :desc}], nil}
+    end
+
+    test "an aggregate reused as a window function, with no partition/order at all" do
+      assert expr(quote(do: over(sum(u.total), []))) ==
+               {:window, {:call, "sum", [{:field, ["total"]}]}, [], [], nil}
+    end
+
+    test "rows_between with named frame-bound atoms" do
+      ast = quote(do: over(sum(u.total), rows_between: {:unbounded_preceding, :current_row}))
+
+      assert expr(ast) ==
+               {:window, {:call, "sum", [{:field, ["total"]}]}, [], [],
+                {:unbounded_preceding, :current_row}}
+    end
+
+    test "rows_between with {:preceding, n}/{:following, n} bounds" do
+      ast = quote(do: over(sum(u.total), rows_between: {{:preceding, 3}, {:following, 1}}))
+
+      assert expr(ast) ==
+               {:window, {:call, "sum", [{:field, ["total"]}]}, [], [],
+                {{:preceding, 3}, {:following, 1}}}
+    end
+
+    test "an unrecognized frame bound is a clear error" do
+      assert_raise ArgumentError, ~r/is not a valid frame bound/, fn ->
+        expr(quote(do: over(sum(u.total), rows_between: {:bogus, :current_row})))
+      end
+    end
+
+    test "a non-integer or non-positive n in {:preceding, n} is a clear error" do
+      assert_raise ArgumentError, ~r/is not a valid frame bound/, fn ->
+        expr(quote(do: over(sum(u.total), rows_between: {{:preceding, 0}, :current_row})))
+      end
+    end
+
+    test "over/2's own first argument must be a recognized call" do
+      assert_raise ArgumentError, ~r/must be a recognized call/, fn ->
+        expr(quote(do: over(u.total, [])))
+      end
+    end
+  end
 end

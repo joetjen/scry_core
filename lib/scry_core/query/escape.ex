@@ -135,7 +135,9 @@ defmodule ScryCore.Query.Escape do
 
   @doc """
   Escapes `ast` as an `expr()` -- `select:`'s own values, an
-  arithmetic operand, a `cond` clause's own result.
+  arithmetic operand, a `cond` clause's own result. Includes `over/2`
+  (window functions, `escape_over/4`'s own comment has the full
+  `partition_by:`/`order_by:`/`rows_between:` syntax).
   """
   @spec escape_expr(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
   def escape_expr({:^, _, [var]}, _vars, _env) do
@@ -168,6 +170,10 @@ defmodule ScryCore.Query.Escape do
     escape_cond(clauses, vars, env)
   end
 
+  def escape_expr({:over, _, [call_ast, opts_ast]}, vars, env) when is_list(opts_ast) do
+    escape_over(call_ast, opts_ast, vars, env)
+  end
+
   def escape_expr({name, _, args}, vars, env) when is_atom(name) and is_list(args) do
     escape_call!(name, args, vars, env)
   end
@@ -193,6 +199,27 @@ defmodule ScryCore.Query.Escape do
   """
   @spec escape_path(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
   def escape_path(ast, vars, _env), do: resolve_path!(ast, vars)
+
+  @doc """
+  Escapes an `order_by:` keyword-list AST (`[asc: u.name, desc: u.age]`
+  -- the same `asc:`/`desc:` shorthand `ScryCore.Query.From`'s own
+  `order_by:` clause and `over/2`'s own `order_by:` option both take)
+  into the quoted `[{path, :asc | :desc}]` list `ScryCore.Query.
+  order_by/2` expects. Shared by both callers rather than duplicated.
+  """
+  @spec escape_order_by_entries(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
+  def escape_order_by_entries(entries, vars, env) when is_list(entries) do
+    Enum.map(entries, fn
+      {dir, path_ast} when dir in [:asc, :desc] ->
+        path = escape_path(path_ast, vars, env)
+        quote do: {unquote(path), unquote(dir)}
+
+      other ->
+        raise ArgumentError,
+              "`order_by:` entries must be `asc: var.path` or `desc: var.path`, got " <>
+                "`#{Macro.to_string(other)}`"
+    end)
+  end
 
   # ---------------------------------------------------------------------
   # predicate() lhs/rhs -- narrower than a full expr(), see this
@@ -291,6 +318,66 @@ defmodule ScryCore.Query.Escape do
               "a Scry `cond` must end with a `true ->` clause (lang_spec.md's own WHEN...ELSE " <>
                 "is mandatory, not optional) preceded by at least one real WHEN clause"
     end
+  end
+
+  # ---------------------------------------------------------------------
+  # over(call, partition_by: [...], order_by: [...], rows_between: {...})
+  # -> {:window, call, partition_by, order_bys, frame}. `over` isn't a
+  # real Scry function name (not in @call_names) -- a DSL-level marker
+  # this module recognizes specially, the same way `cond` is, since
+  # lang_spec's own text syntax (`<call> OVER PARTITION BY ... ORDER BY
+  # ... ROWS BETWEEN ... AND ...`) has no natural Elixir infix
+  # equivalent to mirror directly. `call` itself is escaped through the
+  # ordinary escape_call!/4 -- any of the recognized names, not
+  # restricted to the 4 window-only ones or the 10 real aggregates
+  # here; `ScryCore.Executor.compute_window_values/4` is what actually
+  # rejects a nonsensical one (`over(string(x), ...)`), the same
+  # "grammar/builder stays permissive, execution rejects misuse"
+  # posture every other construct in this module already has.
+  defp escape_over({name, _, args}, opts, vars, env) when is_atom(name) and is_list(args) do
+    call = escape_call!(name, args, vars, env)
+
+    partition_by =
+      opts
+      |> Keyword.get(:partition_by, [])
+      |> Enum.map(&escape_path(&1, vars, env))
+
+    order_bys = escape_order_by_entries(Keyword.get(opts, :order_by, []), vars, env)
+    frame = escape_frame!(Keyword.get(opts, :rows_between))
+
+    quote do: {:window, unquote(call), unquote(partition_by), unquote(order_bys), unquote(frame)}
+  end
+
+  defp escape_over(other, _opts, _vars, _env) do
+    raise ArgumentError,
+          "`over/2`'s own first argument must be a recognized call (e.g. `sum(u.total)`, " <>
+            "`row_number()`), got `#{Macro.to_string(other)}`"
+  end
+
+  defp escape_frame!(nil), do: nil
+
+  defp escape_frame!({start_bound, end_bound}) do
+    quote do: {unquote(escape_frame_bound!(start_bound)), unquote(escape_frame_bound!(end_bound))}
+  end
+
+  defp escape_frame!(other) do
+    raise ArgumentError,
+          "`rows_between:` must be a `{start_bound, end_bound}` pair, got `#{inspect(other)}`"
+  end
+
+  @frame_bound_atoms [:unbounded_preceding, :current_row, :unbounded_following]
+
+  defp escape_frame_bound!(bound) when bound in @frame_bound_atoms, do: bound
+
+  defp escape_frame_bound!({dir, n})
+       when dir in [:preceding, :following] and is_integer(n) and n > 0,
+       do: {dir, n}
+
+  defp escape_frame_bound!(other) do
+    raise ArgumentError,
+          "`#{inspect(other)}` is not a valid frame bound -- expected one of: " <>
+            "#{Enum.map_join(@frame_bound_atoms, ", ", &inspect/1)}, `{:preceding, n}`, " <>
+            "`{:following, n}` (n a positive integer)"
   end
 
   # ---------------------------------------------------------------------

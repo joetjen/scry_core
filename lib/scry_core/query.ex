@@ -553,7 +553,12 @@ defmodule ScryCore.Query do
   has the reasoning; a `from` with no nested `from` inside it is
   unaffected either way, `source` can still be any runtime expression.
 
-  **Still out of scope**: a list-shaped `select`, window functions.
+  Window functions (`over/2`, `ScryCore.Query.Escape`'s own moduledoc
+  has the full syntax): `over(row_number(), partition_by: [u.dept],
+  order_by: [desc: u.salary])`, matching lang_spec.md §11's own worked
+  example exactly.
+
+  **Still out of scope**: a list-shaped `select`.
   """
   defmacro from(binding, opts \\ []) do
     ScryCore.Query.From.build(binding, opts, %{}, __CALLER__)

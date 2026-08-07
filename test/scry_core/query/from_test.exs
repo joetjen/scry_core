@@ -226,4 +226,70 @@ defmodule ScryCore.Query.FromTest do
                    end
     end
   end
+
+  describe "over/2 (window functions)" do
+    test "row_number() OVER PARTITION BY ... ORDER BY ..., executed end to end", %{conn: conn} do
+      query =
+        from(u in "users",
+          select: %{
+            name: u.name,
+            status: u.status,
+            rank: over(row_number(), partition_by: [u.status], order_by: [desc: u.age])
+          }
+        )
+
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+
+      assert Enum.sort_by(rows, &{&1["status"], &1["rank"]}) == [
+               %{"name" => "Alice", "status" => "active", "rank" => 1},
+               %{"name" => "Bob", "status" => "active", "rank" => 2},
+               %{"name" => "Carol", "status" => "inactive", "rank" => 1}
+             ]
+    end
+
+    test "the same window expression, built and via text, produce identical results", %{
+      conn: conn
+    } do
+      built =
+        from(u in "users",
+          select: %{
+            rank: over(row_number(), partition_by: [u.status], order_by: [desc: u.age])
+          }
+        )
+
+      assert {:ok, parsed} =
+               ScryCore.parse(
+                 "SELECT users { rank: row_number() OVER PARTITION BY status ORDER BY age DESC }"
+               )
+
+      assert built.select == parsed.select
+
+      assert {:ok, built_rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+      assert {:ok, parsed_rows} = ScryCore.Executor.run(parsed, StaticEngine, conn)
+      assert Enum.sort(built_rows) == Enum.sort(parsed_rows)
+    end
+
+    test "a running sum with an explicit frame, executed end to end", %{conn: conn} do
+      query =
+        from(u in "users",
+          where: u.status == "active",
+          order_by: [asc: u.name],
+          select: %{
+            name: u.name,
+            running_total:
+              over(sum(u.age),
+                order_by: [asc: u.name],
+                rows_between: {:unbounded_preceding, :current_row}
+              )
+          }
+        )
+
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+
+      assert rows == [
+               %{"name" => "Alice", "running_total" => 30},
+               %{"name" => "Bob", "running_total" => 47}
+             ]
+    end
+  end
 end
