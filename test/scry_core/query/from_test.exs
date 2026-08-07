@@ -137,17 +137,6 @@ defmodule ScryCore.Query.FromTest do
     end
   end
 
-  test "a select value that isn't a map literal raises a clear compile-time error" do
-    assert_raise ArgumentError, ~r/select:` must be a map literal/, fn ->
-      Code.eval_quoted(
-        quote do
-          import ScryCore.Query
-          from(u in "users", select: [:name])
-        end
-      )
-    end
-  end
-
   describe "nested from (correlation)" do
     test "impl_spec.md §7's own worked example, executed end to end", %{conn: conn} do
       query =
@@ -290,6 +279,76 @@ defmodule ScryCore.Query.FromTest do
                %{"name" => "Alice", "running_total" => 30},
                %{"name" => "Bob", "running_total" => 47}
              ]
+    end
+  end
+
+  describe "list-shaped select" do
+    test "bare field paths, executed identically to the equivalent text query", %{conn: conn} do
+      built = from(u in "users", select: [u.name, u.age])
+      assert {:ok, parsed} = ScryCore.parse(~s(SELECT users { name, age }))
+      assert built.select == parsed.select
+
+      assert {:ok, rows} = ScryCore.Executor.run(built, StaticEngine, conn)
+
+      assert rows == [
+               %{"name" => "Alice", "age" => 30},
+               %{"name" => "Bob", "age" => 17},
+               %{"name" => "Carol", "age" => 65}
+             ]
+    end
+
+    test "a bare field mixed with an aliased computed entry", %{conn: conn} do
+      query = from(o in "orders", select: [o.id, doubled: o.total * 2])
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+
+      assert rows == [
+               %{"id" => 10, "doubled" => 160},
+               %{"id" => 11, "doubled" => 40},
+               %{"id" => 12, "doubled" => 10}
+             ]
+    end
+
+    test "a nested from as a bare list item, with no map key to get wrong", %{conn: conn} do
+      query =
+        from(u in "users",
+          select: [
+            u.name,
+            from(o in "orders", where: o.user_id == u.id, select: [o.id, o.total])
+          ]
+        )
+
+      assert {:ok, rows} = ScryCore.Executor.run(query, StaticEngine, conn)
+
+      assert rows == [
+               %{
+                 "name" => "Alice",
+                 "orders" => [%{"id" => 10, "total" => 80}, %{"id" => 11, "total" => 20}]
+               },
+               %{"name" => "Bob", "orders" => []},
+               %{"name" => "Carol", "orders" => [%{"id" => 12, "total" => 5}]}
+             ]
+    end
+
+    test "an unaliased non-field expression is a clear compile-time error" do
+      assert_raise ArgumentError, ~r/doesn't resolve to a bound variable in scope/, fn ->
+        Code.eval_quoted(
+          quote do
+            import ScryCore.Query
+            from(u in "users", select: [u.age * 2])
+          end
+        )
+      end
+    end
+
+    test "a select value that's neither a map nor a list is a clear compile-time error" do
+      assert_raise ArgumentError, ~r/must be a map literal.*or a list/, fn ->
+        Code.eval_quoted(
+          quote do
+            import ScryCore.Query
+            from(u in "users", select: 5)
+          end
+        )
+      end
     end
   end
 end

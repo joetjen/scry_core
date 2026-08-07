@@ -558,7 +558,23 @@ defmodule ScryCore.Query do
   order_by: [desc: u.salary])`, matching lang_spec.md §11's own worked
   example exactly.
 
-  **Still out of scope**: a list-shaped `select`.
+  `select:` also accepts a list, mirroring lang_spec.md §9's own
+  `<body-item> ::= <field> | <alias>: <field> | <alias>: <expression> |
+  ... | nested SELECT` directly -- a bare item must be a field path
+  (`u.name`), an aliased one is an ordinary keyword-list entry (`total:
+  u.price * u.quantity`), and a nested `from` may appear bare, with no
+  map key to get wrong:
+
+      select: [
+        u.name,
+        total: u.price * u.quantity,
+        orders: from(o in "orders", where: o.user_id == u.id, select: [o.id, o.total])
+      ]
+
+  The map form (`select: %{...}`) is unchanged and still the more
+  ergonomic choice whenever every item has (or needs) an alias -- the
+  list form exists for the cases lang_spec.md §9 allows that a map's
+  mandatory keys cannot express, an unaliased field chief among them.
   """
   defmacro from(binding, opts \\ []) do
     ScryCore.Query.From.build(binding, opts, %{}, __CALLER__)

@@ -118,10 +118,15 @@ defmodule ScryCore.Query.From do
     quote do: ScryCore.Query.select(unquote(items))
   end
 
+  defp clause_call(:select, value_ast, vars, source_ast, env) when is_list(value_ast) do
+    items = Enum.map(value_ast, &select_list_item(&1, vars, source_ast, env))
+    quote do: ScryCore.Query.select(unquote(items))
+  end
+
   defp clause_call(:select, other, _vars, _source_ast, _env) do
     raise ArgumentError,
-          "`select:` must be a map literal (`%{key: expr, ...}`), got `#{Macro.to_string(other)}` " <>
-            "-- a list-shaped select isn't supported yet"
+          "`select:` must be a map literal (`%{key: expr, ...}`) or a list (`[u.name, " <>
+            "total: u.price * u.quantity, ...]`), got `#{Macro.to_string(other)}`"
   end
 
   # A nested `from` -- spliced directly (t()'s own unwrapped shape),
@@ -132,12 +137,7 @@ defmodule ScryCore.Query.From do
     current_qualifier = extract_qualifier!(source_ast, "a nested `from`")
     validate_nested_key!(key, inner_binding)
 
-    child_vars =
-      Map.new(vars, fn
-        {name, :self} -> {name, current_qualifier}
-        {name, qualifier} -> {name, qualifier}
-      end)
-
+    child_vars = rewrite_vars_for_nesting(vars, current_qualifier)
     build(inner_binding, inner_opts, child_vars, env)
   end
 
@@ -145,6 +145,39 @@ defmodule ScryCore.Query.From do
     alias_name = select_key!(key)
     expr = Escape.escape_expr(value_ast, vars, env)
     quote do: {:computed, unquote(alias_name), unquote(expr)}
+  end
+
+  # A list-shaped `select:`'s own per-item dispatch -- mirrors
+  # lang_spec.md §9's own `<body-item> ::= <field> | <alias>: <field> |
+  # <alias>: <expression> | ... | nested SELECT`. A bare nested `from`
+  # needs no key validation the way the map form's `select_item/5`
+  # does above -- there's no map key the caller could have gotten
+  # wrong, the output key is unambiguously the nested query's own
+  # source name either way.
+  defp select_list_item({:from, _, [inner_binding, inner_opts]}, vars, source_ast, env) do
+    current_qualifier = extract_qualifier!(source_ast, "a nested `from`")
+    child_vars = rewrite_vars_for_nesting(vars, current_qualifier)
+    build(inner_binding, inner_opts, child_vars, env)
+  end
+
+  # `{key, value_ast}` here is a genuine keyword-pair AST node (`total:
+  # u.price * u.quantity` inside a list literal) -- structurally
+  # distinct from a dotted field access, which is always a 3-tuple
+  # call/dot node, never a bare 2-tuple with a plain atom head.
+  defp select_list_item({key, value_ast}, vars, source_ast, env) when is_atom(key) do
+    select_item(key, value_ast, vars, source_ast, env)
+  end
+
+  defp select_list_item(value_ast, vars, _source_ast, env) do
+    path = Escape.escape_path(value_ast, vars, env)
+    quote do: {:field, unquote(path)}
+  end
+
+  defp rewrite_vars_for_nesting(vars, current_qualifier) do
+    Map.new(vars, fn
+      {name, :self} -> {name, current_qualifier}
+      {name, qualifier} -> {name, qualifier}
+    end)
   end
 
   # `ScryCore.Executor.project_item/8`'s own `{:ok, List.last(nested.
