@@ -141,6 +141,18 @@ defmodule ScryCore.ExecutorTest do
     %{"name" => "Eve", "department" => "sales", "salary" => 110}
   ]
 
+  # lang_spec.md §5.2's own ROLLUP/CUBE vocabulary (region/quarter). Two
+  # regions x two quarters, every combination present, so a subtotal at
+  # any level always has more than one member row to sum -- a single-
+  # member subtotal wouldn't tell "the aggregate really spans the
+  # rolled-up members" apart from "it just copied the one row's value."
+  @sales [
+    %{"region" => "east", "quarter" => "q1", "amount" => 100},
+    %{"region" => "east", "quarter" => "q2", "amount" => 150},
+    %{"region" => "west", "quarter" => "q1", "amount" => 200},
+    %{"region" => "west", "quarter" => "q2", "amount" => 50}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -156,7 +168,8 @@ defmodule ScryCore.ExecutorTest do
     ["tickets"] => @tickets,
     ["cards"] => @cards,
     ["measurements"] => @measurements,
-    ["employees"] => @employees
+    ["employees"] => @employees,
+    ["sales"] => @sales
   }
 
   defp run(query), do: Executor.run(query, FakeEngine, @data)
@@ -1014,6 +1027,143 @@ defmodule ScryCore.ExecutorTest do
       }
 
       assert {:error, {:unsupported_grouped_body_item, %Query{}}} = run(query)
+    end
+  end
+
+  describe "GROUP BY ... ROLLUP / CUBE (lang_spec.md §5.2)" do
+    @rollup_select [
+      {:field, ["region"]},
+      {:field, ["quarter"]},
+      {:computed, "total", {:call, "sum", [{:field, ["amount"]}]}}
+    ]
+
+    test "ROLLUP produces detail rows, a subtotal per region, and a grand total" do
+      query = %Query{
+        source: ["sales"],
+        group_bys: [["region"], ["quarter"]],
+        group_mode: :rollup,
+        select: @rollup_select
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.sort(rows) ==
+               Enum.sort([
+                 %{"region" => "east", "quarter" => "q1", "total" => 100},
+                 %{"region" => "east", "quarter" => "q2", "total" => 150},
+                 %{"region" => "east", "quarter" => nil, "total" => 250},
+                 %{"region" => "west", "quarter" => "q1", "total" => 200},
+                 %{"region" => "west", "quarter" => "q2", "total" => 50},
+                 %{"region" => "west", "quarter" => nil, "total" => 250},
+                 %{"region" => nil, "quarter" => nil, "total" => 500}
+               ])
+    end
+
+    test "with no explicit ORDER BY, rows come back finest detail first, grand total last" do
+      query = %Query{
+        source: ["sales"],
+        group_bys: [["region"], ["quarter"]],
+        group_mode: :rollup,
+        select: @rollup_select
+      }
+
+      assert {:ok, rows} = run(query)
+
+      {detail_rows, rest} = Enum.split(rows, 4)
+      {subtotal_rows, [grand_total]} = Enum.split(rest, 2)
+
+      assert Enum.all?(detail_rows, fn r -> r["region"] != nil and r["quarter"] != nil end)
+      assert Enum.all?(subtotal_rows, fn r -> r["region"] != nil and r["quarter"] == nil end)
+      assert grand_total == %{"region" => nil, "quarter" => nil, "total" => 500}
+    end
+
+    test "CUBE adds a per-quarter subtotal (region rolled up) too, not just per-region" do
+      query = %Query{
+        source: ["sales"],
+        group_bys: [["region"], ["quarter"]],
+        group_mode: :cube,
+        select: @rollup_select
+      }
+
+      assert {:ok, rows} = run(query)
+
+      # Every ROLLUP row, unordered, still shows up in CUBE's own output --
+      # ROLLUP is a strict subset of CUBE's own grouping levels (the
+      # right-to-left prefixes, out of every subset).
+      rollup_query = %Query{query | group_mode: :rollup}
+      assert {:ok, rollup_rows} = run(rollup_query)
+      assert Enum.sort(rollup_rows) -- Enum.sort(rows) == []
+
+      # CUBE's own extra levels: quarter alone (region rolled up).
+      assert %{"region" => nil, "quarter" => "q1", "total" => 300} in rows
+      assert %{"region" => nil, "quarter" => "q2", "total" => 200} in rows
+
+      # 4 detail + 2 region subtotals + 2 quarter subtotals + 1 grand
+      # total = 2^2 grouping levels' worth of rows, one row per distinct
+      # key at each level.
+      assert length(rows) == 9
+    end
+
+    test "a single-column ROLLUP is just a grand total added to the plain grouping" do
+      query = %Query{
+        source: ["sales"],
+        group_bys: [["region"]],
+        group_mode: :rollup,
+        select: [
+          {:field, ["region"]},
+          {:computed, "total", {:call, "sum", [{:field, ["amount"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert Enum.sort(rows) ==
+               Enum.sort([
+                 %{"region" => "east", "total" => 250},
+                 %{"region" => "west", "total" => 250},
+                 %{"region" => nil, "total" => 500}
+               ])
+    end
+
+    test "HAVING filters every ROLLUP/CUBE level's own groups, not just the finest one" do
+      query = %Query{
+        source: ["sales"],
+        group_bys: [["region"]],
+        group_mode: :rollup,
+        havings: [{:cmp, :gt, {:call, "sum", [{:field, ["amount"]}]}, 300}],
+        select: [
+          {:field, ["region"]},
+          {:computed, "total", {:call, "sum", [{:field, ["amount"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      # Both region subtotals (250 each) fail HAVING; only the 500 grand
+      # total survives.
+      assert rows == [%{"region" => nil, "total" => 500}]
+    end
+
+    test "a group_mode: :plain query behaves exactly as it did before ROLLUP/CUBE existed (regression)" do
+      query = %Query{
+        source: ["sales"],
+        group_bys: [["region"]],
+        group_mode: :plain,
+        order_bys: [{["region"], :asc}],
+        select: [
+          {:field, ["region"]},
+          {:computed, "total", {:call, "sum", [{:field, ["amount"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"region" => "east", "total" => 250},
+               %{"region" => "west", "total" => 250}
+             ]
+
+      refute Enum.any?(rows, fn row -> is_nil(row["region"]) end)
     end
   end
 

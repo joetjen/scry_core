@@ -9,17 +9,16 @@ defmodule ScryCore.Query do
 
   Field shapes here match the full design in impl_spec.md §7, not just
   what `priv/grammar.aether`'s current Phase 1 subset can populate.
-  `group_bys`/`havings`/`distinct`/`order_bys`/`limit`/`offset` are all
-  populated now (the full lang_spec.md §5.2 header-modifier chain,
-  minus `group by ... rollup`/`... cube`); `group_mode` is the one
-  exception no *grammar* text can set to anything but its `:plain`
-  default -- `group_by_rollup/2`/`group_by_cube/2` below, the composable
-  builder's own counterpart, can, though nothing in `ScryCore.Executor`
-  can run the result yet (a clear, explicit error instead of a silently
-  wrong plain-grouped answer -- see that module's own moduledoc).
-  `variant` is the extension slot an EP1(b)/(c)/(d)-shaped construct from
-  a loaded kind populates (impl_spec.md §2); core itself never writes to
-  it.
+  `group_bys`/`group_mode`/`havings`/`distinct`/`order_bys`/`limit`/
+  `offset` are all populated now -- the full lang_spec.md §5.2 header-
+  modifier chain, `GROUP BY ... ROLLUP`/`... CUBE` (`group_mode`)
+  included: text (`group_by_clause`'s own three alternatives, `priv/
+  grammar.aether`) and the composable builder's `group_by_rollup/2`/
+  `group_by_cube/2` below both set it, and `ScryCore.Executor` runs it
+  for real (that module's own moduledoc has the hierarchical-subtotal-
+  row mechanics). `variant` is the extension slot an EP1(b)/(c)/(d)-
+  shaped construct from a loaded kind populates (impl_spec.md §2); core
+  itself never writes to it.
 
   `new/1` through `select/2`, below the struct definition, are impl_spec
   .md §7's own Layer 1 -- the composable functional API, "the one that
@@ -452,17 +451,19 @@ defmodule ScryCore.Query do
   @doc """
   `group_by/2`, with `group_mode: :rollup` (lang_spec.md §5.2's own
   `GROUP BY ... ROLLUP`, hierarchical subtotal rows in addition to the
-  fully-grouped ones). **Not yet executable** -- building a query with
-  this raises nothing here, but `ScryCore.Executor.run/3` does, with a
-  clear, explicit error rather than a silently wrong (plain-grouped)
-  answer; see that module's own moduledoc for why ROLLUP/CUBE's own
-  subtotal-row generation is real, separate, unimplemented work.
+  fully-grouped ones -- e.g. `ROLLUP(region, quarter)` also produces a
+  per-`region` subtotal and a grand total, `region`/`quarter` both
+  projecting `nil` on the rows they're rolled up away from).
+  `ScryCore.Executor`'s own moduledoc has the full subtotal-row
+  mechanics and its one real, documented limitation (no `GROUPING()`/
+  `GROUPING_ID()` equivalent to tell a genuine `nil` source value apart
+  from a rolled-up one).
   """
   @spec group_by_rollup(t(), [[String.t()]]) :: t()
   def group_by_rollup(%__MODULE__{} = query, paths) when is_list(paths),
     do: %{query | group_bys: paths, group_mode: :rollup}
 
-  @doc "`group_by_rollup/2`, with `group_mode: :cube` instead -- same caveat."
+  @doc "`group_by_rollup/2`, with `group_mode: :cube` instead (every subset of the given fields gets its own subtotal, not just each prefix) -- same mechanics/caveat."
   @spec group_by_cube(t(), [[String.t()]]) :: t()
   def group_by_cube(%__MODULE__{} = query, paths) when is_list(paths),
     do: %{query | group_bys: paths, group_mode: :cube}

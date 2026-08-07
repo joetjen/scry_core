@@ -209,6 +209,33 @@ defmodule ScryCore.ActionsTest do
     assert q.group_bys == [["customer", "region"], ["status"]]
   end
 
+  test "a plain group by sets group_mode: :plain explicitly", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders GROUP BY status { status }))
+    assert q.group_mode == :plain
+  end
+
+  test "group by rollup", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT sales GROUP BY ROLLUP(region, quarter) { region }])
+
+    assert q.group_bys == [["region"], ["quarter"]]
+    assert q.group_mode == :rollup
+  end
+
+  test "group by cube", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT sales GROUP BY CUBE(region, quarter) { region }])
+
+    assert q.group_bys == [["region"], ["quarter"]]
+    assert q.group_mode == :cube
+  end
+
+  test "rollup/cube with a single field", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT sales GROUP BY ROLLUP(region) { region }])
+    assert q.group_bys == [["region"]]
+    assert q.group_mode == :rollup
+  end
+
   test "having, independent of group by", %{grammar: g} do
     # `having` doesn't require an aggregate expression to *parse* yet --
     # there's no such thing as an aggregate expression in the grammar at

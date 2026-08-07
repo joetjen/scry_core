@@ -27,13 +27,21 @@ defmodule ScryCore.Executor do
   work -- it collapses to one output row, the same mechanism `GROUP BY`
   itself uses per distinct key. `query.group_mode` other than `:plain`
   (`:rollup`/`:cube`, lang_spec.md §5.2's own `GROUP BY ... ROLLUP`/
-  `... CUBE`) raises a clear, explicit error instead -- ROLLUP/CUBE's
-  own hierarchical-subtotal-row generation is real, separate,
-  unimplemented work, not something the plain grouped path happens to
-  get right or wrong; nothing in `priv/grammar.aether` can produce a
-  non-`:plain` `group_mode` yet, but `ScryCore.Query.group_by_rollup/2`/
-  `group_by_cube/2` (impl_spec.md §7's own composable builder API) can,
-  which is what makes this guard reachable for the first time.
+  `... CUBE`) runs `run_grouped/6` once per *grouping level* --
+  `group_levels/2`'s own doc has the exact level sets (`ROLLUP`'s own
+  prefix hierarchy, `CUBE`'s own full subset powerset) -- concatenating
+  every level's own groups, finest detail first, grand total last by
+  construction. A bare `{:field, path}` body item that names a `GROUP
+  BY` column *not* active at a given group's own level projects `nil`
+  (the standard SQL convention for a rolled-up-away column; this
+  implementation stops there -- no `GROUPING()`/`GROUPING_ID()`
+  equivalent to tell a real `nil` source value apart from a rolled-up
+  one, a real, documented, `:plain` SQL has the identical ambiguity
+  too and solves with those functions -- not attempted here). An
+  aggregate expression needs no equivalent handling at all: it already
+  operates over whatever `member_rows` its own level's grouping
+  produced, correct by construction at every level without any
+  rollup/cube-specific code of its own.
 
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
   `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
@@ -433,14 +441,6 @@ defmodule ScryCore.Executor do
       {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
 
       cond do
-        query.group_mode != :plain ->
-          raise ArgumentError,
-                "GROUP BY ... #{String.upcase(to_string(query.group_mode))} isn't supported " <>
-                  "yet -- ROLLUP/CUBE's own hierarchical-subtotal-row generation is a real, " <>
-                  "separate feature this executor doesn't implement (ScryCore.Query." <>
-                  "group_by_rollup/2/group_by_cube/2 build a query with this set; nothing in " <>
-                  "priv/grammar.aether can set it from text yet either)"
-
         windows != [] and aggregate_query?(query) ->
           raise ArgumentError,
                 "combining GROUP BY/an aggregate query with a window function in the same " <>
@@ -547,16 +547,59 @@ defmodule ScryCore.Executor do
   # already relies on), which is exactly right: a projected/grouped row
   # has no ancestor scope chain of its own to speak of.
   defp run_grouped(query, filtered, own_name, scope, params, engine_module, conn) do
-    groups = group_rows(filtered, query.group_bys, scope)
+    grouped =
+      query.group_bys
+      |> group_levels(query.group_mode)
+      |> Enum.flat_map(fn active_fields ->
+        filtered
+        |> group_rows(active_fields, scope)
+        |> Enum.map(&{active_fields, &1})
+      end)
 
     with {:ok, projected} <-
-           project_groups(query, groups, own_name, scope, params, engine_module, conn) do
+           project_groups(query, grouped, own_name, scope, params, engine_module, conn) do
       {:ok,
        projected
        |> sort_rows(query.order_bys, [])
        |> maybe_dedupe(query.distinct)
        |> paginate(query.limit, query.offset)}
     end
+  end
+
+  # The list of *grouping levels* `query.group_mode` needs -- each an
+  # `active_fields` subset of `group_bys` naming exactly which columns
+  # are actually grouped-by at that level (the rest project as `nil`,
+  # `project_group_item/7`'s own `{:field, path}` clause). `:plain` is
+  # the trivial single-level case (unchanged from before ROLLUP/CUBE
+  # existed, confirmed by construction: `[group_bys]` is exactly what
+  # `run_grouped/6` always passed to `group_rows/3` before this
+  # existed). `:rollup`'s own *n+1* levels are the standard SQL
+  # right-to-left prefix hierarchy (`[a,b,c]`, `[a,b]`, `[a]`, `[]` for
+  # 3 columns) -- detail first, grand total last. `:cube`'s own *2^n*
+  # levels are the full powerset (every subset, not just prefixes),
+  # sorted by descending size so detail still precedes every coarser
+  # subtotal -- same "finest first, grand total last" convention as
+  # `:rollup`, generalized; same-size subsets have no further
+  # meaningful order of their own, so `Enum.sort_by/2`'s own stability
+  # just keeps `powerset/1`'s own generation order for those, a real
+  # but deliberately unremarkable tie-break.
+  @spec group_levels([[String.t()]], :plain | :rollup | :cube) :: [[[String.t()]]]
+  defp group_levels(group_bys, :plain), do: [group_bys]
+
+  defp group_levels(group_bys, :rollup) do
+    n = length(group_bys)
+    Enum.map(0..n, fn k -> Enum.take(group_bys, n - k) end)
+  end
+
+  defp group_levels(group_bys, :cube) do
+    group_bys |> powerset() |> Enum.sort_by(&(-length(&1)))
+  end
+
+  defp powerset([]), do: [[]]
+
+  defp powerset([head | tail]) do
+    rest = powerset(tail)
+    rest ++ Enum.map(rest, &[head | &1])
   end
 
   # Manual order-preserving partition, not `Enum.group_by/2` -- that
@@ -1671,12 +1714,25 @@ defmodule ScryCore.Executor do
   # having -> distinct -> order by -> limit"), and matches SQL: a group
   # that fails `HAVING` never gets projected at all, not projected-then-
   # discarded.
-  defp project_groups(query, groups, own_name, scope, params, engine_module, conn) do
-    Enum.reduce_while(groups, {:ok, []}, fn member_rows, {:ok, acc} ->
+  #
+  # `grouped` is `[{active_fields, member_rows}]`, not a bare list of
+  # member-row-lists -- `run_grouped/6`'s own `group_levels/2` is what
+  # produces more than one entry per distinct source row set (ROLLUP/
+  # CUBE only; `:plain` mode's single level makes this identical to
+  # passing `groups` directly, byte-for-byte, since `active_fields ==
+  # query.group_bys` always then). `active_fields` flows into `project_
+  # group/8` only to compute `rolled_up` (below) -- everything else
+  # about a group's own projection is unaffected by which level
+  # produced it.
+  defp project_groups(query, grouped, own_name, scope, params, engine_module, conn) do
+    Enum.reduce_while(grouped, {:ok, []}, fn {active_fields, member_rows}, {:ok, acc} ->
       if having_matches?(query.havings, member_rows, scope, params) do
+        rolled_up = query.group_bys -- active_fields
+
         case project_group(
                query.select,
                member_rows,
+               rolled_up,
                own_name,
                scope,
                params,
@@ -1699,21 +1755,63 @@ defmodule ScryCore.Executor do
   defp having_matches?(havings, member_rows, scope, params),
     do: Enum.all?(havings, &eval_group_predicate(&1, member_rows, scope, params))
 
-  defp project_group(select_items, member_rows, own_name, scope, params, engine_module, conn) do
+  defp project_group(
+         select_items,
+         member_rows,
+         rolled_up,
+         own_name,
+         scope,
+         params,
+         engine_module,
+         conn
+       ) do
     Enum.reduce_while(select_items, {:ok, %{}}, fn item, {:ok, acc} ->
-      case project_group_item(item, member_rows, own_name, scope, params, engine_module, conn) do
+      case project_group_item(
+             item,
+             member_rows,
+             rolled_up,
+             own_name,
+             scope,
+             params,
+             engine_module,
+             conn
+           ) do
         {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
         {:error, _} = err -> {:halt, err}
       end
     end)
   end
 
-  defp project_group_item({:field, path}, member_rows, _own_name, scope, _params, _em, _conn),
-    do: {:ok, List.last(path), get_path(representative(member_rows), scope, path)}
+  # `path in rolled_up` -- a ROLLUP/CUBE column not active at this
+  # group's own level -- projects `nil` (this module's own moduledoc
+  # has the standard-SQL-convention/`GROUPING()` caveat). `rolled_up`
+  # is always `[]` in `:plain` mode (`project_groups/7`'s own comment),
+  # so this is an unconditional no-op there -- the plain `get_path`
+  # resolution below, unchanged from before ROLLUP/CUBE existed. An
+  # ordinary `if`, not a guard -- `rolled_up` is a runtime list, not a
+  # compile-time literal, so `in` can't appear in a guard here at all
+  # (confirmed by the compiler itself refusing it, not assumed).
+  defp project_group_item(
+         {:field, path},
+         member_rows,
+         rolled_up,
+         _own_name,
+         scope,
+         _params,
+         _em,
+         _conn
+       ) do
+    if path in rolled_up do
+      {:ok, List.last(path), nil}
+    else
+      {:ok, List.last(path), get_path(representative(member_rows), scope, path)}
+    end
+  end
 
   defp project_group_item(
          {:computed, alias_name, expr},
          member_rows,
+         _rolled_up,
          _own_name,
          scope,
          params,
@@ -1732,7 +1830,7 @@ defmodule ScryCore.Executor do
   # clear, tagged error here rather than a crash or a silently wrong
   # result -- same posture `project_item`'s own `{:variant, _}` clause
   # already has.
-  defp project_group_item(item, _member_rows, _own_name, _scope, _params, _em, _conn),
+  defp project_group_item(item, _member_rows, _rolled_up, _own_name, _scope, _params, _em, _conn),
     do: {:error, {:unsupported_grouped_body_item, item}}
 
   # ---- Window functions (lang_spec.md §5.5/§5.8) --------------------------

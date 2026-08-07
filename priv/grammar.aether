@@ -139,7 +139,8 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_WHEN, KW_THEN, KW_ELSE, KW_FRAGMENT, KW_WITH,
           KW_UNION, KW_ALL, KW_INTERSECT, KW_EXCEPT,
           KW_OVER, KW_PARTITION, KW_ROWS, KW_BETWEEN, KW_PRECEDING,
-          KW_FOLLOWING, KW_CURRENT, KW_ROW, KW_UNBOUNDED, KW_TYPE)
+          KW_FOLLOWING, KW_CURRENT, KW_ROW, KW_UNBOUNDED, KW_TYPE,
+          KW_ROLLUP, KW_CUBE)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -673,9 +674,18 @@ select_ep1a := NEVER
 
 where_clause := KW_WHERE cond:predicate
 
-; `... rollup`/`... cube` (lang_spec §5.2) not yet supported -- this is
-; always the "plain" group-by shape.
-group_by_clause := KW_GROUP KW_BY fields:field_list
+; lang_spec §5.2's three `GROUP BY` shapes -- plain, `ROLLUP(...)`,
+; `CUBE(...)`. Like every other keyword here (lang_spec §3), `rollup`/
+; `cube` become real reserved words once added to IDENT's own @refine
+; list above -- a field genuinely named `rollup`/`cube` needs the same
+; backtick escape (ESCAPED_IDENT) any other keyword-colliding field
+; name would. Each alternative's own handler (ScryCore.Actions) tags
+; its result `{:plain, fields}`/`{:rollup, fields}`/`{:cube, fields}`
+; -- `select`'s own handler destructures that tagged tuple into
+; `Query.t()`'s own separate `group_bys`/`group_mode` fields.
+group_by_clause := KW_GROUP KW_BY (group_by_rollup | group_by_cube | fields:field_list)
+group_by_rollup := KW_ROLLUP LPAREN fields:field_list RPAREN
+group_by_cube := KW_CUBE LPAREN fields:field_list RPAREN
 
 having_clause := KW_HAVING cond:predicate
 

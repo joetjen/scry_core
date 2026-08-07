@@ -117,29 +117,34 @@ defmodule ScryCore.QueryTest do
            ]
   end
 
-  test "group_by_rollup/2 and group_by_cube/2 build a query, but running it raises a clear error",
+  test "group_by_rollup/2 and group_by_cube/2 build a query that executes for real, subtotals included",
        %{conn: conn} do
+    select = [
+      {:field, ["status"]},
+      {:computed, "total", {:call, "count", [{:field, ["name"]}]}}
+    ]
+
     rollup =
-      Query.new(["users"])
-      |> Query.group_by_rollup([["status"]])
-      |> Query.select([{:field, ["status"]}])
+      Query.new(["users"]) |> Query.group_by_rollup([["status"]]) |> Query.select(select)
 
     assert rollup.group_mode == :rollup
+    assert {:ok, rollup_rows} = ScryCore.Executor.run(rollup, StaticEngine, conn)
 
-    assert_raise ArgumentError, ~r/ROLLUP/, fn ->
-      ScryCore.Executor.run(rollup, StaticEngine, conn)
-    end
+    assert Enum.sort(rollup_rows) ==
+             Enum.sort([
+               %{"status" => "active", "total" => 2},
+               %{"status" => "inactive", "total" => 1},
+               %{"status" => nil, "total" => 3}
+             ])
 
-    cube =
-      Query.new(["users"])
-      |> Query.group_by_cube([["status"]])
-      |> Query.select([{:field, ["status"]}])
+    cube = Query.new(["users"]) |> Query.group_by_cube([["status"]]) |> Query.select(select)
 
     assert cube.group_mode == :cube
-
-    assert_raise ArgumentError, ~r/CUBE/, fn ->
-      ScryCore.Executor.run(cube, StaticEngine, conn)
-    end
+    assert {:ok, cube_rows} = ScryCore.Executor.run(cube, StaticEngine, conn)
+    # A single-column CUBE has the same two grouping levels ROLLUP does
+    # (the full column, then the grand total) -- CUBE's own extra
+    # subsets only appear starting at two columns.
+    assert Enum.sort(cube_rows) == Enum.sort(rollup_rows)
   end
 
   test "a fully hand-built query and the equivalent parsed query execute identically", %{

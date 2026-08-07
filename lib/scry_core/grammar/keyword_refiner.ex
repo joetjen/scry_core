@@ -72,7 +72,9 @@ defmodule ScryCore.Grammar.KeywordRefiner do
     "current" => :KW_CURRENT,
     "row" => :KW_ROW,
     "unbounded" => :KW_UNBOUNDED,
-    "type" => :KW_TYPE
+    "type" => :KW_TYPE,
+    "rollup" => :KW_ROLLUP,
+    "cube" => :KW_CUBE
   }
 
   if @ichor_token_refiner_loaded? do

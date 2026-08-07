@@ -177,7 +177,7 @@ defmodule ScryCore.Actions do
     with {:ok, source, ctx} <- captures.source.eval.(ctx),
          {:ok, ep1a, ctx} <- maybe_eval(captures, :select_ep1a, ctx),
          {:ok, where_pred, ctx} <- maybe_eval(captures, :where_clause, ctx),
-         {:ok, group_bys, ctx} <- maybe_eval(captures, :group_by_clause, ctx),
+         {:ok, group_by, ctx} <- maybe_eval(captures, :group_by_clause, ctx),
          {:ok, having_pred, ctx} <- maybe_eval(captures, :having_clause, ctx),
          {:ok, distinct, ctx} <- maybe_eval(captures, :distinct_clause, ctx),
          {:ok, order_bys, ctx} <- maybe_eval(captures, :order_by_clause, ctx),
@@ -188,12 +188,14 @@ defmodule ScryCore.Actions do
       wheres = if where_pred == :absent, do: [], else: [where_pred]
       havings = if having_pred == :absent, do: [], else: [having_pred]
       {limit, offset} = if limit_and_offset == :absent, do: {nil, nil}, else: limit_and_offset
+      {group_mode, group_bys} = if group_by == :absent, do: {:plain, []}, else: group_by
 
       {:ok,
        %Query{
          source: source,
          wheres: wheres,
-         group_bys: absent_to([], group_bys),
+         group_bys: group_bys,
+         group_mode: group_mode,
          havings: havings,
          distinct: distinct != :absent,
          order_bys: absent_to([], order_bys),
@@ -705,7 +707,27 @@ defmodule ScryCore.Actions do
 
   def handle_rule(:where_clause, %{cond: cond_cap}, ctx), do: cond_cap.eval.(ctx)
 
-  def handle_rule(:group_by_clause, %{fields: cap}, ctx), do: cap.eval.(ctx)
+  # `group_by_clause`'s own three alternatives (lang_spec §5.2) each
+  # tag their result `{:plain | :rollup | :cube, fields}` -- `select`'s
+  # own handler below destructures this into `Query.t()`'s separate
+  # `group_bys`/`group_mode` fields. `group_by_rollup`/`group_by_cube`
+  # do the actual tagging (their own clauses further down); the plain
+  # `fields:field_list` fallback tags here since it has no rule of its
+  # own to do it in.
+  def handle_rule(:group_by_clause, %{group_by_rollup: cap}, ctx), do: cap.eval.(ctx)
+  def handle_rule(:group_by_clause, %{group_by_cube: cap}, ctx), do: cap.eval.(ctx)
+
+  def handle_rule(:group_by_clause, %{fields: cap}, ctx) do
+    with {:ok, fields, ctx} <- cap.eval.(ctx), do: {:ok, {:plain, fields}, ctx}
+  end
+
+  def handle_rule(:group_by_rollup, %{fields: cap}, ctx) do
+    with {:ok, fields, ctx} <- cap.eval.(ctx), do: {:ok, {:rollup, fields}, ctx}
+  end
+
+  def handle_rule(:group_by_cube, %{fields: cap}, ctx) do
+    with {:ok, fields, ctx} <- cap.eval.(ctx), do: {:ok, {:cube, fields}, ctx}
+  end
 
   def handle_rule(:having_clause, %{cond: cond_cap}, ctx), do: cond_cap.eval.(ctx)
 
