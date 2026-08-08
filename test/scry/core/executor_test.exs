@@ -5,6 +5,7 @@ defmodule Scry.Core.ExecutorTest do
   alias Scry.Core.{CombinedQuery, Cursor, Executor, Query, Rational}
   alias Scry.Core.Executor.QueryError
   alias Scry.Core.Test.ReferenceEngine, as: FakeEngine
+  alias Scry.Core.Test.RowReferenceEngine, as: RowEngine
   alias Scry.Core.Test.StreamingReferenceEngine, as: StreamEngine
 
   @users [
@@ -170,6 +171,7 @@ defmodule Scry.Core.ExecutorTest do
   defp run(query), do: query |> Executor.run(FakeEngine, @data) |> materialize()
   defp run(query, params), do: query |> Executor.run(FakeEngine, @data, params) |> materialize()
   defp run_via_stream(query), do: query |> Executor.run(StreamEngine, @data) |> materialize()
+  defp run_via_row_engine(query), do: query |> Executor.run(RowEngine, @data) |> materialize()
 
   defp materialize({:error, _} = err), do: err
 
@@ -509,6 +511,16 @@ defmodule Scry.Core.ExecutorTest do
              %{"name" => "Bob", "customer_orders" => []},
              %{"name" => "Carol", "customer_orders" => [%{"id" => 102}]}
            ]
+  end
+
+  test "a correlated nested SELECT produces the identical result when the outer (shell) query's own rows are Scry.Core.Row values, not plain maps" do
+    query = %Query{
+      source: ["customers"],
+      order_bys: [{["id"], :asc}],
+      select: [{:field, ["name"]}, orders_for(["customers", "id"])]
+    }
+
+    assert run_via_row_engine(query) == run(query)
   end
 
   test "REQUIRED drops an outer row whose correlated nested query is empty" do
@@ -1592,6 +1604,11 @@ defmodule Scry.Core.ExecutorTest do
       assert rows == [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}]
     end
 
+    test "UNION still dedupes correctly, and returns plain maps, when both sides are Scry.Core.Row values" do
+      assert run_via_row_engine(combined(:union, @team_a_query, @team_b_query)) ==
+               run(combined(:union, @team_a_query, @team_b_query))
+    end
+
     test "UNION ALL concatenates without deduping" do
       assert {:ok, rows} = run(combined(:union_all, @team_a_query, @team_b_query))
 
@@ -2310,6 +2327,25 @@ defmodule Scry.Core.ExecutorTest do
                "Dave" => 2,
                "Eve" => 1
              }
+    end
+
+    test "a window function still augments correctly when its own input rows are Scry.Core.Row values (a WITH-bound source answered by a Row-returning engine)" do
+      query = %Query{
+        source: ["recent"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "rank",
+           {:window, {:call, "row_number", []}, [["department"]], [{["salary"], :desc}], nil}}
+        ],
+        with_bindings: %{
+          "recent" => %Query{
+            source: ["employees"],
+            select: [{:field, ["name"]}, {:field, ["department"]}, {:field, ["salary"]}]
+          }
+        }
+      }
+
+      assert run_via_row_engine(query) == run(query)
     end
 
     test "row_number() with no PARTITION BY treats the whole result as one partition" do

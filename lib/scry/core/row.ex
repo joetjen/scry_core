@@ -10,13 +10,27 @@ defmodule Scry.Core.Row do
   allocation, not by anything `Scry.Core.Executor` itself does with the
   data once it has it.
 
-  `Scry.Core.QueryOps`'s own row-field lookup (`get_path_in/2`) is the
-  *only* place in that module which ever reads a row's fields directly
-  (confirmed by direct source audit, not assumed) -- so this type only
-  needs clauses there to be usable everywhere else in the toolkit
-  (`WHERE` evaluation, `GROUP BY` keys, sorting, projection) without
-  any of those call sites needing to know or care which row shape they
-  were handed.
+  `Scry.Core.QueryOps`'s own private `get_path_in/2` is the one place
+  in that module which ever *reads* a row's fields directly, and its
+  own private `put_field/3` is the one place that ever *writes* a new,
+  synthetic field onto one (a nested-`SELECT`'s own expansion, a window
+  function's own computed column) -- both have a `%Row{}` clause, so
+  this type is usable everywhere in the toolkit (`WHERE` evaluation,
+  `GROUP BY` keys, sorting, projection, correlation rewriting, window-
+  function augmentation) without any of those call sites needing to
+  know or care which row shape they were handed. `put_field/3`
+  converts to a plain map on first write via `to_map/1` below --
+  appending a genuinely new key isn't something this fixed-shape,
+  positional representation can do in place, the same way a SQL
+  engine's own result set can't gain a column mid-stream either.
+  `Scry.Core.QueryOps`'s own `CombinedQuery` handling (`UNION`/
+  `INTERSECT`/`EXCEPT`) always normalizes both sides to plain maps
+  before combining, regardless of which shape either side's own engine
+  returned -- those operations do real structural-equality set
+  comparisons, and this type's own equality is tied to its *positional*
+  shape (its own `index`), not just its logical field values, so two
+  engines that happened to build their own index in a different column
+  order could otherwise wrongly compare unequal.
 
   **Deliberately not a drop-in, silently-compatible replacement for a
   plain map**: `fetch!/2` *raises* on a column not present in the

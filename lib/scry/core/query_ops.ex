@@ -192,7 +192,20 @@ defmodule Scry.Core.QueryOps do
        ) do
     with {:ok, left_rows} <- drain_document(conn, left, params, engine_module, with_bindings),
          {:ok, right_rows} <- drain_document(conn, right, params, engine_module, with_bindings) do
-      {:ok, combine_rows(op, left_rows, right_rows)}
+      # `combine_rows/3` does real structural-equality set operations
+      # (`Enum.uniq/1`, `MapSet.member?/2`) -- a `Scry.Core.Row`'s own
+      # equality is tied to its *positional* shape (its own `index`),
+      # not just its logical field values, so two otherwise-identical
+      # rows from engines that happened to build their own index in a
+      # different column order would wrongly compare unequal. Every
+      # `CombinedQuery` result is always plain maps, regardless of
+      # what either side's own engine chose to return internally.
+      {:ok,
+       combine_rows(
+         op,
+         Enum.map(left_rows, &to_plain_row/1),
+         Enum.map(right_rows, &to_plain_row/1)
+       )}
     end
   end
 
@@ -235,6 +248,9 @@ defmodule Scry.Core.QueryOps do
     right_set = MapSet.new(right)
     left |> Enum.reject(&MapSet.member?(right_set, &1)) |> Enum.uniq()
   end
+
+  defp to_plain_row(%Row{} = row), do: Row.to_map(row)
+  defp to_plain_row(row), do: row
 
   # A query whose own `source` is exactly `[name]` for a declared
   # `WITH` binding has no real engine-side existence at all -- it's
@@ -367,17 +383,26 @@ defmodule Scry.Core.QueryOps do
           if nested.required do
             {:halt, :skip}
           else
-            {:cont, {:ok, Map.put(row_acc, List.last(nested.source), [])}}
+            {:cont, {:ok, put_field(row_acc, List.last(nested.source), [])}}
           end
 
         {:ok, nested_rows} ->
-          {:cont, {:ok, Map.put(row_acc, List.last(nested.source), nested_rows)}}
+          plain_nested_rows = Enum.map(nested_rows, &to_plain_row/1)
+          {:cont, {:ok, put_field(row_acc, List.last(nested.source), plain_nested_rows)}}
 
         {:error, _} = err ->
           {:halt, err}
       end
     end)
   end
+
+  # A nested-`SELECT`/window-function result appends a synthetic key no
+  # fixed-shape `Scry.Core.Row` can represent -- converts to a plain
+  # map on first write (`Row.to_map/1`), same as any other genuinely-
+  # new-field augmentation this toolkit does. A no-op for a row that's
+  # already a plain map.
+  defp put_field(%Row{} = row, key, value), do: row |> Row.to_map() |> Map.put(key, value)
+  defp put_field(row, key, value), do: Map.put(row, key, value)
 
   defp run_nested(
          conn,
@@ -449,7 +474,9 @@ defmodule Scry.Core.QueryOps do
   defp rewrite_side_correlation({:field, [ancestor, field]}, own_name, outer_row, {next, extra})
        when ancestor == own_name do
     param_name = "0_scry_correlation_#{next}"
-    {{:param, param_name}, {next + 1, Map.put(extra, param_name, Map.get(outer_row, field))}}
+
+    {{:param, param_name},
+     {next + 1, Map.put(extra, param_name, get_path_in(outer_row, [field]))}}
   end
 
   defp rewrite_side_correlation(other, _own_name, _outer_row, acc), do: {other, acc}
@@ -1835,7 +1862,7 @@ defmodule Scry.Core.QueryOps do
     |> Enum.with_index()
     |> Enum.map(fn {row, row_index} ->
       Enum.reduce(keyed_value_lists, row, fn {key, values}, acc ->
-        Map.put(acc, key, Enum.at(values, row_index))
+        put_field(acc, key, Enum.at(values, row_index))
       end)
     end)
   end
