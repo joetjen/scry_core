@@ -164,13 +164,70 @@ defmodule Scry.Core.Executor do
   into a loud crash (caught by tests) rather than a silently wrong
   result is the safety net that makes pruning trustworthy at all.
 
-  Aggregate/`GROUP BY` pushdown into the engine's own query language --
-  the single biggest remaining lever for the large-`GROUP BY` case
-  that motivated this -- is a deliberately separate, harder problem,
-  not attempted here: it would need an authoritative (not "trust but
-  verify," the way `fetch/3`'s own `WHERE` pushdown gets to be) engine
-  contract, since `Executor` can't cheaply re-verify a `SUM`/`AVG`
-  without redoing the computation itself.
+  **Aggregate/`GROUP BY` pushdown (`EngineBehaviour.aggregate/5`,
+  `try_aggregate_pushdown/6`).** Profiling the column-pruning work
+  above found the real remaining bottleneck for a high-cardinality
+  `GROUP BY` (many distinct groups): not fetch cost, not arithmetic
+  (`Rational.add/2` got its own integer fast path for the same
+  investigation), but `Executor`'s own generic per-row grouping
+  interpreter itself -- ~8x slower than an equivalent native `Enum.
+  reduce/3` over the same rows, confirmed by direct measurement. The
+  only way to remove that cost is to not do the row-by-row work in
+  Elixir at all, for the cases where the engine's own native `GROUP BY`
+  can. Unlike `fetch/3`/`fetch/4`'s pushdown, which gets to be lenient
+  (over-inclusion or under-translation only ever costs speed, since
+  `Executor` always re-applies its full pipeline to whatever comes
+  back), aggregation pushdown has to be *authoritative*: grouping is
+  irreversible, so a wrong or incomplete pushdown can't be corrected
+  afterward the way an over-fetched row set can. `Scry.Core.
+  EngineBehaviour.aggregate/5`'s own moduledoc has the complete
+  contract; researched and reviewed adversarially (two rounds) before
+  being written, including empirical testing against a real SQLite
+  database rather than assumed from documentation, because SQL's own
+  aggregate semantics diverge from Scry's in ways that matter: SQLite's
+  `AVG()` always returns an inexact float (`avg` is excluded from
+  pushdown entirely for this reason -- a future increment could
+  decompose it into a pushed `sum`+`count` recomposed via `Rational.
+  div/2` client-side, deferred since it needs real `Executor`-side
+  plan-rewrite/recomposition glue this version doesn't have), and SQL's
+  native aggregates silently skip `NULL` where lang_spec §7 requires a
+  hard error -- closed by requiring every aggregated column be
+  schema-level `NOT NULL` (`PRAGMA table_info`, an engine-side concern)
+  before trusting a pushed-down result at all.
+
+  Eligibility (`aggregate_pushdown_plan/3`) is deliberately stricter
+  than the streaming path's own `streaming_aggregate_plan/1` (not reused
+  -- several of its allowances, `avg` and a bare non-`group_bys` field
+  falling back to a representative row, are exactly what pushdown can't
+  safely do): `group_mode: :plain`, no window function anywhere in the
+  query, no `HAVING`, no nested `SELECT` in `select`, never a
+  correlated/nested query (`scope == []` -- resolving an
+  ancestor-qualified `WHERE` reference into a literal before rendering
+  SQL is a real, separate problem, deferred), a real (non-`WITH`-bound)
+  source, every `group_bys` entry a single-segment path, every `select`
+  item either a bare field that's *exactly* one of `group_bys` or a
+  `sum`/`count`/`min`/`max` call (`count(distinct field)` included) over
+  exactly one bare field. `:not_pushable` (ineligible, or the engine
+  itself declines via `:not_supported`) falls straight through to
+  exactly today's existing dispatch, unchanged; `{:error, reason}`
+  propagates directly rather than retrying via the fallback, since a
+  genuine engine error would only be reproduced identically by `fetch_
+  rows` anyway.
+
+  The engine's own raw per-group aggregate state (`groups_from_
+  pushdown/2` converts its `{group_by_values, agg_values}` pairs into
+  the exact `{groups, order}` shape `accumulate_groups_parallel/5`
+  normally builds row-by-row, `representative` synthesized directly
+  from the group-by values since eligibility already guarantees no
+  `select` item needs anything else) flows into `finalize_agg/2`
+  **completely unmodified** -- the same function the row-by-row
+  streaming path already uses, so every aggregate's own exactness
+  guarantee (the `:empty` sentinel for a genuinely empty flat aggregate,
+  `count(distinct)`'s plain-integer result needing no `MapSet` at all
+  since pushdown never merges across chunks) is enforced in exactly one
+  place regardless of which path computed the raw pieces
+  (`finalize_groups/5`, factored out of `grouped_base_rows_streaming/7`
+  for exactly this reuse).
 
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
   `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
@@ -656,27 +713,36 @@ defmodule Scry.Core.Executor do
         end
 
       aggregate_query?(query) and query.group_mode == :plain ->
-        case streaming_aggregate_plan(query) do
-          {:ok, plan} ->
-            with {:ok, rows} <-
-                   run_grouped_streaming(
-                     query,
-                     plan,
-                     scope,
-                     params,
-                     with_bindings,
-                     engine_module,
-                     conn
-                   ) do
-              {:ok, Cursor.new(rows)}
-            end
+        case try_aggregate_pushdown(query, scope, params, with_bindings, engine_module, conn) do
+          {:ok, rows} ->
+            {:ok, Cursor.new(rows)}
 
-          :not_streamable ->
-            with {:ok, filtered} <-
-                   fetch_and_filter(query, scope, params, with_bindings, engine_module, conn),
-                 {:ok, rows} <-
-                   run_grouped(query, filtered, own_name, scope, params, engine_module, conn) do
-              {:ok, Cursor.new(rows)}
+          {:error, _reason} = error ->
+            error
+
+          :not_pushable ->
+            case streaming_aggregate_plan(query) do
+              {:ok, plan} ->
+                with {:ok, rows} <-
+                       run_grouped_streaming(
+                         query,
+                         plan,
+                         scope,
+                         params,
+                         with_bindings,
+                         engine_module,
+                         conn
+                       ) do
+                  {:ok, Cursor.new(rows)}
+                end
+
+              :not_streamable ->
+                with {:ok, filtered} <-
+                       fetch_and_filter(query, scope, params, with_bindings, engine_module, conn),
+                     {:ok, rows} <-
+                       run_grouped(query, filtered, own_name, scope, params, engine_module, conn) do
+                  {:ok, Cursor.new(rows)}
+                end
             end
         end
 
@@ -1634,15 +1700,154 @@ defmodule Scry.Core.Executor do
            fetch_rows(query, scope, params, with_bindings, engine_module, conn),
          {:ok, groups, order} <-
            accumulate_groups_parallel(source_cursor, query, plan, scope, params) do
-      rows =
-        for key <- order,
-            group_state = Map.fetch!(groups, key),
-            having_matches_streaming?(query.havings, group_state, scope, params) do
-          finalize_grouped_row(query, group_state, scope, params)
-        end
-
-      {:ok, rows}
+      {:ok, finalize_groups(query, groups, order, scope, params)}
     end
+  end
+
+  # Shared by both ways `{groups, order}` gets built -- row-by-row in
+  # Elixir (`accumulate_groups_parallel/5`, above) or in one shot via
+  # `try_aggregate_pushdown/6` (below) -- so `HAVING` filtering and
+  # final projection behave identically regardless of which one
+  # actually computed the raw aggregate state.
+  defp finalize_groups(query, groups, order, scope, params) do
+    for key <- order,
+        group_state = Map.fetch!(groups, key),
+        having_matches_streaming?(query.havings, group_state, scope, params) do
+      finalize_grouped_row(query, group_state, scope, params)
+    end
+  end
+
+  # Real, native `GROUP BY`/aggregation pushdown -- see `Scry.Core.
+  # EngineBehaviour.aggregate/5`'s own moduledoc for the complete
+  # contract and why this is a genuinely stricter, "authoritative, not
+  # lenient" trust model than `fetch/3`/`fetch/4`'s own. Never a
+  # required path: `:not_pushable` (declined -- ineligible query shape,
+  # engine doesn't implement `aggregate/5`, or the engine itself
+  # declined) falls straight through to exactly today's existing
+  # `streaming_aggregate_plan/1`-then-`run_grouped_streaming/7`-or-
+  # `run_grouped/6` dispatch, unchanged, in `run/6` above.
+  #
+  # `{:error, reason}` from the engine propagates immediately rather
+  # than falling back -- a genuine error here (e.g. an unknown source)
+  # would only be reproduced identically by the fallback path's own
+  # `fetch_rows` anyway, so propagating directly just skips a redundant
+  # round-trip, never changes the outcome.
+  defp try_aggregate_pushdown(query, scope, params, with_bindings, engine_module, conn) do
+    with {:ok, plan} <- aggregate_pushdown_plan(query, scope, with_bindings),
+         true <- function_exported?(engine_module, :aggregate, 5) do
+      case engine_module.aggregate(conn, query.source, query, plan, params) do
+        {:ok, pushdown_rows} ->
+          {groups, order} = groups_from_pushdown(pushdown_rows, query.group_bys)
+          {groups2, order2} = ensure_flat_group(query.group_bys, plan, groups, order)
+          rows = finalize_groups(query, groups2, order2, scope, params)
+
+          {:ok,
+           rows
+           |> sort_rows(query.order_bys, [])
+           |> maybe_dedupe(query.distinct)
+           |> paginate(query.limit, query.offset)}
+
+        :not_supported ->
+          :not_pushable
+
+        {:error, _reason} = error ->
+          error
+      end
+    else
+      _ -> :not_pushable
+    end
+  end
+
+  @pushdown_capable_aggregate_names ~w(sum count min max)
+
+  # Eligibility is deliberately stricter than `streaming_aggregate_
+  # plan/1`'s own (which this doesn't reuse, since several of its
+  # allowances -- `avg`, a bare non-`group_bys` field falling back to
+  # the group's own representative row -- are exactly what pushdown
+  # can't safely do): `group_mode: :plain` is already guaranteed by
+  # `run/6`'s own dispatch before this is ever called; `scope == []`
+  # (never a correlated/nested query -- resolving an ancestor-qualified
+  # `WHERE` reference into a literal before rendering SQL is a real,
+  # separate problem, deferred); a real, `with_bindings`-independent
+  # source (a `WITH`-bound name has no actual engine table to push down
+  # to at all); no `HAVING` (can reference an aggregate absent from
+  # `select` entirely -- its own genuinely separate translation
+  # problem, deferred); every `group_bys` entry a single-segment path
+  # (multi-segment would mean a qualified/nested reference, not a plain
+  # column); every `select` item either a bare field that's *exactly*
+  # one of `group_bys` (never an arbitrary non-grouped field -- there's
+  # no real row here to arbitrarily pick one from, unlike a real fetch's
+  # own "first row wins" representative) or one of `sum`/`count`/`min`/
+  # `max` (never `avg` -- `Scry.Core.EngineBehaviour.aggregate/5`'s own
+  # moduledoc has the exactness reasoning) called with exactly one bare
+  # field argument (or `count(distinct field)`).
+  @spec aggregate_pushdown_plan(Query.t(), scope(), %{optional(String.t()) => Query.t()}) ::
+          {:ok, [EngineBehaviour.aggregate_spec()]} | :not_pushable
+  defp aggregate_pushdown_plan(query, scope, with_bindings) do
+    with true <- scope == [],
+         true <- pushdown_real_source?(query.source, with_bindings),
+         true <- query.havings == [],
+         true <- Enum.all?(query.group_bys, &match?([_], &1)),
+         {:ok, plan} <- pushdown_select_plan(query.select, query.group_bys) do
+      {:ok, plan}
+    else
+      _ -> :not_pushable
+    end
+  end
+
+  defp pushdown_real_source?([name], with_bindings), do: not Map.has_key?(with_bindings, name)
+  defp pushdown_real_source?(_source, _with_bindings), do: true
+
+  defp pushdown_select_plan(items, group_bys) do
+    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
+      case pushdown_body_item(item, group_bys) do
+        {:ok, calls} -> {:cont, {:ok, Enum.uniq(calls ++ acc)}}
+        :not_pushable -> {:halt, :not_pushable}
+      end
+    end)
+  end
+
+  defp pushdown_body_item({:field, path}, group_bys) do
+    if path in group_bys, do: {:ok, []}, else: :not_pushable
+  end
+
+  defp pushdown_body_item(
+         {:computed, _alias, {:call, name, [{:field, _path}] = args}},
+         _group_bys
+       )
+       when name in @pushdown_capable_aggregate_names,
+       do: {:ok, [{name, args}]}
+
+  defp pushdown_body_item(
+         {:computed, _alias, {:call, "count", [{:distinct, {:field, _path}}] = args}},
+         _group_bys
+       ),
+       do: {:ok, [{"count", args}]}
+
+  defp pushdown_body_item(_other, _group_bys), do: :not_pushable
+
+  # Converts the engine's own `{group_by_values, agg_values}` pairs
+  # into the exact `{groups, order}` shape `accumulate_groups_parallel/5`
+  # normally builds row-by-row -- `key = group_by_values` already
+  # matches `accumulate_chunk/5`'s own `Enum.map(group_bys, &get_path(
+  # row, scope, &1))` key construction exactly (both are just "the
+  # group's own values, in `group_bys` order"), and `representative` is
+  # synthesized directly from those same values since pushdown
+  # eligibility already guarantees no `select` item needs anything else
+  # from a real row.
+  defp groups_from_pushdown(pushdown_rows, group_bys) do
+    {groups, reversed_order} =
+      Enum.reduce(pushdown_rows, {%{}, []}, fn {group_by_values, agg_values}, {groups, order} ->
+        representative =
+          group_bys
+          |> Enum.zip(group_by_values)
+          |> Map.new(fn {path, value} -> {List.last(path), value} end)
+
+        state = %{representative: representative, aggs: agg_values}
+        {Map.put(groups, group_by_values, state), [group_by_values | order]}
+      end)
+
+    {groups, Enum.reverse(reversed_order)}
   end
 
   # Overridable via `config :scry_core, parallel_chunk_size: n` /

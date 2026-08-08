@@ -127,4 +127,86 @@ defmodule Scry.Core.EngineBehaviour do
               query :: Scry.Core.Query.t(),
               opts :: fetch_opts()
             ) :: {:ok, Enumerable.t()} | {:error, term()}
+
+  @typedoc """
+  One `sum`/`count`/`min`/`max` call `Scry.Core.Executor` needs computed
+  for `aggregate/5` -- `name` is the aggregate function name, `args` its
+  call arguments (`Scry.Core.Query.expr()`, e.g. `[{:field, ["total"]}]`
+  for `sum(total)`, `[{:distinct, {:field, ["id"]}}]` for `count(distinct
+  id)`), the exact same `{name, args}` shape `Scry.Core.Executor`'s own
+  streaming-aggregation accumulator already keys its state by. Never
+  `"avg"` -- deliberately excluded from this version's eligibility,
+  `Scry.Core.Executor`'s own moduledoc has the full reasoning.
+  """
+  @type aggregate_spec :: {name :: String.t(), args :: [term()]}
+
+  @doc """
+  **Optional -- real, native aggregation pushdown, a genuinely separate
+  and stricter contract from `fetch/3`/`fetch/4`, not an extension of
+  either.** `Scry.Core.EngineBehaviour`'s own moduledoc (the "Scope
+  boundary" section) already says why: `fetch/3`/`fetch/4` get to be
+  *lenient* -- `Scry.Core.Executor` always re-applies its full pipeline
+  to whatever they return, so an engine that over-includes or under-
+  translates only ever costs speed, never correctness. `GROUP BY`/
+  aggregation can't work that way: grouping is irreversible, so a wrong
+  or incomplete pushdown can't be corrected afterward the way an
+  over-fetched row set can. Every implementation of this callback is
+  held to a strict, all-or-nothing standard: return a trustworthy,
+  fully-computed answer, or decline (`:not_supported`) and let
+  `Scry.Core.Executor` fall all the way back to computing it itself,
+  exactly as if this callback didn't exist.
+
+  `Scry.Core.Executor` calls this only when it has already independently
+  confirmed the query shape is eligible (`group_mode: :plain`, no window
+  function anywhere in the query, no `HAVING`, no nested `SELECT` in
+  `select`, the query isn't itself a correlated/nested query, every
+  `select` item is either a bare `group_bys` field or one of the
+  `aggregate_spec()`s in `plan`) -- an implementation only needs to
+  decide whether *it itself* can compute exactly that, correctly; it
+  never needs to re-derive eligibility from `query` on its own.
+
+  `plan` is the distinct `aggregate_spec()`s needed; `params` is handed
+  through so a `{:param, name}` in `query.wheres` can be resolved to its
+  bound value and translated (unlike `fetch/3`'s own `WHERE` pushdown,
+  which never receives `params` and so never translates it). **Every**
+  predicate in `query.wheres` must translate, or the whole call must
+  decline -- there's no safe way to apply a leftover, untranslated
+  predicate after the fact once rows have already been aggregated away.
+
+  Returns one `{group_by_values, agg_values}` pair per group:
+  `group_by_values` is the group's own values for each of `query.
+  group_bys`, in order (a plain list, positionally matching); `agg_values`
+  maps each `plan` entry's own `{name, args}` to the *raw, not-yet-
+  finalized* aggregate state `Scry.Core.Executor`'s own `finalize_agg/2`
+  already expects from its row-by-row streaming path -- the running
+  value itself for `sum`/`min`/`max`, the plain integer for `count`
+  (`count(distinct ...)` included, already a plain integer once
+  computed, no `MapSet` needed) -- **never** a pre-finalized value.
+  `Scry.Core.Executor`, not the implementation, always performs the
+  final `finalize_agg/2` step, so every aggregate's own exactness
+  guarantee is enforced in exactly one place regardless of whether it
+  was computed row-by-row in Elixir or pushed down here. A group whose
+  own aggregate is genuinely undefined (a `sum`/`min`/`max` over an
+  empty implicit flat-aggregate group, `query.group_bys == []` matched
+  by zero rows) must report `:empty`, `Scry.Core.Executor`'s own
+  existing sentinel for exactly that -- never a raw `nil`.
+
+  `:not_supported` and `{:error, term()}` both mean the same thing to
+  `Scry.Core.Executor`: decline, fall back to exactly today's existing
+  behavior, unchanged. An engine that doesn't implement this callback at
+  all is completely unaffected -- this is strictly additive and opt-in,
+  the same posture `fetch/3`/`fetch/4` were introduced with.
+  """
+  @callback aggregate(
+              conn :: term(),
+              source :: [String.t()],
+              query :: Scry.Core.Query.t(),
+              plan :: [aggregate_spec()],
+              params :: map()
+            ) ::
+              {:ok, [{group_by_values :: [term()], agg_values :: %{aggregate_spec() => term()}}]}
+              | :not_supported
+              | {:error, term()}
+
+  @optional_callbacks aggregate: 5
 end
