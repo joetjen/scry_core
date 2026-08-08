@@ -11,16 +11,30 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
   correctly through this new consumption pattern.
 
   What this file deliberately does *not* try to mechanically prove:
-  that a `LIMIT`-bound query or one with a nested `SELECT` in `select`
-  never dispatches into this path at all -- `run/6`'s own `cond` clause
-  ordering is what enforces that (read it directly), and there's no
-  reliable, non-flaky way to observe "which private function ran"
-  from a black-box test without intrusive production-code
-  instrumentation. What *is* tested here: a `LIMIT`-bound query's own
-  early-stop behavior is unchanged (`executor/lazy_execution_test.exs`'s
-  pre-existing counting test still passes, proving it), and a nested-
-  `SELECT` query's own correctness is unaffected by this path existing
-  at all (below) -- regression coverage, not a dispatch-path proof.
+  that a `LIMIT`-bound query, one with a nested `SELECT` in `select`,
+  or one whose `select` is only bare field references never dispatches
+  into this path at all -- `run/6`'s own `cond` clause ordering is what
+  enforces that (read it directly), and there's no reliable, non-flaky
+  way to observe "which private function ran" from a black-box test
+  without intrusive production-code instrumentation. What *is* tested
+  here: a `LIMIT`-bound query's own early-stop behavior is unchanged
+  (`executor/lazy_execution_test.exs`'s pre-existing counting test
+  still passes, proving it), and a nested-`SELECT` query's own
+  correctness is unaffected by this path existing at all (below) --
+  regression coverage, not a dispatch-path proof.
+
+  Every query below wraps its projected field in `string(...)` (via
+  `cast_id_select/0`) purely to satisfy `select_has_call?/1` -- the
+  path's own eligibility gate, added after measuring that a bare-field
+  `select` is genuinely *slower* through this path than through the
+  existing sequential one (the per-row copy into a worker's mailbox
+  costs more than a bare field access saves), while a `select`
+  containing a real function call is where the measured speedup
+  actually showed up (`Scry.Core.Executor`'s own moduledoc and
+  `CHANGELOG.md` have the numbers). Without a call somewhere in
+  `select`, every query here would silently take the sequential
+  `run_plain_streaming/7` path instead and this file would stop
+  testing what it says it tests.
 
   Every test here forces a tiny `parallel_chunk_size` (`Application.
   put_env(:scry_core, :parallel_chunk_size, n)`, restored via
@@ -90,6 +104,13 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
     end
   end
 
+  # A `string(id)` cast projects `id` under its original key, exactly
+  # like `{:field, ["id"]}` would, except now with a real `:call` node
+  # in `select` -- satisfies `select_has_call?/1` without changing
+  # anything else about what's being tested. Values compared against
+  # this project's own output need `to_string/1` accordingly.
+  defp cast_id_select, do: [{:computed, "id", {:call, "string", [{:field, ["id"]}]}}]
+
   describe "correctness and order across chunk boundaries" do
     test "a WHERE filter spanning many chunks matches a hand-computed reference" do
       with_chunk_size(4, fn ->
@@ -98,13 +119,13 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
         query = %Query{
           source: ["items"],
           wheres: [{:cmp, :eq, ["even"], true}],
-          select: [{:field, ["id"]}]
+          select: cast_id_select()
         }
 
         assert {:ok, rows_out} = run(query, %{["items"] => rows})
 
-        expected = for i <- 1..50, rem(i, 2) == 0, do: %{"id" => i}
-        assert Enum.sort_by(rows_out, & &1["id"]) == expected
+        expected = for i <- 1..50, rem(i, 2) == 0, do: %{"id" => to_string(i)}
+        assert Enum.sort_by(rows_out, &String.to_integer(&1["id"])) == expected
       end)
     end
 
@@ -125,20 +146,20 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
           %{"id" => 6}
         ]
 
-        query = %Query{source: ["items"], select: [{:field, ["id"]}]}
+        query = %Query{source: ["items"], select: cast_id_select()}
 
         assert {:ok, rows_out} = run(query, %{["items"] => rows})
-        assert rows_out == Enum.map(rows, &Map.take(&1, ["id"]))
+        assert rows_out == Enum.map(rows, &%{"id" => to_string(&1["id"])})
       end)
     end
 
     test "OFFSET (no LIMIT) is still applied correctly after parallel processing" do
       with_chunk_size(3, fn ->
         rows = for i <- 1..20, do: %{"id" => i}
-        query = %Query{source: ["items"], offset: 15, select: [{:field, ["id"]}]}
+        query = %Query{source: ["items"], offset: 15, select: cast_id_select()}
 
         assert {:ok, rows_out} = run(query, %{["items"] => rows})
-        assert rows_out == for(i <- 16..20, do: %{"id" => i})
+        assert rows_out == for(i <- 16..20, do: %{"id" => to_string(i)})
       end)
     end
 
@@ -149,7 +170,7 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
         query = %Query{
           source: ["items"],
           wheres: [{:cmp, :gt, ["id"], 999}],
-          select: [{:field, ["id"]}]
+          select: cast_id_select()
         }
 
         assert {:ok, []} = run(query, %{["items"] => rows})
@@ -204,7 +225,7 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
         query = %Query{
           source: ["items"],
           wheres: [{:cmp, :match, ["tag"], "bad"}],
-          select: [{:field, ["id"]}]
+          select: cast_id_select()
         }
 
         assert_raise FunctionClauseError, fn -> run(query, %{["items"] => rows}) end
@@ -219,7 +240,7 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
         {:ok, agent} = Agent.start_link(fn -> false end)
         rows = for i <- 1..25, do: %{"id" => i}
 
-        query = %Query{source: ["items"], select: [{:field, ["id"]}]}
+        query = %Query{source: ["items"], select: cast_id_select()}
 
         assert {:ok, cursor} = Executor.run(query, ResourceEngine, {rows, agent})
         assert length(Cursor.to_list(cursor)) == 25
@@ -243,7 +264,7 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
           query = %Query{
             source: ["items"],
             wheres: [{:cmp, :eq, ["keep"], true}],
-            select: [{:field, ["id"]}]
+            select: cast_id_select()
           }
 
           assert {:ok, rows_out} = run(query, %{["items"] => rows})
@@ -251,7 +272,7 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
           expected =
             rows
             |> Enum.filter(& &1["keep"])
-            |> Enum.map(&%{"id" => &1["id"]})
+            |> Enum.map(&%{"id" => to_string(&1["id"])})
 
           assert rows_out == expected
         end)
