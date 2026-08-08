@@ -3,12 +3,13 @@ defmodule Scry.Core.Cursor do
   A real, pull-based cursor over any `Enumerable.t()` -- `next/1` pulls
   exactly one element (never forcing evaluation of anything beyond it),
   `take/2`/`skip/1,2` build on that, `to_list/1` drains the rest. Exists
-  because `Scry.Core.EngineBehaviour.fetch/2` now accepts (not just a
-  plain list, but) any `Enumerable.t()` -- an adapter backed by a real
-  streaming cursor (a Postgrex cursor, an ETS/Mnesia match continuation,
-  ...) can return something genuinely lazy, and this module is how a
-  caller consumes it one row at a time without forcing the whole thing
-  into memory first.
+  because `Scry.Core.EngineBehaviour.execute/3` may return any
+  `Enumerable.t()`, not just a plain list -- an adapter backed by a
+  real streaming cursor (a Postgrex cursor, an ETS/Mnesia match
+  continuation, ...) can return something genuinely lazy, and `Scry.
+  Core.Executor.run/3,4` wraps whatever comes back in one of these so a
+  caller can consume it one row at a time without forcing the whole
+  thing into memory first.
 
   **The mechanism, verified directly (a real scratch script pulling
   from a side-effecting `Stream.map/2`, confirmed only the requested
@@ -35,17 +36,17 @@ defmodule Scry.Core.Cursor do
   already is.)
 
   **What this module does *not* do:** materialize anything it isn't
-  asked for. `Scry.Core.Executor` itself still calls `to_list/1`
-  immediately at the fetch boundary (`fetch_rows/6`) and stays fully
-  eager downstream of that -- `GROUP BY`/`ORDER BY`/`DISTINCT`/window
-  functions are all inherently blocking regardless of how `fetch/2`
-  returns its data, so `Executor`'s own internal pipeline has nothing
-  to gain from staying lazy past that point today. This module exists
-  so the *contract* genuinely supports laziness end to end, and so a
-  future caller (a streaming-aware executor path, or code outside
-  `Scry.Core.Executor` entirely) has a real, independently correct tool
-  to consume it with, once there's a real streaming adapter to prove
-  the benefit against.
+  asked for. Whether pulling from it stays genuinely lazy all the way
+  through depends entirely on what `execute/3` returned and what a
+  caller does with the cursor -- `Scry.Core.QueryOps.run_flat/3`'s own
+  plain `WHERE`+projection path (no `GROUP BY`/aggregate, no window
+  function, no real `ORDER BY`, no `DISTINCT`) stays lazy end to end;
+  anything that inherently needs the whole row set first (a real sort,
+  dedup, window function, most aggregation shapes) is eager by
+  necessity regardless of how the underlying source returns its data.
+  This module exists so the *contract* genuinely supports laziness
+  end to end wherever the query shape allows it, independent of which
+  engine or toolkit function produced the enumerable being consumed.
   """
 
   @opaque t() :: %__MODULE__{continuation: continuation() | :done}
@@ -74,10 +75,37 @@ defmodule Scry.Core.Cursor do
   def next(%__MODULE__{continuation: :done}), do: :done
 
   def next(%__MODULE__{continuation: cont}) do
-    case cont.({:cont, nil}) do
+    # A composed `Stream` stage that needs to stop the *source* early
+    # (`Stream.take/2`, once it has emitted its own last allowed
+    # element) signals that by returning `{:halted, acc}` instead of
+    # `{:suspended, acc, continuation}` for that final element --
+    # confirmed directly (not assumed): `Cursor.new(Stream.take([1, 2,
+    # 3, 4], 2)) |> Cursor.to_list()` returned `[1]`, not `[1, 2]`,
+    # before this fix, because every `{:halted, _acc}` was previously
+    # treated as "no data" unconditionally, silently dropping that
+    # last, genuinely-produced element. But `{:halted, acc}` is
+    # ambiguous on its own: `Stream.take_while/2`'s own rejecting
+    # predicate also halts, *without* ever handing a new element to
+    # this cursor's own reducer (confirmed: `acc` there comes back
+    # completely unchanged from whatever was passed in to resume) --
+    # so `{:halted, acc}` can mean either "here's one final real
+    # element, then stop" or "nothing new happened, just stop", and a
+    # bare `nil` isn't enough to tell them apart (a genuine row
+    # element can itself be `nil` -- confirmed directly:
+    # `Stream.take([nil, 1, 2], 1)` produces a real `{:halted, nil}`
+    # that *does* need to be emitted, not dropped). A fresh, VM-unique
+    # `make_ref()` -- something no real `Enumerable` element could
+    # ever legitimately be `===` to -- as the resume value resolves
+    # the ambiguity: if what comes back is exactly that same
+    # reference, unchanged, nothing new was produced; anything else is
+    # a real final element.
+    sentinel = make_ref()
+
+    case cont.({:cont, sentinel}) do
       {:suspended, elem, next_cont} -> {:ok, elem, %__MODULE__{continuation: next_cont}}
+      {:halted, ^sentinel} -> :done
+      {:halted, elem} -> {:ok, elem, %__MODULE__{continuation: :done}}
       {:done, _acc} -> :done
-      {:halted, _acc} -> :done
     end
   end
 

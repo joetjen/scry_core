@@ -12,25 +12,13 @@ defmodule Scry.Core.QueryTest do
   use ExUnit.Case, async: true
 
   alias Scry.Core.Query
+  alias Scry.Core.Test.ReferenceEngine, as: StaticEngine
 
   @users [
     %{"name" => "Alice", "age" => 30, "status" => "active"},
     %{"name" => "Bob", "age" => 17, "status" => "active"},
     %{"name" => "Carol", "age" => 65, "status" => "inactive"}
   ]
-
-  defmodule StaticEngine do
-    @moduledoc false
-    @behaviour Scry.Core.EngineBehaviour
-
-    @impl true
-    def fetch(data, source) do
-      case Map.fetch(data, source) do
-        {:ok, rows} -> {:ok, rows}
-        :error -> {:error, {:no_such_source, source}}
-      end
-    end
-  end
 
   setup do
     %{conn: %{["users"] => @users}}

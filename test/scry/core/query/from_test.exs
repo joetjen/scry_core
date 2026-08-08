@@ -8,20 +8,9 @@ defmodule Scry.Core.Query.FromTest do
 
   use ExUnit.Case, async: true
 
+  alias Scry.Core.Test.ReferenceEngine, as: StaticEngine
+
   import Scry.Core.Query
-
-  defmodule StaticEngine do
-    @moduledoc false
-    @behaviour Scry.Core.EngineBehaviour
-
-    @impl true
-    def fetch(data, source) do
-      case Map.fetch(data, source) do
-        {:ok, rows} -> {:ok, rows}
-        :error -> {:error, {:no_such_source, source}}
-      end
-    end
-  end
 
   # `Scry.Core.Executor.run/3,4` returns `{:ok, Scry.Core.Cursor.t()}` now,
   # not `{:ok, [row()]}` -- drains it back to this suite's own

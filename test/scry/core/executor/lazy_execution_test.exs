@@ -12,11 +12,20 @@ defmodule Scry.Core.Executor.LazyExecutionTest do
   (`Scry.Core.Executor.QueryError`) only ever surfaces once a caller
   actually pulls far enough to reach it -- never eagerly from `run/4`
   itself.
+
+  Every engine here implements `execute/3` directly over `Scry.Core.
+  QueryOps.run_flat/3` (no nested `SELECT`/`WITH` in any query this
+  file uses, so the `run_document/4` dispatch never comes into play) --
+  each one only adds its own instrumentation (a step counter, an
+  `Agent`-tracked resource) around the raw row stream before handing it
+  to the toolkit, proving these properties survive all the way through
+  the real `execute/3` boundary, not just inside `Scry.Core.Cursor`
+  itself in isolation.
   """
 
   use ExUnit.Case, async: true
 
-  alias Scry.Core.{Cursor, Executor, Query}
+  alias Scry.Core.{Cursor, Executor, Query, QueryOps}
   alias Scry.Core.Executor.QueryError
 
   defmodule CountingEngine do
@@ -24,17 +33,19 @@ defmodule Scry.Core.Executor.LazyExecutionTest do
     @behaviour Scry.Core.EngineBehaviour
 
     @impl true
-    def fetch({data, counter}, source) do
+    def execute({data, counter}, %Query{source: source} = query, params) do
       case Map.fetch(data, source) do
         {:ok, rows} ->
-          {:ok,
-           Stream.map(rows, fn row ->
-             :counters.add(counter, 1, 1)
-             row
-           end)}
+          counted =
+            Stream.map(rows, fn row ->
+              :counters.add(counter, 1, 1)
+              row
+            end)
+
+          QueryOps.run_flat(counted, query, params)
 
         :error ->
-          {:error, {:no_such_source, source}}
+          {:error, {:query_error, {:no_such_source, source}}}
       end
     end
   end
@@ -44,7 +55,7 @@ defmodule Scry.Core.Executor.LazyExecutionTest do
     @behaviour Scry.Core.EngineBehaviour
 
     @impl true
-    def fetch({data, agent}, [name]) do
+    def execute({data, agent}, %Query{source: [name]} = query, params) do
       rows = Map.fetch!(data, [name])
 
       stream =
@@ -57,7 +68,7 @@ defmodule Scry.Core.Executor.LazyExecutionTest do
           fn _ -> Agent.update(agent, fn _ -> true end) end
         )
 
-      {:ok, stream}
+      QueryOps.run_flat(stream, query, params)
     end
   end
 
@@ -153,7 +164,7 @@ defmodule Scry.Core.Executor.LazyExecutionTest do
     end
   end
 
-  test "QueryError's own reason matches project_item/8's real {:unsupported_body_item, item} shape" do
+  test "QueryError's own reason matches project_item's real {:unsupported_body_item, item} shape" do
     item = {:variant, %{fake: true}}
     query = %Query{source: ["items"], select: [item]}
     conn = {%{["items"] => @items}, :counters.new(1, [])}
@@ -240,7 +251,7 @@ defmodule Scry.Core.Executor.LazyExecutionTest do
     end
 
     test "a window function layered on a streaming-capable GROUP BY still streams the source scan" do
-      # `run_grouped_with_windows/7` reuses `streaming_aggregate_plan/1`
+      # `run_grouped_with_windows/4` reuses `streaming_aggregate_plan/1`
       # against the window-stripped select before ever falling back to
       # the eager path -- this is the source-scan step-counted proof
       # that a window function doesn't silently force that fallback.
@@ -300,92 +311,5 @@ defmodule Scry.Core.Executor.LazyExecutionTest do
       # had since the very first increment.
       assert :counters.get(counter, 1) == 1000
     end
-  end
-
-  describe "optional fetch/3 pushdown (Scry.Core.EngineBehaviour)" do
-    defmodule PushdownEngine do
-      @moduledoc false
-      @behaviour Scry.Core.EngineBehaviour
-
-      # `fetch/2` deliberately raises rather than returning anything --
-      # the tests below only pass if `Scry.Core.Executor` genuinely
-      # prefers `fetch/3` whenever a module implements it, never falling
-      # back to `fetch/2` just because both exist.
-      @impl true
-      def fetch(_conn, _source) do
-        raise "fetch/2 should never be called when fetch/3 is available"
-      end
-
-      # `conn` here is `{data, mode}` -- `mode` picks which of the three
-      # pushdown behaviours this fixture demonstrates, keeping one engine
-      # module for all three tests rather than three near-identical ones.
-      @impl true
-      def fetch({data, :narrow}, [source_name], %Query{wheres: [{:cmp, :eq, [field], value}]}) do
-        narrowed =
-          data
-          |> Map.fetch!([source_name])
-          |> Enum.filter(&(Map.get(&1, field) == value))
-
-        {:ok, narrowed}
-      end
-
-      def fetch({data, :over_include}, [source_name], %Query{}) do
-        # Deliberately ignores `query.wheres` entirely and returns every
-        # row, unfiltered -- simulating a real engine's own imperfect (or
-        # simply absent) pushdown for this particular predicate shape.
-        {:ok, Map.fetch!(data, [source_name])}
-      end
-    end
-
-    @pushdown_rows [
-      %{"id" => 1, "status" => "active"},
-      %{"id" => 2, "status" => "inactive"},
-      %{"id" => 3, "status" => "active"}
-    ]
-
-    test "fetch/3 is preferred over fetch/2 whenever an engine implements it" do
-      query = %Query{source: ["items"], select: [{:field, ["id"]}]}
-      conn = {%{["items"] => @pushdown_rows}, :over_include}
-
-      # fetch/2 raises unconditionally above -- reaching a result at all
-      # (rather than that exception) already proves fetch/3 was used.
-      assert {:ok, cursor} = Executor.run(query, PushdownEngine, conn)
-      assert length(Cursor.to_list(cursor)) == 3
-    end
-
-    test "a fetch/3 that genuinely narrows results still produces the correct output" do
-      query = %Query{
-        source: ["items"],
-        wheres: [{:cmp, :eq, ["status"], "active"}],
-        select: [{:field, ["id"]}]
-      }
-
-      conn = {%{["items"] => @pushdown_rows}, :narrow}
-
-      assert {:ok, cursor} = Executor.run(query, PushdownEngine, conn)
-      assert Enum.sort(Cursor.to_list(cursor)) == Enum.sort([%{"id" => 1}, %{"id" => 3}])
-    end
-
-    test "a fetch/3 that over-includes (ignores the query entirely) still produces the correct output -- Executor's own re-verification is what actually guarantees correctness, not the engine" do
-      query = %Query{
-        source: ["items"],
-        wheres: [{:cmp, :eq, ["status"], "active"}],
-        select: [{:field, ["id"]}]
-      }
-
-      conn = {%{["items"] => @pushdown_rows}, :over_include}
-
-      assert {:ok, cursor} = Executor.run(query, PushdownEngine, conn)
-      assert Enum.sort(Cursor.to_list(cursor)) == Enum.sort([%{"id" => 1}, %{"id" => 3}])
-    end
-
-    # No test exercises the reverse (an engine that *under*-includes,
-    # wrongly dropping a row a correct fetch would have returned) as if
-    # it were also safe -- it isn't. `Scry.Core.Executor` never sees a
-    # row `fetch/3` didn't return in the first place, so there's nothing
-    # for it to re-verify against; under-inclusion is a real engine-side
-    # bug class no core mechanism guards against. This asymmetry is
-    # documented in `Scry.Core.EngineBehaviour`'s own moduledoc, not left
-    # to be discovered the hard way.
   end
 end

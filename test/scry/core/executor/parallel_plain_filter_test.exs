@@ -54,17 +54,21 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
   use ExUnit.Case, async: false
   use ExUnitProperties
 
-  alias Scry.Core.{Cursor, Executor, Query}
+  alias Scry.Core.{Cursor, Executor, Query, QueryOps}
 
   defmodule TestEngine do
     @moduledoc false
     @behaviour Scry.Core.EngineBehaviour
 
     @impl true
-    def fetch(data, source) do
-      case Map.fetch(data, source) do
-        {:ok, rows} -> {:ok, rows}
-        :error -> {:error, {:no_such_source, source}}
+    def execute(data, %Query{source: source} = query, params) do
+      if Enum.any?(query.select, &match?(%Query{}, &1)) do
+        QueryOps.run_document(data, query, params, __MODULE__)
+      else
+        case Map.fetch(data, source) do
+          {:ok, rows} -> QueryOps.run_flat(rows, query, params)
+          :error -> {:error, {:query_error, {:no_such_source, source}}}
+        end
       end
     end
   end
@@ -74,7 +78,7 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
     @behaviour Scry.Core.EngineBehaviour
 
     @impl true
-    def fetch({rows, agent}, _source) do
+    def execute({rows, agent}, query, params) do
       stream =
         Stream.resource(
           fn -> rows end,
@@ -85,7 +89,7 @@ defmodule Scry.Core.Executor.ParallelPlainFilterTest do
           fn _ -> Agent.update(agent, fn _ -> true end) end
         )
 
-      {:ok, stream}
+      QueryOps.run_flat(stream, query, params)
     end
   end
 

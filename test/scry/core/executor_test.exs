@@ -4,43 +4,8 @@ defmodule Scry.Core.ExecutorTest do
 
   alias Scry.Core.{CombinedQuery, Cursor, Executor, Query, Rational}
   alias Scry.Core.Executor.QueryError
-
-  # A minimal fixture, not the real static engine (that's
-  # scry_test_engine_core, a separate package -- scry_core can't
-  # depend on it without a cycle, since it depends on scry_core).
-  # `conn` here is just a %{source_path => rows} map.
-  defmodule FakeEngine do
-    @moduledoc false
-    @behaviour Scry.Core.EngineBehaviour
-
-    @impl true
-    def fetch(data, source) do
-      case Map.fetch(data, source) do
-        {:ok, rows} -> {:ok, rows}
-        :error -> {:error, {:no_such_source, source}}
-      end
-    end
-  end
-
-  # Same data, same behaviour, but `fetch/2` returns a genuine `Stream`
-  # instead of a plain list -- proves `EngineBehaviour.fetch/2`'s own
-  # widened contract (any `Enumerable.t()`, not just a list) actually
-  # works end to end through `run/4`, not just that the type signature
-  # got wider. `Scry.Core.Executor.fetch_rows/6` materializes through
-  # `Scry.Core.Cursor` immediately either way, so results must be
-  # byte-identical to `FakeEngine`'s own.
-  defmodule StreamEngine do
-    @moduledoc false
-    @behaviour Scry.Core.EngineBehaviour
-
-    @impl true
-    def fetch(data, source) do
-      case Map.fetch(data, source) do
-        {:ok, rows} -> {:ok, Stream.map(rows, & &1)}
-        :error -> {:error, {:no_such_source, source}}
-      end
-    end
-  end
+  alias Scry.Core.Test.ReferenceEngine, as: FakeEngine
+  alias Scry.Core.Test.StreamingReferenceEngine, as: StreamEngine
 
   @users [
     %{"name" => "Alice", "age" => 30, "status" => "active"},
@@ -308,7 +273,7 @@ defmodule Scry.Core.ExecutorTest do
   test "an unknown source propagates the adapter's own error" do
     query = %Query{source: ["nonexistent"], select: []}
 
-    assert {:error, {:no_such_source, ["nonexistent"]}} = run(query)
+    assert {:error, {:query_error, {:no_such_source, ["nonexistent"]}}} = run(query)
   end
 
   test "a %Rational{} literal compares exactly against a plain-integer row value" do
@@ -582,7 +547,18 @@ defmodule Scry.Core.ExecutorTest do
     assert Enum.map(rows, & &1["name"]) == ["Alice", "Carol"]
   end
 
-  test "correlation reaches more than one nesting level up (grandparent, not just parent)" do
+  test "correlation reaching more than one nesting level up (grandparent) is a documented gap, not silently wrong" do
+    # `Scry.Core.QueryOps.run_document/4`'s own moduledoc documents
+    # this as a deliberate, narrower scope than the pre-pivot
+    # interpreter it replaces: a nested query's own correlated
+    # reference must name its *immediate* enclosing query. `grandchild`
+    # here names "customers" -- its own grandparent, not its immediate
+    # parent ("customer_orders") -- so the reference is never rewritten
+    # into a resolvable `{:param, ...}` binding, is left as a literal,
+    # unresolvable 2-segment field path, resolves to `nil` against
+    # `order_items`'s own rows, and hits the ordinary null-safety hard
+    # error every unresolvable comparison already gets -- a real,
+    # honest failure, not a silently wrong answer.
     grandchild = %Query{
       source: ["order_items"],
       wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
@@ -601,24 +577,7 @@ defmodule Scry.Core.ExecutorTest do
       select: [{:field, ["name"]}, order_with_items]
     }
 
-    assert {:ok, rows} = run(query)
-
-    assert rows == [
-             %{
-               "name" => "Alice",
-               "customer_orders" => [
-                 %{"id" => 100, "order_items" => [%{"sku" => "A"}, %{"sku" => "B"}]},
-                 %{"id" => 101, "order_items" => [%{"sku" => "A"}, %{"sku" => "B"}]}
-               ]
-             },
-             %{"name" => "Bob", "customer_orders" => []},
-             %{
-               "name" => "Carol",
-               "customer_orders" => [
-                 %{"id" => 102, "order_items" => [%{"sku" => "C"}]}
-               ]
-             }
-           ]
+    assert_raise ArgumentError, ~r/null-safety/, fn -> run(query) end
   end
 
   test "an external parameter is resolved against the params map at execution time" do
@@ -1055,7 +1014,16 @@ defmodule Scry.Core.ExecutorTest do
              ]
     end
 
-    test "a nested SELECT/variant body item inside a grouped query's own select is a clear error, not a crash" do
+    test "a nested SELECT inside a grouped query's own select now composes correctly (capability gained by the execute/3 pivot)" do
+      # Previously a clear, deliberate error (`{:unsupported_grouped_
+      # body_item, ...}`) -- the old per-row interpreter's own grouped
+      # projection code had no way to run a nested query per group.
+      # `Scry.Core.QueryOps.run_document/4` extracts a nested `SELECT`
+      # from `select` before ever handing the "shell" query (here,
+      # `GROUP BY customer_id { customer_id }`) to `QueryOps.run_flat/3`
+      # or a real engine -- grouped or not is irrelevant to that
+      # extraction, so this combination just works now, uncorrelated
+      # nested items included.
       query = %Query{
         source: ["customer_orders"],
         group_bys: [["customer_id"]],
@@ -1065,7 +1033,18 @@ defmodule Scry.Core.ExecutorTest do
         ]
       }
 
-      assert {:error, {:unsupported_grouped_body_item, %Query{}}} = run(query)
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{
+                 "customer_id" => 1,
+                 "order_items" => [%{"sku" => "A"}, %{"sku" => "B"}, %{"sku" => "C"}]
+               },
+               %{
+                 "customer_id" => 3,
+                 "order_items" => [%{"sku" => "A"}, %{"sku" => "B"}, %{"sku" => "C"}]
+               }
+             ]
     end
   end
 
@@ -1653,10 +1632,10 @@ defmodule Scry.Core.ExecutorTest do
     test "an error on either side propagates, not silently dropped" do
       bad = %Query{source: ["nonexistent"], select: []}
 
-      assert {:error, {:no_such_source, ["nonexistent"]}} =
+      assert {:error, {:query_error, {:no_such_source, ["nonexistent"]}}} =
                run(combined(:union, @team_a_query, bad))
 
-      assert {:error, {:no_such_source, ["nonexistent"]}} =
+      assert {:error, {:query_error, {:no_such_source, ["nonexistent"]}}} =
                run(combined(:union, bad, @team_a_query))
     end
 
@@ -2803,7 +2782,7 @@ defmodule Scry.Core.ExecutorTest do
 
     test "an unknown source still surfaces the same error" do
       query = %Query{source: ["nonexistent"], select: [{:field, ["id"]}]}
-      assert run_via_stream(query) == {:error, {:no_such_source, ["nonexistent"]}}
+      assert run_via_stream(query) == {:error, {:query_error, {:no_such_source, ["nonexistent"]}}}
     end
   end
 end

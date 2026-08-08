@@ -14,7 +14,7 @@ defmodule Scry.Core.Query do
   modifier chain, `GROUP BY ... ROLLUP`/`... CUBE` (`group_mode`)
   included: text (`group_by_clause`'s own three alternatives, `priv/
   grammar.aether`) and the composable builder's `group_by_rollup/2`/
-  `group_by_cube/2` below both set it, and `Scry.Core.Executor` runs it
+  `group_by_cube/2` below both set it, and `Scry.Core.QueryOps` runs it
   for real (that module's own moduledoc has the hierarchical-subtotal-
   row mechanics). `variant` is the extension slot an EP1(b)/(c)/(d)-
   shaped construct from a loaded kind populates (impl_spec.md §2); core
@@ -69,7 +69,7 @@ defmodule Scry.Core.Query do
   A `{:field, path}` body item's own optional third element
   (lang_spec.md §5.3/§9: `<field> IF $<param>`) is that same `{:param,
   name}` placeholder -- present only when the field was written with an
-  `IF` suffix; `Scry.Core.Executor` omits the field from the projected
+  `IF` suffix; `Scry.Core.QueryOps` omits the field from the projected
   row entirely (not a `nil`-filled key) when the resolved parameter is
   falsy (`nil`/`false` -- nothing else is), the GraphQL `@include`/
   `@skip` equivalent this construct is modeled on.
@@ -79,13 +79,13 @@ defmodule Scry.Core.Query do
   `expr()` -- a small arithmetic AST (`+ - * ** /`, lang_spec.md §5.10)
   over literals, `{:field, path}`, `{:param, name}`, and `{:call, name,
   args}` (lang_spec.md §5.8's built-in functions), evaluated by
-  `Scry.Core.Executor` against the current row (and, via `{:field,
+  `Scry.Core.QueryOps` against the current row (and, via `{:field,
   ...}`, an enclosing row too, the same scope-chain correlation a
   `where` predicate already gets). `{:call, ...}` splits two ways there:
-  `sum`/`avg`/`count`/`min`/`max` (`Scry.Core.Executor.eval_aggregate/5`)
+  `sum`/`avg`/`count`/`min`/`max` (`Scry.Core.QueryOps.eval_aggregate/5`)
   only mean anything across a group's own member rows (tied to `group
   by`/`having`, §5.2), while `string`/`int`/`exact`/`inexact`
-  (`Scry.Core.Executor`'s own `apply_cast/2`) are ordinary per-row
+  (`Scry.Core.QueryOps`'s own `apply_cast/2`) are ordinary per-row
   expressions, valid anywhere any other `expr()` is -- `inexact(...)` is
   also the one place a real native `float()` ever enters this whole
   type; every other numeric shape (`integer()`/`Scry.Core.Rational.t()`)
@@ -106,7 +106,7 @@ defmodule Scry.Core.Query do
   `WHEN <predicate> THEN <expr> [...] ELSE <expr>`, "inline, not a
   block") reuses `predicate()` directly for each clause's own
   condition -- the exact same AST a `where` clause already produces, so
-  a `WHEN` can already do anything `WHERE` can. `Scry.Core.Executor`
+  a `WHEN` can already do anything `WHERE` can. `Scry.Core.QueryOps`
   evaluates `clauses` in order and resolves the first matching one's
   own expression, falling back to `else_expr` if none match -- `ELSE`
   is mandatory at the grammar level (no default, no implicit `nil`),
@@ -164,7 +164,7 @@ defmodule Scry.Core.Query do
   landed, independently of `type_decls`/a registry -- it needs neither,
   since it's about a row's own actual field *value* being `nil` at
   execution time, not a schema's own declared nullability.
-  `Scry.Core.Executor`'s three `{:cmp, ...}` evaluators (`WHERE`/`WHEN`,
+  `Scry.Core.QueryOps`'s three `{:cmp, ...}` evaluators (`WHERE`/`WHEN`,
   and both the eager and streaming `HAVING` paths, kept in parity) all
   hard-error the moment either side of an ordinary comparison resolves
   to `nil`, with one explicit exemption: `field = nil`/`field != nil`
@@ -200,7 +200,7 @@ defmodule Scry.Core.Query do
   grammar (and this type) accept any `identifier(args)` call (lang_spec
   §5.8's own framing: "anything else ... is either an EP2 namespaced
   extension call, or ... `logic`'s EP2 bare call"), and it's
-  `Scry.Core.Executor` that decides, at execution time, which names it
+  `Scry.Core.QueryOps` that decides, at execution time, which names it
   actually knows how to run (`eval_aggregate/5` for the 10 aggregates,
   `apply_cast/2` for the 5 casts -- `json` included, alongside
   `string`/`int`/`exact`/`inexact` -- and the window-value dispatch
@@ -225,10 +225,10 @@ defmodule Scry.Core.Query do
   `name` is either one of `@aggregate_names` (reused as a window
   function, e.g. a running `sum`) or one of the 4 window-only names
   (`row_number`/`rank`, zero-argument; `first_value`/`last_value`, one
-  argument) -- `Scry.Core.Executor.compute_window_values/4` has the full
+  argument) -- `Scry.Core.QueryOps.compute_window_values/4` has the full
   per-name dispatch. Reachable only from `select`, both at the grammar
   level (`priv/grammar.aether`'s own `window_call`/`over_spec` comments)
-  and semantically -- `Scry.Core.Executor`'s own `resolve_rhs/4` and
+  and semantically -- `Scry.Core.QueryOps`'s own `resolve_rhs/4` and
   every sibling resolver reject a `{:window, ...}` node reached from
   `where`/`having`/a nested `GROUP BY` key with a clear error, since a
   window function's value depends on the *whole* filtered row set, which
@@ -238,7 +238,7 @@ defmodule Scry.Core.Query do
   combined with a window function is still a real, documented "not
   supported yet" gap) applies the window function *after* `GROUP BY`/
   `HAVING`, over the already-grouped/aggregated output rows -- real SQL
-  semantics, and `Scry.Core.Executor.run_grouped_with_windows/7`'s own
+  semantics, and `Scry.Core.QueryOps.run_grouped_with_windows/7`'s own
   moduledoc has the full reasoning. `frame_bound()` (below) mirrors
   lang_spec's own 5-shape enumeration exactly (`UNBOUNDED PRECEDING`,
   `<n> PRECEDING`, `CURRENT ROW`, `<n> FOLLOWING`, `UNBOUNDED
@@ -248,7 +248,7 @@ defmodule Scry.Core.Query do
 
   `expr()`'s own `{:distinct, expr}` (lang_spec.md §5.8: `count(distinct
   …)`, "Distinct-value count") is meaningful only as `count`'s own
-  single argument (`Scry.Core.Executor.eval_aggregate/5` dedupes the
+  single argument (`Scry.Core.QueryOps.eval_aggregate/5` dedupes the
   resolved per-member-row values before counting) -- syntactically
   permitted as a prefix on *any* call argument (`priv/grammar.aether`'s
   own `call_arg` comment has the "grammar stays permissive, execution
@@ -263,7 +263,7 @@ defmodule Scry.Core.Query do
   (in practice always `{:call, "json", [...]}`, but not restricted to
   that at this type's own level, the same "grammar stays permissive"
   posture `{:distinct, ...}` already has), `path` an ordinary
-  `[String.t()]`. `Scry.Core.Executor` resolves `base` first (through
+  `[String.t()]`. `Scry.Core.QueryOps` resolves `base` first (through
   whichever resolver reached this node -- row-scoped or group-scoped,
   same composition every other nested `expr()` tag already gets for
   free) and walks `path` into the result the exact same way `{:field,
@@ -296,7 +296,7 @@ defmodule Scry.Core.Query do
   while testing `json(<field>).path`: lang_spec §7's own worked example,
   `WHERE "urgent" in metadata.tags`, never parsed before this, since
   `in`'s own grammar alternative only ever matched a bracketed `[...]`
-  literal. `Scry.Core.Executor.eval_predicate/4`'s own `{:in, ...}`
+  literal. `Scry.Core.QueryOps.eval_predicate/4`'s own `{:in, ...}`
   clause dispatches on `is_list(values)` to tell the two shapes apart --
   the existing literal-list case is always a real Elixir list; the new
   computed-list case is always a tagged tuple, never a list, so the two
@@ -315,7 +315,7 @@ defmodule Scry.Core.Query do
   specifically prevents a literal *list* (`[1, 2] in ...`) from being
   silently misread as a two-segment field path by the same resolver
   that already treats any plain list it receives as one --
-  `Scry.Core.Executor.resolve_predicate_lhs/4`'s own comment has the
+  `Scry.Core.QueryOps.resolve_predicate_lhs/4`'s own comment has the
   full reasoning.
   """
 

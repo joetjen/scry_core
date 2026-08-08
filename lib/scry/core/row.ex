@@ -10,34 +10,33 @@ defmodule Scry.Core.Row do
   allocation, not by anything `Scry.Core.Executor` itself does with the
   data once it has it.
 
-  `Scry.Core.Executor`'s own row-field lookup (`get_path_in/2`) is the
+  `Scry.Core.QueryOps`'s own row-field lookup (`get_path_in/2`) is the
   *only* place in that module which ever reads a row's fields directly
   (confirmed by direct source audit, not assumed) -- so this type only
-  needs new clauses there to be usable everywhere else in the pipeline
-  (`WHERE` evaluation, `GROUP BY` keys, sorting, projection, `scope`
-  for correlated nested-query access) without any of those call sites
-  needing to know or care which row shape they were handed.
+  needs clauses there to be usable everywhere else in the toolkit
+  (`WHERE` evaluation, `GROUP BY` keys, sorting, projection) without
+  any of those call sites needing to know or care which row shape they
+  were handed.
 
   **Deliberately not a drop-in, silently-compatible replacement for a
   plain map**: `fetch!/2` *raises* on a column not present in the
   index, rather than returning `nil` the way `Map.get/2` (what a plain
   map row goes through) would. This is an intentional asymmetry, not
-  an oversight -- a `Scry.Core.Row`'s own index is built entirely from
-  this project's own static column-reference analysis (`Scry.Core.
-  Executor.referenced_top_level_fields/2`), so a lookup miss here can
-  only mean that analysis under-collected a genuinely-needed column, a
-  real bug. Turning that into a loud, immediate crash (caught by tests
-  and integration runs) instead of a silently wrong `nil` flowing
-  through `WHERE`/aggregation/projection is the safety net that makes
-  column pruning trustworthy at all, found necessary by an adversarial
-  design review before this module was written, not added after a
-  real incident.
+  an oversight -- an engine constructing a `Scry.Core.Row` owns its own
+  index entirely (which columns it decided to fetch, based on whatever
+  it can determine from the query it's compiling), so a lookup miss
+  here can only mean that engine's own construction under-collected a
+  genuinely-needed column, a real bug in that engine. Turning that into
+  a loud, immediate crash (caught by tests and integration runs)
+  instead of a silently wrong `nil` flowing through `WHERE`/
+  aggregation/projection is the safety net that makes column pruning
+  trustworthy at all.
 
-  Only ever constructed by an engine adapter opting into `Scry.Core.
-  EngineBehaviour.fetch/4`'s compact-row return shape (`Scry.Engine.
-  Exqlite` today) -- an adapter that only implements `fetch/2`/`fetch/3`
-  never produces one of these, and nothing about existing engines
-  changes.
+  Only ever constructed by an engine's own `Scry.Core.EngineBehaviour.
+  execute/3` implementation, entirely at that engine's own discretion
+  (`Scry.Engine.Exqlite`'s own column-pruned fetch, for instance) -- an
+  engine that returns plain maps never produces one of these, and
+  nothing about a plain-map-returning engine changes.
   """
 
   @enforce_keys [:index, :values]

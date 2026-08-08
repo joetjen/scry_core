@@ -5,10 +5,11 @@ defmodule Scry.Core.WithCycleCheck do
   once from `Scry.Core.Actions`' own `handle_rule(:document, ...)` before
   `Scry.Core.parse/1` ever returns.
 
-  A `WITH` reference is resolved at *execution* time (`Scry.Core.Executor`
-  intercepts any query whose own `source` is exactly `[name]` for a
-  declared binding, running that binding instead of calling the real
-  engine's `fetch/2`) -- there's no distinguishing sigil the parser could
+  A `WITH` reference is resolved at *execution* time (`Scry.Core.
+  QueryOps.run_document/4` intercepts any query whose own `source` is
+  exactly `[name]` for a declared binding, running that binding instead
+  of calling the real engine's `execute/3`) -- there's no distinguishing
+  sigil the parser could
   reject an *undefined* reference with, unlike a `FRAGMENT` spread's own
   `...name`, so this module only ever checks for *cycles*, never for
   undefined names (a name that isn't a `WITH` binding is just an ordinary

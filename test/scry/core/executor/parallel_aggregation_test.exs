@@ -35,17 +35,17 @@ defmodule Scry.Core.Executor.ParallelAggregationTest do
   use ExUnit.Case, async: false
   use ExUnitProperties
 
-  alias Scry.Core.{Cursor, Executor, Query, Rational}
+  alias Scry.Core.{Cursor, Executor, Query, QueryOps, Rational}
 
   defmodule TestEngine do
     @moduledoc false
     @behaviour Scry.Core.EngineBehaviour
 
     @impl true
-    def fetch(data, source) do
+    def execute(data, %Query{source: source} = query, params) do
       case Map.fetch(data, source) do
-        {:ok, rows} -> {:ok, rows}
-        :error -> {:error, {:no_such_source, source}}
+        {:ok, rows} -> QueryOps.run_flat(rows, query, params)
+        :error -> {:error, {:query_error, {:no_such_source, source}}}
       end
     end
   end
@@ -55,7 +55,7 @@ defmodule Scry.Core.Executor.ParallelAggregationTest do
     @behaviour Scry.Core.EngineBehaviour
 
     @impl true
-    def fetch({rows, agent}, _source) do
+    def execute({rows, agent}, query, params) do
       stream =
         Stream.resource(
           fn -> rows end,
@@ -66,7 +66,7 @@ defmodule Scry.Core.Executor.ParallelAggregationTest do
           fn _ -> Agent.update(agent, fn _ -> true end) end
         )
 
-      {:ok, stream}
+      QueryOps.run_flat(stream, query, params)
     end
   end
 

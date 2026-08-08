@@ -162,4 +162,28 @@ defmodule Scry.Core.CursorTest do
     :done = Cursor.next(cursor)
     assert :ok = Cursor.close(cursor)
   end
+
+  describe "a composed Stream stage that halts the source early (Stream.take/2)" do
+    test "the final allowed element is still emitted, not silently dropped" do
+      # Real regression: `Stream.take/2`, on its own last allowed
+      # element, signals `{:halted, elem}` rather than `{:suspended,
+      # elem, continuation}` -- `next/1` used to treat every
+      # `{:halted, _}` as "no data", so this returned `[1]`, not
+      # `[1, 2]`.
+      assert Cursor.to_list(Cursor.new(Stream.take([1, 2, 3, 4], 2))) == [1, 2]
+    end
+
+    test "a genuine nil element right before the halt is emitted, not mistaken for the disambiguation sentinel" do
+      assert Cursor.to_list(Cursor.new(Stream.take([nil, 1, 2], 1))) == [nil]
+    end
+
+    test "Stream.take_while/2's own rejecting halt (no new element at all) still terminates cleanly" do
+      assert Cursor.to_list(Cursor.new(Stream.take_while([1, 2, 3, 4, 5], &(&1 < 3)))) == [1, 2]
+    end
+
+    test "a filter+drop+take composition still yields exactly what Enum.to_list/1 would" do
+      stream = [1, 2, 3, 4, 5] |> Stream.filter(&(&1 != 2)) |> Stream.drop(1) |> Stream.take(2)
+      assert Cursor.to_list(Cursor.new(stream)) == Enum.to_list(stream)
+    end
+  end
 end

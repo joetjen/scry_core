@@ -1,212 +1,160 @@
 defmodule Scry.Core.EngineBehaviour do
   @moduledoc """
-  The shared execution scaffold every kind's own engine behaviour is
-  meant to build on top of (impl_spec.md §2: "core exposes the shared
-  execution scaffold every kind's own behaviour builds on top of").
-  Covers only what filtering and projecting a `%Scry.Core.Query{}`
-  actually needs from an adapter -- fetching a source's rows.
-  Everything else (`where`/`select` evaluation) is core's own job,
-  `Scry.Core.Executor`, not an adapter's, so it's not part of this
-  contract at all.
+  The contract every Scry storage adapter implements: given the whole,
+  as-parsed query document -- a `%Scry.Core.Query{}` or `%Scry.Core.
+  CombinedQuery{}`, `WITH` bindings and nested/correlated `SELECT`
+  body items included, exactly as `Scry.Core.parse/1` produced it --
+  compute the *entire* answer and either return it or decline it
+  outright. There is no second, automatic pass anywhere in this
+  ecosystem that re-applies any of this afterward: `execute/3` is
+  authoritative for whatever it accepts, not a hint an engine may only
+  partially honor. This replaces the earlier `fetch/2,3,4`/
+  `aggregate/5` contract entirely (a genuinely different, stricter
+  trust model -- see "Why this replaces fetch/aggregate" below), not
+  an addition to it.
 
-  A kind-specific behaviour (`scry_time_series`'s own, once it exists)
-  is expected to extend this shape with callbacks for whatever
-  EP1/EP2 constructs that kind's own grammar fragment contributes --
-  nothing here assumes an adapter only ever implements the one
-  callback below.
+  ## What an engine actually receives
 
-  `fetch/2` takes just a source path, not the query's `wheres` -- so an
-  adapter that only implements it fetches every row for a source and
-  lets `Scry.Core.Executor` filter client-side. Always correct, not
-  necessarily efficient.
+  `Scry.Core.Executor.run/3,4` (the only place this callback is ever
+  called from) hands `query` through completely unmodified -- it may
+  be a `%Scry.Core.CombinedQuery{}` (`UNION`/`INTERSECT`/`EXCEPT`), a
+  `%Scry.Core.Query{}` whose own `source` names a `WITH` binding
+  instead of a real table, or a `%Scry.Core.Query{}` whose `select`
+  contains a nested, possibly-correlated `%Scry.Core.Query{}` of its
+  own. None of this is pre-decomposed for the engine. This is
+  deliberate: a correlated nested `SELECT` maps naturally onto a
+  native SQL `JOIN`, a `WITH` binding onto a native CTE, and a
+  combinator onto a native `UNION`/`INTERSECT`/`EXCEPT` -- an engine
+  sophisticated enough to translate the *whole* document into one
+  native query should be free to, rather than have `scry_core`
+  pre-decompose it into pieces first and lose that opportunity.
 
-  `fetch/2` returns any `Enumerable.t()`, not just a plain list -- a
-  real adapter backed by a genuine streaming cursor (a Postgrex
-  cursor, an ETS/Mnesia match continuation, ...) can return something
-  lazy instead of pulling every row into memory up front. A plain
-  list already satisfies `Enumerable.t()`, so every existing
-  implementation of this callback needs no code changes at all;
-  `Scry.Core.Cursor` is the intended way to consume whatever comes
-  back one row (or one batch) at a time, for anything that wants to
-  avoid forcing the whole thing into memory.
+  An engine that isn't that sophisticated yet (or hasn't implemented a
+  specific construct) doesn't have to reimplement Scry's own generic
+  semantics for it: `Scry.Core.QueryOps.run_document/4` implements
+  `WITH`/correlated-nested-`SELECT`/combinator resolution generically,
+  recursing back into `execute/3` for whatever flat leaf queries
+  remain (`Scry.Core.QueryOps.run_flat/3`, called once a leaf's own
+  source is resolved), and `run_flat/3` alone is available for an
+  engine that has already reduced a flat query down to a plain row
+  enumerable of its own and wants the rest -- `GROUP BY`/aggregates/
+  sorting/projection/casts/window functions -- computed for it. Both
+  are ordinary functions an engine calls from inside its own
+  `execute/3`, entirely its own choice; `scry_core` never calls either
+  on an engine's behalf.
 
-  **`fetch/3` (optional) -- real pushdown, on top of this same
-  contract, not a different one.** Receives the whole `%Scry.Core.
-  Query{}` too, so an adapter backed by a real query language of its
-  own (SQL, an ETS match spec, ...) can translate whatever it
-  recognizes -- typically some or all of `query.wheres` -- into a
-  native, more efficient fetch, instead of always returning every row
-  for `source` unfiltered. `Scry.Core.Executor` prefers `fetch/3` when
-  a module implements it (`function_exported?/3`), falling back to
-  `fetch/2` otherwise -- every engine that only implements `fetch/2`
-  keeps working completely unchanged; this is a strictly additive,
-  opt-in capability, never a breaking change to the existing contract.
+  ## Why this replaces `fetch`/`aggregate` entirely
 
-  **The load-bearing safety invariant, and it's asymmetric**:
-  `Scry.Core.Executor` makes zero assumptions about how much (or how
-  correctly) a `fetch/3` implementation actually optimized -- it
-  unconditionally re-applies its entire existing pipeline (`wheres`,
-  grouping/aggregation, sorting, dedup, pagination, projection) to
-  whatever comes back, exactly as it already does for `fetch/2`. An
-  engine that *over-includes* (returns extra rows a correct pushdown
-  would have excluded, or ignores `query` entirely and behaves exactly
-  like `fetch/2`) is always corrected downstream -- filtering an
-  already-filtered set is idempotent. An engine that *under-includes*
-  -- a buggy predicate translation that wrongly drops a row a correct
-  fetch would have returned -- is **not** caught by anything, because
-  `Executor` never sees the dropped row to compare against. `fetch/3`
-  is a trust-the-engine-for-completeness,
-  verify-the-engine-for-correctness-of-what-it-returns contract, not a
-  fully-checked one.
+  The earlier contract kept two trust tiers: `fetch/3`/`fetch/4` were
+  *lenient* (`Scry.Core.Executor` unconditionally re-applied its whole
+  pipeline to whatever came back, so an engine's own translation only
+  ever had to be safe, never complete), and `aggregate/5` was
+  *authoritative but narrow* (no `avg`, no `HAVING`, no `ORDER BY`/
+  `LIMIT` pushdown at all -- sorting and pagination always still ran
+  in Elixir afterward, even for a correctly pushed-down aggregate).
+  Measured directly: even with `aggregate/5` pushdown in play, a
+  `GROUP BY`-heavy query against a real SQLite-backed table was still
+  11-15x slower than the equivalent raw SQL, because the lenient half
+  of the contract meant most real queries still paid for a full
+  Elixir-side re-walk regardless of what got translated, and the
+  authoritative half never covered enough of a query's own shape to
+  eliminate that re-walk for the rest. Closing that gap for real needs
+  an engine trusted to own the *entire* query and its own result, with
+  nothing downstream re-verifying or re-computing any of it -- which
+  is exactly what made the old contract's automatic re-verification
+  (the thing that made `fetch/3`/`fetch/4` safe to add incrementally)
+  impossible to keep. There is no engine-authored partial answer this
+  contract can safely accept; an engine that can't fully and correctly
+  compute a given `query` must decline it, not return something
+  narrower for something else to finish.
 
-  **Scope boundary**: `fetch/3` may narrow *which* rows come back and
-  in *what order*, but must still return the same row shape `fetch/2`
-  would for that source -- never pre-aggregated or restructured data.
-  Translating `GROUP BY`/aggregates into a native aggregation would
-  require `Executor` to trust an engine's own aggregation logic
-  outright, breaking the invariant above -- a real, separate, harder
-  problem, not attempted here. Predicates referencing `{:param, name}`
-  (a `$name`-bound value) also aren't pushed down through `fetch/3` --
-  only literal-vs-field comparisons are real candidates for
-  translation there. Aggregation pushdown remains a genuinely separate
-  mechanism, not attempted here.
+  ## What a kind package must guarantee
 
-  **`fetch/4` (optional) -- `fetch/3` plus a hints map, for an engine
-  that wants to do more than translate `wheres`.** `Scry.Core.Executor`
-  prefers `fetch/4` over `fetch/3` over `fetch/2`, in that order, via
-  `function_exported?/3` -- every engine that doesn't implement it is
-  completely unaffected, same additive/opt-in posture as `fetch/3`
-  itself. `opts` is a plain, open map (not a fixed-arity parameter list)
-  specifically so it can grow new keys later without another signature
-  change -- this version populates exactly one: `opts.columns ::
-  {:ok, MapSet.t(String.t())} | :unknown`, the exact top-level columns
-  of `source` this query references anywhere (`wheres`/`havings`/
-  `group_bys`/`order_bys`/`select`), computed by `Executor` itself
-  (`Scry.Core.Executor.referenced_top_level_fields/2`) so the one
-  AST-analysis implementation can never drift out of sync with
-  `get_path/3`'s own qualifier-resolution semantics. `:unknown` means
-  exactly what it did before this callback existed: an engine that
-  sees it should fetch every column, unconditionally -- the same
-  "always correct, not necessarily efficient" posture `fetch/2` itself
-  has. A future increment may add `opts.params` for the `{:param,
-  name}`-pushdown extension point mentioned above; `opts` being an open
-  map is what keeps that non-breaking too.
+  A `:variant` body item and a populated `query.variant` are the one
+  thing `execute/3` must never see: a kind package (`scry_time_series`,
+  ...) is required to fully lower its own EP1/EP2 vocabulary into
+  ordinary core AST before ever calling `Scry.Core.Executor.run/3,4`,
+  exactly what every existing kind package already does.
   """
 
-  @typedoc "A single result row -- either a plain string-keyed map, matching `Scry.Core.Query`'s own path segments, or a `Scry.Core.Row.t()` (only ever produced by an engine opting into `fetch/4`'s compact-row representation)."
+  @typedoc "A single result row -- either a plain string-keyed map, matching `Scry.Core.Query`'s own path segments, or a `Scry.Core.Row.t()`."
   @type row :: %{optional(String.t()) => term()} | Scry.Core.Row.t()
 
-  @typedoc "Optional per-fetch hints, computed by `Scry.Core.Executor` itself and passed to `fetch/4`. Open map, may grow new keys in a future, non-breaking increment."
-  @type fetch_opts :: %{optional(:columns) => {:ok, MapSet.t(String.t())} | :unknown}
+  @typedoc """
+  Why an engine declined or failed a query.
 
-  @doc "Fetches every row for `source` (a dotted path, e.g. `[\"orders\"]`) from `conn` -- any `Enumerable.t()` of `row()`, not necessarily a materialized list (`Scry.Core.Cursor`'s own moduledoc has the full reasoning)."
-  @callback fetch(conn :: term(), source :: [String.t()]) ::
-              {:ok, Enumerable.t()} | {:error, term()}
-
-  @optional_callbacks fetch: 3, fetch: 4
+  `{:unsupported, detail}` means the engine understood `query` but
+  deliberately doesn't (yet, or ever) implement that shape --
+  `detail` is a small, documented, closed-ish vocabulary describing
+  *which* construct was rejected, e.g. `{:construct, :window_function}`,
+  `{:construct, :rollup}`, `{:construct, :cube}`, `{:construct,
+  :nested_select}`, `{:construct, :with_binding}`, `{:aggregate,
+  "avg"}`, `{:predicate, :match}`, `{:distinct_argument, expr}`.
+  `{:query_error, detail}` means the engine attempted the query and it
+  genuinely failed against the real backend (an invalid source, a
+  driver-level error, a value that failed to bind) -- a caller can and
+  should treat these two differently: `:unsupported` is "try a
+  different engine or a different query shape", `:query_error` is
+  "this specific attempt failed".
+  """
+  @type error :: {:unsupported, term()} | {:query_error, term()}
 
   @doc """
-  Like `fetch/2`, but also receives the whole query, so an adapter can
-  optionally push some or all of it down to its own backend before
-  `Scry.Core.Executor` re-applies the query's full semantics regardless
-  (this module's own moduledoc has the complete safety-invariant
-  reasoning). Optional -- an engine that doesn't implement this falls
-  back to `fetch/2`, unchanged.
-  """
-  @callback fetch(conn :: term(), source :: [String.t()], query :: Scry.Core.Query.t()) ::
-              {:ok, Enumerable.t()} | {:error, term()}
+  Computes the *entire* answer for `query` against `conn`, resolving
+  any `{:param, name}` reference against `params`. `query` is exactly
+  what `Scry.Core.parse/1` produced for the document being run --
+  see this module's own moduledoc for what that can include and how
+  to delegate any of it to `Scry.Core.QueryOps` instead of
+  reimplementing it.
 
-  @doc """
-  Like `fetch/3`, but also receives `opts` (this module's own moduledoc
-  has the full `fetch/4` reasoning). Optional -- an engine that doesn't
-  implement this falls back to `fetch/3`, then `fetch/2`, unchanged.
+  Returns `{:ok, Enumerable.t()}` of already-fully-realized output
+  rows on success. A plain list already satisfies `Enumerable.t()`; a
+  genuinely lazy/streaming engine may return a `Stream` instead, and
+  `Scry.Core.Executor` wraps whatever comes back in a `Scry.Core.
+  Cursor.t()` for the caller -- an engine is never required to
+  construct one directly.
+
+  Returns `{:error, error()}` (see `t:error/0`) when the engine either
+  declines `query`'s own shape outright or attempts it and fails --
+  there is no partial-success return value, and nothing downstream
+  re-applies or re-verifies whatever this callback returns.
   """
-  @callback fetch(
+  @callback execute(
               conn :: term(),
-              source :: [String.t()],
-              query :: Scry.Core.Query.t(),
-              opts :: fetch_opts()
-            ) :: {:ok, Enumerable.t()} | {:error, term()}
+              query :: Scry.Core.Query.t() | Scry.Core.CombinedQuery.t(),
+              params :: %{String.t() => term()}
+            ) :: {:ok, Enumerable.t()} | {:error, error()}
 
   @typedoc """
-  One `sum`/`count`/`min`/`max` call `Scry.Core.Executor` needs computed
-  for `aggregate/5` -- `name` is the aggregate function name, `args` its
-  call arguments (`Scry.Core.Query.expr()`, e.g. `[{:field, ["total"]}]`
-  for `sum(total)`, `[{:distinct, {:field, ["id"]}}]` for `count(distinct
-  id)`), the exact same `{name, args}` shape `Scry.Core.Executor`'s own
-  streaming-aggregation accumulator already keys its state by. Never
-  `"avg"` -- deliberately excluded from this version's eligibility,
-  `Scry.Core.Executor`'s own moduledoc has the full reasoning.
+  A coarse, best-effort description of what an engine's `execute/3`
+  tends to accept -- documentation/introspection only, e.g. for a
+  future `mix scry.explain`-style tool or an application routing a
+  query to one of several engines ahead of time. Open map, may grow
+  new keys in a future, non-breaking increment.
   """
-  @type aggregate_spec :: {name :: String.t(), args :: [term()]}
+  @type capabilities :: %{
+          optional(:aggregates) => MapSet.t(String.t()),
+          optional(:window_functions) => boolean(),
+          optional(:rollup_cube) => boolean(),
+          optional(:exact_avg) => boolean(),
+          optional(:nested_select) => boolean(),
+          optional(:with_bindings) => boolean()
+        }
 
   @doc """
-  **Optional -- real, native aggregation pushdown, a genuinely separate
-  and stricter contract from `fetch/3`/`fetch/4`, not an extension of
-  either.** `Scry.Core.EngineBehaviour`'s own moduledoc (the "Scope
-  boundary" section) already says why: `fetch/3`/`fetch/4` get to be
-  *lenient* -- `Scry.Core.Executor` always re-applies its full pipeline
-  to whatever they return, so an engine that over-includes or under-
-  translates only ever costs speed, never correctness. `GROUP BY`/
-  aggregation can't work that way: grouping is irreversible, so a wrong
-  or incomplete pushdown can't be corrected afterward the way an
-  over-fetched row set can. Every implementation of this callback is
-  held to a strict, all-or-nothing standard: return a trustworthy,
-  fully-computed answer, or decline (`:not_supported`) and let
-  `Scry.Core.Executor` fall all the way back to computing it itself,
-  exactly as if this callback didn't exist.
-
-  `Scry.Core.Executor` calls this only when it has already independently
-  confirmed the query shape is eligible (`group_mode: :plain`, no window
-  function anywhere in the query, no `HAVING`, no nested `SELECT` in
-  `select`, the query isn't itself a correlated/nested query, every
-  `select` item is either a bare `group_bys` field or one of the
-  `aggregate_spec()`s in `plan`) -- an implementation only needs to
-  decide whether *it itself* can compute exactly that, correctly; it
-  never needs to re-derive eligibility from `query` on its own.
-
-  `plan` is the distinct `aggregate_spec()`s needed; `params` is handed
-  through so a `{:param, name}` in `query.wheres` can be resolved to its
-  bound value and translated (unlike `fetch/3`'s own `WHERE` pushdown,
-  which never receives `params` and so never translates it). **Every**
-  predicate in `query.wheres` must translate, or the whole call must
-  decline -- there's no safe way to apply a leftover, untranslated
-  predicate after the fact once rows have already been aggregated away.
-
-  Returns one `{group_by_values, agg_values}` pair per group:
-  `group_by_values` is the group's own values for each of `query.
-  group_bys`, in order (a plain list, positionally matching); `agg_values`
-  maps each `plan` entry's own `{name, args}` to the *raw, not-yet-
-  finalized* aggregate state `Scry.Core.Executor`'s own `finalize_agg/2`
-  already expects from its row-by-row streaming path -- the running
-  value itself for `sum`/`min`/`max`, the plain integer for `count`
-  (`count(distinct ...)` included, already a plain integer once
-  computed, no `MapSet` needed) -- **never** a pre-finalized value.
-  `Scry.Core.Executor`, not the implementation, always performs the
-  final `finalize_agg/2` step, so every aggregate's own exactness
-  guarantee is enforced in exactly one place regardless of whether it
-  was computed row-by-row in Elixir or pushed down here. A group whose
-  own aggregate is genuinely undefined (a `sum`/`min`/`max` over an
-  empty implicit flat-aggregate group, `query.group_bys == []` matched
-  by zero rows) must report `:empty`, `Scry.Core.Executor`'s own
-  existing sentinel for exactly that -- never a raw `nil`.
-
-  `:not_supported` and `{:error, term()}` both mean the same thing to
-  `Scry.Core.Executor`: decline, fall back to exactly today's existing
-  behavior, unchanged. An engine that doesn't implement this callback at
-  all is completely unaffected -- this is strictly additive and opt-in,
-  the same posture `fetch/3`/`fetch/4` were introduced with.
+  **Optional, and never consulted by `scry_core` itself before calling
+  `execute/3`.** A real "would you accept this exact query" oracle
+  needs essentially the same eligibility logic `execute/3` itself
+  already has to run to decide whether to decline -- duplicating that
+  logic into a second callback risks exactly the "the planner says
+  yes, the executor says no" bug class, for a benefit (avoiding one
+  cheap, side-effect-free `{:error, {:unsupported, _}}` round trip)
+  that's marginal for any well-written engine. This exists purely for
+  external tooling to introspect, coarsely, what an engine tends to
+  support -- never as a pre-flight check `execute/3`'s own contract
+  depends on.
   """
-  @callback aggregate(
-              conn :: term(),
-              source :: [String.t()],
-              query :: Scry.Core.Query.t(),
-              plan :: [aggregate_spec()],
-              params :: map()
-            ) ::
-              {:ok, [{group_by_values :: [term()], agg_values :: %{aggregate_spec() => term()}}]}
-              | :not_supported
-              | {:error, term()}
+  @callback capabilities(conn :: term()) :: capabilities()
 
-  @optional_callbacks aggregate: 5
+  @optional_callbacks capabilities: 1
 end
