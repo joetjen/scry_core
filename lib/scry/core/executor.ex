@@ -119,6 +119,59 @@ defmodule Scry.Core.Executor do
   fix: reconstruct the original raise/throw/exit via `:erlang.raise/3`
   rather than assume a struct is already there).
 
+  **Column-reference hints for `fetch/4` (`referenced_top_level_
+  fields/2`).** Measured root cause of a `GROUP BY`/`WHERE` scan over a
+  large SQL-backed table running far slower through Scry than raw SQL:
+  a SQL engine only implementing `fetch/2`/`fetch/3` always issues
+  `SELECT * FROM table` and eagerly builds a full map per row, however
+  few of that table's columns the query actually needs. `fetch_lazy/5`
+  now computes, for a query's own top-level source, exactly which
+  columns it references anywhere (`wheres`/`havings`/`group_bys`/
+  `order_bys`/`select`) via this public function, and passes the result
+  as `opts.columns` to `engine_module.fetch/4` when the engine
+  implements it (`Scry.Core.EngineBehaviour`'s own moduledoc has the
+  full `fetch/4` contract) -- `Scry.Engine.Exqlite` is the first, and
+  so far only, adapter that does, pruning its own `SELECT` list and
+  returning `Scry.Core.Row` values (a compact, positional row --
+  shared column index + values tuple -- instead of a per-row map) in
+  response. Every engine that only implements `fetch/2`/`fetch/3` (or a
+  consumer calling those directly, like `scry_test_time_series`'s own
+  SQLite engine) is completely unaffected -- this is strictly additive,
+  the same posture `fetch/3` itself was introduced with.
+
+  `referenced_top_level_fields/2` is deliberately conservative,
+  returning `:unknown` (meaning "fetch every column," today's exact
+  behavior) whenever `select` has a nested `%Query{}` (no attempt to
+  bubble a correlated reference up through nesting) or a window
+  function (sidesteps window-function synthetic-field augmentation
+  entirely, which needs to append a key no fixed-shape compact row can
+  hold) -- its own function doc has the complete walker design,
+  including the single-segment-vs-ancestor-name rule an adversarial
+  design review caught before this shipped: a bare single-segment path
+  is *never* excluded by an ancestor-name match, since `get_path/3`'s
+  own single-segment clause never consults `scope` at all. `get_path_
+  in/2` is the *only* place in this module that reads a row's fields
+  directly (confirmed by direct source audit) -- so `Scry.Core.Row`
+  needed new clauses there, and nowhere else, to flow transparently
+  through `WHERE`/`GROUP BY`/`ORDER BY`/`DISTINCT`/projection and
+  correlated `scope` access (an ancestor's own row can itself be a
+  `Row`), byte-identical to the same query against plain-map rows.
+  `Row.fetch!/2` raises on a column outside its own index, rather than
+  silently resolving to `nil` the way a plain map's `Map.get/2` would
+  -- since a `Row`'s index is built entirely from this feature's own
+  column computation, a lookup miss there can only mean the enumerator
+  itself under-collected a genuinely-needed column, and turning that
+  into a loud crash (caught by tests) rather than a silently wrong
+  result is the safety net that makes pruning trustworthy at all.
+
+  Aggregate/`GROUP BY` pushdown into the engine's own query language --
+  the single biggest remaining lever for the large-`GROUP BY` case
+  that motivated this -- is a deliberately separate, harder problem,
+  not attempted here: it would need an authoritative (not "trust but
+  verify," the way `fetch/3`'s own `WHERE` pushdown gets to be) engine
+  contract, since `Executor` can't cheaply re-verify a `SUM`/`AVG`
+  without redoing the computation itself.
+
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
   `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
   full standard-aggregate list, `count(distinct ...)` included) are
@@ -410,7 +463,7 @@ defmodule Scry.Core.Executor do
   "parsed, not yet consumed" scope reasoning).
   """
 
-  alias Scry.Core.{CombinedQuery, Cursor, EngineBehaviour, Query, Rational}
+  alias Scry.Core.{CombinedQuery, Cursor, EngineBehaviour, Query, Rational, Row}
   alias Scry.Core.Executor.QueryError
 
   @typedoc "One `{ancestor_source_name, ancestor_row}` per enclosing query, nearest first."
@@ -729,19 +782,19 @@ defmodule Scry.Core.Executor do
         run_any(bound_query, scope, params, with_bindings, engine_module, conn)
 
       :error ->
-        fetch_lazy(engine_module, conn, [name], query)
+        fetch_lazy(engine_module, conn, [name], query, scope)
     end
   end
 
   defp fetch_rows(
          %Query{source: source} = query,
-         _scope,
+         scope,
          _params,
          _with_bindings,
          engine_module,
          conn
        ),
-       do: fetch_lazy(engine_module, conn, source, query)
+       do: fetch_lazy(engine_module, conn, source, query, scope)
 
   # `engine_module.fetch/2` may return any `Enumerable.t()` now, not just
   # a plain list (`Scry.Core.EngineBehaviour`'s own moduledoc has the
@@ -759,25 +812,237 @@ defmodule Scry.Core.Executor do
   # for `ORDER BY` combined with `LIMIT`) -- this function itself stays
   # agnostic to which.
   #
-  # Prefers `engine_module.fetch/3` (the whole `query` too) when the
-  # engine implements it, falling back to `fetch/2` otherwise --
-  # `Scry.Core.EngineBehaviour`'s own moduledoc has the full pushdown
-  # contract and its own load-bearing safety invariant. Every engine
-  # that only implements `fetch/2` is completely unaffected: `function_
-  # exported?/3` is `false` for it, so this always takes the `fetch/2`
-  # branch, byte-identical to before `fetch/3` existed.
-  defp fetch_lazy(engine_module, conn, source, query) do
+  # Prefers `engine_module.fetch/4` (adds a hints map, currently just
+  # `%{columns: referenced_top_level_fields(query, ancestor_names)}`)
+  # over `fetch/3` (the whole `query` too) over `fetch/2`, in that
+  # order, via `function_exported?/3` -- `Scry.Core.EngineBehaviour`'s
+  # own moduledoc has the full pushdown contract and its own
+  # load-bearing safety invariant. Every engine that only implements
+  # `fetch/2` (or `fetch/2`+`fetch/3`) is completely unaffected: this
+  # always takes its own highest-arity implemented branch, byte-
+  # identical to before `fetch/4` existed for anything that doesn't
+  # implement it.
+  #
+  # `opts.columns` is computed here, not by the engine -- keeps the one
+  # AST-analysis implementation in the same module that already owns
+  # `get_path/3`'s own qualifier-resolution semantics, so the two can
+  # never drift out of sync with each other. `ancestor_names` (`scope`'s
+  # own qualifiers) has to be threaded in from every `fetch_rows/6`
+  # call site for this -- previously discarded there since nothing
+  # needed it before `fetch/3`'s own pushdown, which never looked at
+  # `scope` either.
+  defp fetch_lazy(engine_module, conn, source, query, scope) do
     result =
-      if function_exported?(engine_module, :fetch, 3) do
-        engine_module.fetch(conn, source, query)
-      else
-        engine_module.fetch(conn, source)
+      cond do
+        function_exported?(engine_module, :fetch, 4) ->
+          ancestor_names = MapSet.new(scope, fn {name, _row} -> name end)
+          opts = %{columns: referenced_top_level_fields(query, ancestor_names)}
+          engine_module.fetch(conn, source, query, opts)
+
+        function_exported?(engine_module, :fetch, 3) ->
+          engine_module.fetch(conn, source, query)
+
+        true ->
+          engine_module.fetch(conn, source)
       end
 
     with {:ok, enumerable} <- result do
       {:ok, Cursor.new(enumerable)}
     end
   end
+
+  @doc """
+  Statically determines, for `query`'s own top-level source, exactly
+  which columns it references anywhere in `wheres`/`havings`/
+  `group_bys`/`order_bys`/`select` -- `{:ok, MapSet.t(String.t())}`
+  when every reference is exhaustively accounted for, `:unknown`
+  whenever anything can't be proven safe. A caller **must** treat
+  `:unknown` as "every column may be needed" -- this function never
+  guesses, because `get_path_in/2` silently resolves a missing
+  plain-map key to `nil` rather than raising, so a wrongly-pruned
+  column would corrupt a result silently instead of crashing.
+
+  Bails to `:unknown` whenever `query.select` contains a nested
+  `%Query{}` (deliberately not attempting to bubble a correlated
+  reference -- `{:field, [own_name, col]}` inside the nested query,
+  referring back to *this* query's own column -- up through arbitrary
+  nesting depth) or a window function (sidesteps window-function
+  synthetic-field augmentation entirely, which appends a key no
+  fixed-shape compact row can accommodate). Otherwise walks every
+  `predicate()`/`expr()`/`body_item()` shape those fields can hold,
+  mirroring `resolve_predicate_lhs/4`/`resolve_rhs/4`'s own exact
+  clause sets one-for-one (not a separate, looser reimplementation of
+  what counts as a field reference).
+
+  `ancestor_names` -- the qualifiers already resolvable higher up
+  `scope` (nearest enclosing query names first) -- excludes a
+  **multi-segment** path's first segment from `query`'s own columns
+  when it matches one of these (that segment names an ancestor's own
+  row, already fetched separately, not a column on `query`'s own
+  source). A **single-segment** path is never excluded this way,
+  matching `get_path/3`'s own single-segment clause exactly: it never
+  consults `scope` at all, so a one-segment path is always this
+  query's own column, even if it happens to share a name with an
+  ancestor.
+  """
+  @spec referenced_top_level_fields(Query.t(), MapSet.t(String.t())) ::
+          {:ok, MapSet.t(String.t())} | :unknown
+  def referenced_top_level_fields(%Query{} = query, ancestor_names) do
+    {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
+
+    if select_has_nested_query?(query.select) or windows != [] do
+      :unknown
+    else
+      [
+        collect_predicates(query.wheres, ancestor_names),
+        collect_predicates(query.havings, ancestor_names),
+        collect_paths(query.group_bys, ancestor_names),
+        collect_order_bys(query.order_bys, ancestor_names),
+        collect_body_items(query.select, ancestor_names)
+      ]
+      |> Enum.reduce({:ok, MapSet.new()}, &merge_fields/2)
+    end
+  end
+
+  defp merge_fields({:ok, a}, {:ok, b}), do: {:ok, MapSet.union(a, b)}
+  defp merge_fields(_a, _b), do: :unknown
+
+  defp collect_predicates(predicates, ancestor_names) do
+    Enum.reduce(predicates, {:ok, MapSet.new()}, fn predicate, acc ->
+      merge_fields(acc, collect_predicate(predicate, ancestor_names))
+    end)
+  end
+
+  # Mirrors `eval_predicate/4`'s own clause set exactly -- `:cmp`'s rhs
+  # and `:in`'s values (both the literal-list and single-computed-expr
+  # forms) all resolve through `resolve_rhs/4` in production, so they
+  # all walk through `collect_expr/2` here too, the same one-to-one
+  # correspondence.
+  defp collect_predicate({:cmp, _op, lhs, rhs}, ancestor_names) do
+    merge_fields(collect_predicate_lhs(lhs, ancestor_names), collect_expr(rhs, ancestor_names))
+  end
+
+  defp collect_predicate({:in, lhs, values}, ancestor_names) when is_list(values) do
+    merge_fields(
+      collect_predicate_lhs(lhs, ancestor_names),
+      collect_exprs(values, ancestor_names)
+    )
+  end
+
+  defp collect_predicate({:in, lhs, list_expr}, ancestor_names) do
+    merge_fields(
+      collect_predicate_lhs(lhs, ancestor_names),
+      collect_expr(list_expr, ancestor_names)
+    )
+  end
+
+  defp collect_predicate({:and, l, r}, ancestor_names),
+    do: merge_fields(collect_predicate(l, ancestor_names), collect_predicate(r, ancestor_names))
+
+  defp collect_predicate({:or, l, r}, ancestor_names),
+    do: merge_fields(collect_predicate(l, ancestor_names), collect_predicate(r, ancestor_names))
+
+  defp collect_predicate({:not, p}, ancestor_names), do: collect_predicate(p, ancestor_names)
+  defp collect_predicate(_other, _ancestor_names), do: :unknown
+
+  # Mirrors `resolve_predicate_lhs/4`'s own 4 clauses exactly (a `:cmp`/
+  # `:in` lhs is intentionally narrower than a general `expr()` -- no
+  # bare `{:field,...}`, only a raw path list).
+  defp collect_predicate_lhs({:call, _name, args}, ancestor_names),
+    do: collect_exprs(args, ancestor_names)
+
+  defp collect_predicate_lhs({:dot, base, _path}, ancestor_names),
+    do: collect_expr(base, ancestor_names)
+
+  defp collect_predicate_lhs(path, ancestor_names) when is_list(path),
+    do: collect_path(path, ancestor_names)
+
+  defp collect_predicate_lhs({:literal, _value}, _ancestor_names), do: {:ok, MapSet.new()}
+
+  defp collect_exprs(exprs, ancestor_names) do
+    Enum.reduce(exprs, {:ok, MapSet.new()}, fn expr, acc ->
+      merge_fields(acc, collect_expr(expr, ancestor_names))
+    end)
+  end
+
+  # Mirrors `resolve_rhs/4`'s own clause set exactly -- deliberately no
+  # `{:window, ...}` clause here, the same as `resolve_rhs/4` itself:
+  # a window call never reaches this function in production either
+  # (`compute_window_values/4` handles it entirely separately), and
+  # `referenced_top_level_fields/2` already bails to `:unknown` before
+  # ever calling this whenever a window is present regardless.
+  defp collect_expr({:field, path}, ancestor_names), do: collect_path(path, ancestor_names)
+  defp collect_expr({:param, _name}, _ancestor_names), do: {:ok, MapSet.new()}
+
+  defp collect_expr({:arith, _op, l, r}, ancestor_names),
+    do: merge_fields(collect_expr(l, ancestor_names), collect_expr(r, ancestor_names))
+
+  defp collect_expr({:when, clauses, else_expr}, ancestor_names) do
+    clauses_result =
+      Enum.reduce(clauses, {:ok, MapSet.new()}, fn {predicate, expr}, acc ->
+        merge_fields(
+          acc,
+          merge_fields(
+            collect_predicate(predicate, ancestor_names),
+            collect_expr(expr, ancestor_names)
+          )
+        )
+      end)
+
+    merge_fields(clauses_result, collect_expr(else_expr, ancestor_names))
+  end
+
+  defp collect_expr({:call, _name, args}, ancestor_names), do: collect_exprs(args, ancestor_names)
+  defp collect_expr({:distinct, expr}, ancestor_names), do: collect_expr(expr, ancestor_names)
+  defp collect_expr({:dot, base, _path}, ancestor_names), do: collect_expr(base, ancestor_names)
+  defp collect_expr(_literal, _ancestor_names), do: {:ok, MapSet.new()}
+
+  defp collect_path([single], _ancestor_names), do: {:ok, MapSet.new([single])}
+
+  defp collect_path([first | _rest], ancestor_names) do
+    if MapSet.member?(ancestor_names, first) do
+      {:ok, MapSet.new()}
+    else
+      {:ok, MapSet.new([first])}
+    end
+  end
+
+  defp collect_paths(paths, ancestor_names) do
+    Enum.reduce(paths, {:ok, MapSet.new()}, fn path, acc ->
+      merge_fields(acc, collect_path(path, ancestor_names))
+    end)
+  end
+
+  defp collect_order_bys(order_bys, ancestor_names) do
+    Enum.reduce(order_bys, {:ok, MapSet.new()}, fn {path, _dir}, acc ->
+      merge_fields(acc, collect_path(path, ancestor_names))
+    end)
+  end
+
+  defp collect_body_items(items, ancestor_names) do
+    Enum.reduce(items, {:ok, MapSet.new()}, fn item, acc ->
+      merge_fields(acc, collect_body_item(item, ancestor_names))
+    end)
+  end
+
+  defp collect_body_item({:field, path}, ancestor_names), do: collect_path(path, ancestor_names)
+
+  defp collect_body_item({:field, path, {:param, _name}}, ancestor_names),
+    do: collect_path(path, ancestor_names)
+
+  defp collect_body_item({:computed, _alias, expr}, ancestor_names),
+    do: collect_expr(expr, ancestor_names)
+
+  # Unreachable in practice -- `referenced_top_level_fields/2` already
+  # bails to `:unknown` before ever calling this whenever `select` has
+  # a nested query -- kept anyway so this function can never raise a
+  # `FunctionClauseError` if that guard's own logic ever changes.
+  defp collect_body_item(%Query{}, _ancestor_names), do: :unknown
+
+  # No execution semantics yet (`Scry.Core.Query`'s own moduledoc) --
+  # nothing consumes it, so it can't reference a column either.
+  defp collect_body_item({:variant, _term}, _ancestor_names), do: {:ok, MapSet.new()}
+  defp collect_body_item(_other, _ancestor_names), do: :unknown
 
   # A `LIMIT`-less, `ORDER BY`/`DISTINCT`/window-free plain query with no
   # nested `SELECT` anywhere in `select` -- same eligibility `run_plain_
@@ -2443,6 +2708,17 @@ defmodule Scry.Core.Executor do
       nil -> get_path_in(row, path)
     end
   end
+
+  # `Scry.Core.Row` clauses first: only `Scry.Engine.Exqlite`'s new
+  # `fetch/4` opt-in path ever hands one of these to `Executor` (see
+  # `Row`'s own moduledoc for why `fetch!/2`'s raise-on-miss is
+  # deliberate, not a bug) -- peeling off the *first* path segment via
+  # `Row.fetch!/2` is enough, since whatever value comes back for a
+  # remaining multi-segment path is an ordinary Elixir term (a `Row`
+  # never nests -- SQL columns are always scalar), so the recursive
+  # tail falls straight through to the plain-map clauses below.
+  defp get_path_in(%Row{} = row, [key]), do: Row.fetch!(row, key)
+  defp get_path_in(%Row{} = row, [key | rest]), do: row |> Row.fetch!(key) |> get_path_in(rest)
 
   defp get_path_in(row, [key]), do: Map.get(row, key)
   defp get_path_in(row, [key | rest]), do: row |> Map.get(key, %{}) |> get_path_in(rest)

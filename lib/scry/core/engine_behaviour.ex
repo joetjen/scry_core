@@ -66,22 +66,44 @@ defmodule Scry.Core.EngineBehaviour do
   require `Executor` to trust an engine's own aggregation logic
   outright, breaking the invariant above -- a real, separate, harder
   problem, not attempted here. Predicates referencing `{:param, name}`
-  (a `$name`-bound value) also aren't pushed down -- `params` isn't
-  threaded into `fetch/3` in this version of the contract -- only
-  literal-vs-field comparisons are real candidates for translation.
-  Both are natural, non-breaking future extensions (a `fetch/4` adding
-  `params`; aggregation pushdown as a genuinely separate mechanism),
-  not gaps this contract silently papers over.
+  (a `$name`-bound value) also aren't pushed down through `fetch/3` --
+  only literal-vs-field comparisons are real candidates for
+  translation there. Aggregation pushdown remains a genuinely separate
+  mechanism, not attempted here.
+
+  **`fetch/4` (optional) -- `fetch/3` plus a hints map, for an engine
+  that wants to do more than translate `wheres`.** `Scry.Core.Executor`
+  prefers `fetch/4` over `fetch/3` over `fetch/2`, in that order, via
+  `function_exported?/3` -- every engine that doesn't implement it is
+  completely unaffected, same additive/opt-in posture as `fetch/3`
+  itself. `opts` is a plain, open map (not a fixed-arity parameter list)
+  specifically so it can grow new keys later without another signature
+  change -- this version populates exactly one: `opts.columns ::
+  {:ok, MapSet.t(String.t())} | :unknown`, the exact top-level columns
+  of `source` this query references anywhere (`wheres`/`havings`/
+  `group_bys`/`order_bys`/`select`), computed by `Executor` itself
+  (`Scry.Core.Executor.referenced_top_level_fields/2`) so the one
+  AST-analysis implementation can never drift out of sync with
+  `get_path/3`'s own qualifier-resolution semantics. `:unknown` means
+  exactly what it did before this callback existed: an engine that
+  sees it should fetch every column, unconditionally -- the same
+  "always correct, not necessarily efficient" posture `fetch/2` itself
+  has. A future increment may add `opts.params` for the `{:param,
+  name}`-pushdown extension point mentioned above; `opts` being an open
+  map is what keeps that non-breaking too.
   """
 
-  @typedoc "A single result row -- string keys, matching `Scry.Core.Query`'s own path segments."
-  @type row :: %{optional(String.t()) => term()}
+  @typedoc "A single result row -- either a plain string-keyed map, matching `Scry.Core.Query`'s own path segments, or a `Scry.Core.Row.t()` (only ever produced by an engine opting into `fetch/4`'s compact-row representation)."
+  @type row :: %{optional(String.t()) => term()} | Scry.Core.Row.t()
+
+  @typedoc "Optional per-fetch hints, computed by `Scry.Core.Executor` itself and passed to `fetch/4`. Open map, may grow new keys in a future, non-breaking increment."
+  @type fetch_opts :: %{optional(:columns) => {:ok, MapSet.t(String.t())} | :unknown}
 
   @doc "Fetches every row for `source` (a dotted path, e.g. `[\"orders\"]`) from `conn` -- any `Enumerable.t()` of `row()`, not necessarily a materialized list (`Scry.Core.Cursor`'s own moduledoc has the full reasoning)."
   @callback fetch(conn :: term(), source :: [String.t()]) ::
               {:ok, Enumerable.t()} | {:error, term()}
 
-  @optional_callbacks fetch: 3
+  @optional_callbacks fetch: 3, fetch: 4
 
   @doc """
   Like `fetch/2`, but also receives the whole query, so an adapter can
@@ -93,4 +115,16 @@ defmodule Scry.Core.EngineBehaviour do
   """
   @callback fetch(conn :: term(), source :: [String.t()], query :: Scry.Core.Query.t()) ::
               {:ok, Enumerable.t()} | {:error, term()}
+
+  @doc """
+  Like `fetch/3`, but also receives `opts` (this module's own moduledoc
+  has the full `fetch/4` reasoning). Optional -- an engine that doesn't
+  implement this falls back to `fetch/3`, then `fetch/2`, unchanged.
+  """
+  @callback fetch(
+              conn :: term(),
+              source :: [String.t()],
+              query :: Scry.Core.Query.t(),
+              opts :: fetch_opts()
+            ) :: {:ok, Enumerable.t()} | {:error, term()}
 end
