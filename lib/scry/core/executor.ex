@@ -43,6 +43,30 @@ defmodule Scry.Core.Executor do
   produced, correct by construction at every level without any
   rollup/cube-specific code of its own.
 
+  **Parallel streaming aggregation.** `sum`/`avg`/`count`/`min`/`max`
+  (`count(distinct ...)` included) as the entire value of a `select`/
+  `having` item, with `group_mode: :plain`, run through a genuinely
+  parallel path: the fetched source is split into fixed-size batches
+  (`parallel_chunk_size/0`, `config :scry_core, parallel_chunk_size:
+  n`) processed across a bounded pool of supervised worker tasks
+  (`Scry.Core.TaskSupervisor`, `parallel_max_concurrency/0`), merged
+  back together in strict fetch order so the result -- representative
+  row per group, first-appearance order, every running total -- is
+  byte-identical to what a single process working through the same
+  rows one at a time would produce (`run_grouped_streaming/7`'s own
+  comment has the complete mechanism and the correctness reasoning for
+  why this is safe). This trades the single-process streaming path's
+  `O(distinct groups)` memory bound for `O(distinct groups +
+  parallel_chunk_size * parallel_max_concurrency)` in exchange for
+  real wall-clock speedup on CPU-bound aggregation over large sources
+  -- it does not, and cannot, reduce the cost of the underlying
+  fetch itself (a single connection/cursor is an inherently serial
+  read), only the per-row processing on top of it. `percentile`/
+  `stddev*`/`var*`, `ROLLUP`/`CUBE`, and anything wider than a bare
+  aggregate call (nested inside arithmetic, a cast, a `WHEN`) fall back
+  to the older, fully eager, single-process `run_grouped/6` path,
+  unchanged.
+
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
   `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
   full standard-aggregate list, `count(distinct ...)` included) are
@@ -1046,22 +1070,52 @@ defmodule Scry.Core.Executor do
     if expr_has_aggregate_call?(expr), do: :not_streamable, else: {:ok, []}
   end
 
-  # Pulls one row at a time from the fetch `Cursor`, filtering
-  # (`matches_all?/4`, unchanged) and folding each surviving row into its
-  # own group's *accumulator* (`update_agg/5` below) -- never a kept list
-  # of member rows, so peak memory here is `O(distinct groups)`, not
-  # `O(matching rows)`, for every aggregate `streaming_aggregate_plan/1`
-  # accepted. `groups` is a plain map (`group_key => %{representative:
-  # row, aggs: %{{name, args} => acc}}`); `order` tracks first-appearance
-  # order the same way `group_rows/3`'s own manual reduce already does,
-  # for the same "well-defined even when not required" determinism this
-  # module's `sort_rows/3` comment already documents elsewhere. Exceptions
-  # (a `nil` operand hitting an aggregate, same hard-error every other
-  # aggregate path already has; a `WHERE`/group-key evaluation error) are
-  # caught locally, closing the *current* source cursor before re-raising
-  # -- unlike the plain path's own `Stream.resource/3`-based cleanup
-  # (automatic on any exception), this is a plain recursive pull loop, so
-  # cleanup has to be explicit here.
+  # Splits the fetch `Cursor` into fixed-size batches (`Cursor.take/2`,
+  # `parallel_chunk_size/0`) and folds each batch's own row processing
+  # (`matches_all?/4` + per-row aggregate updates, `update_agg/5` below
+  # -- identical logic to a single row at a time, just applied to a
+  # list) across a bounded pool of supervised worker tasks
+  # (`Scry.Core.TaskSupervisor`, `parallel_max_concurrency/0`), merging
+  # each batch's own partial `{groups, order}` state into the running
+  # combined result *in fetch order* (`merge_group_state/2`) -- so the
+  # final result (representative row per group, first-appearance order,
+  # every running total) is byte-identical to what processing every row
+  # one at a time, in a single process, would produce, regardless of
+  # how many workers actually ran or in what order they finished
+  # (`ordered: true` on the async stream is exactly what guarantees
+  # this: results are consumed in submission order, never completion
+  # order). `groups` is a plain map (`group_key => %{representative:
+  # row, aggs: %{{name, args} => acc}}`); `order` tracks first-
+  # appearance order the same way `group_rows/3`'s own manual reduce
+  # already does, for the same "well-defined even when not required"
+  # determinism this module's `sort_rows/3` comment already documents
+  # elsewhere. Peak memory is `O(distinct groups)` plus whatever's
+  # in flight across the worker pool (`O(parallel_chunk_size *
+  # parallel_max_concurrency)`), not `O(matching rows)` -- a real,
+  # deliberate widening from the single-process path's own `O(distinct
+  # groups)` alone, the cost of genuine parallelism.
+  #
+  # `Task.Supervisor.async_stream_nolink/4` (not plain `Task.async_
+  # stream/3`, and not a linked `Task.async/1`) is load-bearing, not a
+  # style choice -- verified directly (a real crashing task, not
+  # assumed): a *linked* task's own crash sends an uncatchable `EXIT`
+  # signal that kills the calling process outright, which would turn a
+  # query's own hard aggregate-nil error (`raise_aggregate_nil_error/1`,
+  # an ordinary, callers-can-rescue exception on the single-process
+  # path) into an unrescuable crash of whatever process called
+  # `Executor.run/4` -- a real behavior regression, not just an
+  # implementation detail. `_nolink`, dispatched through `Scry.Core.
+  # TaskSupervisor` (started by `Scry.Core.Application`), instead
+  # reports a failed batch as an ordinary `{:exit, reason}` tuple this
+  # module inspects and re-raises itself (`reduce_chunk_result/2`) --
+  # an ordinary, catchable exception in the calling process, exactly
+  # matching today's single-process behavior; confirmed directly (a
+  # real crashing batch, mid-stream, with more batches still queued)
+  # that the remaining, not-yet-started batches never run once that
+  # happens (`Enum.reduce_while/3`'s own `{:halt, ...}` propagates back
+  # through the async stream and stops it from submitting more work),
+  # and that the source `Cursor`'s own cleanup (`Stream.resource/3`'s
+  # `after_fun`, inside `chunk_stream/1` below) still runs either way.
   defp run_grouped_streaming(query, plan, scope, params, with_bindings, engine_module, conn) do
     with {:ok, rows} <-
            grouped_base_rows_streaming(
@@ -1089,7 +1143,7 @@ defmodule Scry.Core.Executor do
     with {:ok, source_cursor} <-
            fetch_rows(query, scope, params, with_bindings, engine_module, conn),
          {:ok, groups, order} <-
-           accumulate_groups(source_cursor, query, plan, scope, params, %{}, []) do
+           accumulate_groups_parallel(source_cursor, query, plan, scope, params) do
       rows =
         for key <- order,
             group_state = Map.fetch!(groups, key),
@@ -1101,16 +1155,61 @@ defmodule Scry.Core.Executor do
     end
   end
 
-  defp accumulate_groups(cursor, query, plan, scope, params, groups, order) do
-    case Cursor.next(cursor) do
-      :done ->
-        {groups2, order2} = ensure_flat_group(query.group_bys, plan, groups, order)
-        {:ok, groups2, Enum.reverse(order2)}
+  # Overridable via `config :scry_core, parallel_chunk_size: n` /
+  # `parallel_max_concurrency: n` -- exists so tests can force real
+  # multi-batch, multi-worker execution without needing millions of
+  # rows to exceed the real-world default, the same reasoning `scry_
+  # engine_exqlite`'s own configurable `chunk_size` already has.
+  @default_parallel_chunk_size 5_000
+  defp parallel_chunk_size,
+    do: Application.get_env(:scry_core, :parallel_chunk_size, @default_parallel_chunk_size)
 
-      {:ok, row, cursor2} ->
-        accumulate_row(row, cursor2, query, plan, scope, params, groups, order)
-    end
+  defp parallel_max_concurrency,
+    do: Application.get_env(:scry_core, :parallel_max_concurrency, System.schedulers_online())
+
+  defp accumulate_groups_parallel(cursor, query, plan, scope, params) do
+    {groups, order} =
+      Scry.Core.TaskSupervisor
+      |> Task.Supervisor.async_stream_nolink(
+        chunk_stream(cursor),
+        &accumulate_chunk(&1, query, plan, scope, params),
+        ordered: true,
+        max_concurrency: parallel_max_concurrency()
+      )
+      |> Enum.reduce_while({%{}, []}, &reduce_chunk_result/2)
+
+    {groups2, order2} = ensure_flat_group(query.group_bys, plan, groups, order)
+    {:ok, groups2, order2}
   end
+
+  # `Stream.resource/3`, not `Stream.unfold/2` -- its own `after_fun`
+  # (`Cursor.close/1`) is what guarantees the source cursor (and
+  # whatever real connection/statement it wraps) gets cleaned up
+  # correctly when the stream stops early, the exact same guarantee
+  # `Cursor` itself relies on and this module's own plain streaming
+  # path (`run_plain_streaming/7`) already uses -- verified directly
+  # this still holds through `Task.Supervisor.async_stream_nolink/4`
+  # too, not assumed just because it held for `Cursor` alone.
+  defp chunk_stream(cursor) do
+    Stream.resource(
+      fn -> cursor end,
+      fn cursor ->
+        case Cursor.take(cursor, parallel_chunk_size()) do
+          {[], cursor2} -> {:halt, cursor2}
+          {chunk, cursor2} -> {[chunk], cursor2}
+        end
+      end,
+      fn cursor -> Cursor.close(cursor) end
+    )
+  end
+
+  defp reduce_chunk_result({:ok, chunk_state}, acc),
+    do: {:cont, merge_group_state(acc, chunk_state)}
+
+  defp reduce_chunk_result({:exit, {exception, stacktrace}}, _acc) when is_exception(exception),
+    do: reraise(exception, stacktrace)
+
+  defp reduce_chunk_result({:exit, reason}, _acc), do: exit(reason)
 
   # `group_rows/3`'s own `group_rows(rows, [], _scope), do: [rows]` --
   # a *flat* aggregate (no explicit `GROUP BY` at all) always collapses
@@ -1119,7 +1218,7 @@ defmodule Scry.Core.Executor do
   # "well-defined output row" framing) -- a real `GROUP BY` with zero
   # matching rows correctly stays zero output rows instead (SQL
   # convention; only the flat-aggregate case gets this treatment).
-  # `accumulate_row/8` never creates a group for a source with zero
+  # `accumulate_chunk/5` never creates a group for a source with zero
   # surviving rows at all, so this seeds exactly one, in its own already-
   # empty initial accumulator state, if (and only if) `group_bys == []`
   # and nothing created one already.
@@ -1134,28 +1233,86 @@ defmodule Scry.Core.Executor do
 
   defp ensure_flat_group(_group_bys, _plan, groups, order), do: {groups, order}
 
-  defp accumulate_row(row, cursor2, query, plan, scope, params, groups, order) do
-    if matches_all?(row, query.wheres, scope, params) do
-      key = Enum.map(query.group_bys, &get_path(row, scope, &1))
+  # Pure -- no cursor, no shared state -- so many of these can run at
+  # once, one per worker task, with nothing to coordinate until their
+  # own results get merged back in `merge_group_state/2`. `order`
+  # comes back in this chunk's own first-appearance order (forward, not
+  # reversed) -- `merge_group_state/2` relies on that directly.
+  defp accumulate_chunk(rows, query, plan, scope, params) do
+    {groups, reversed_order} =
+      Enum.reduce(rows, {%{}, []}, fn row, {groups, order} ->
+        if matches_all?(row, query.wheres, scope, params) do
+          key = Enum.map(query.group_bys, &get_path(row, scope, &1))
 
-      {groups2, order2} =
+          case Map.fetch(groups, key) do
+            {:ok, state} ->
+              {Map.put(groups, key, update_group(state, plan, row, scope, params)), order}
+
+            :error ->
+              {Map.put(groups, key, new_group(row, plan, scope, params)), [key | order]}
+          end
+        else
+          {groups, order}
+        end
+      end)
+
+    {groups, Enum.reverse(reversed_order)}
+  end
+
+  # Folds one chunk's own `{groups, order}` into the combined result so
+  # far, preserving true first-appearance order across chunk boundaries
+  # (`order_acc` is already every earlier chunk's own keys, in order;
+  # any genuinely new key from this chunk is appended after it, in this
+  # chunk's own relative order) and "whichever chunk saw this group
+  # first keeps the representative row" (`merge_group/3` always keeps
+  # `acc`'s own representative over the new chunk's) -- both exactly
+  # matching what a single process working through the same rows, one
+  # at a time, in the same order, would have produced.
+  defp merge_group_state({groups_acc, order_acc}, {groups_new, order_new}) do
+    {merged_groups, reversed_new_keys} =
+      Enum.reduce(order_new, {groups_acc, []}, fn key, {groups, new_keys} ->
+        new_state = Map.fetch!(groups_new, key)
+
         case Map.fetch(groups, key) do
-          {:ok, state} ->
-            {Map.put(groups, key, update_group(state, plan, row, scope, params)), order}
+          {:ok, existing_state} ->
+            {Map.put(groups, key, merge_group(existing_state, new_state)), new_keys}
 
           :error ->
-            {Map.put(groups, key, new_group(row, plan, scope, params)), [key | order]}
+            {Map.put(groups, key, new_state), [key | new_keys]}
         end
+      end)
 
-      accumulate_groups(cursor2, query, plan, scope, params, groups2, order2)
-    else
-      accumulate_groups(cursor2, query, plan, scope, params, groups, order)
-    end
-  rescue
-    e ->
-      Cursor.close(cursor2)
-      reraise e, __STACKTRACE__
+    {merged_groups, order_acc ++ Enum.reverse(reversed_new_keys)}
   end
+
+  defp merge_group(%{representative: rep, aggs: aggs1}, %{aggs: aggs2}) do
+    merged_aggs =
+      Map.new(aggs1, fn {{name, _args} = key, acc1} ->
+        {key, merge_agg(acc1, Map.fetch!(aggs2, key), name)}
+      end)
+
+    %{representative: rep, aggs: merged_aggs}
+  end
+
+  defp merge_agg(count1, count2, "count") when is_integer(count1) and is_integer(count2),
+    do: count1 + count2
+
+  defp merge_agg(%MapSet{} = set1, %MapSet{} = set2, "count"), do: MapSet.union(set1, set2)
+
+  defp merge_agg({sum1, count1}, {sum2, count2}, "avg"),
+    do: {merge_sum(sum1, sum2), count1 + count2}
+
+  defp merge_agg(acc1, acc2, "sum"), do: merge_sum(acc1, acc2)
+  defp merge_agg(acc1, acc2, "min"), do: merge_extreme(acc1, acc2, &pick_min/2)
+  defp merge_agg(acc1, acc2, "max"), do: merge_extreme(acc1, acc2, &pick_max/2)
+
+  defp merge_sum(:empty, acc2), do: acc2
+  defp merge_sum(acc1, :empty), do: acc1
+  defp merge_sum(acc1, acc2), do: Rational.add(acc1, acc2)
+
+  defp merge_extreme(:empty, acc2, _picker), do: acc2
+  defp merge_extreme(acc1, :empty, _picker), do: acc1
+  defp merge_extreme(acc1, acc2, picker), do: picker.(acc1, acc2)
 
   defp new_group(row, plan, scope, params) do
     aggs =
