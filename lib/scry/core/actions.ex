@@ -446,15 +446,20 @@ defmodule Scry.Core.Actions do
          {:ok, result, ctx} <- select_cap.eval.(ctx) do
       case Scry.Core.FragmentResolver.resolve(result, fragments) do
         {:ok, %Query{} = resolved} ->
-          {:ok, %Query{resolved | with_bindings: with_bindings, type_decls: type_decls}, ctx}
+          finalize_document(
+            %Query{resolved | with_bindings: with_bindings, type_decls: type_decls},
+            ctx
+          )
 
         {:ok, %Scry.Core.CombinedQuery{} = resolved} ->
-          {:ok,
-           %Scry.Core.CombinedQuery{
-             resolved
-             | with_bindings: with_bindings,
-               type_decls: type_decls
-           }, ctx}
+          finalize_document(
+            %Scry.Core.CombinedQuery{
+              resolved
+              | with_bindings: with_bindings,
+                type_decls: type_decls
+            },
+            ctx
+          )
 
         {:error, _} = err ->
           err
@@ -884,6 +889,19 @@ defmodule Scry.Core.Actions do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),
          {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
       {:ok, [head | tail], ctx}
+    end
+  end
+
+  # `document`'s own handler's own final step -- `Scry.Core.TypeCheck.
+  # check/1` runs unconditionally, exactly like `WithCycleCheck`/
+  # `FragmentResolver` above it in `handle_rule(:document, ...)` -- reads
+  # `type_decls` straight off the struct just built, so no new parameter
+  # needs threading anywhere. A document with no `TYPE` declarations at
+  # all sees zero behavior change: every check inside `TypeCheck` is a
+  # no-op absent a matching declared field.
+  defp finalize_document(query_or_combined, ctx) do
+    with :ok <- Scry.Core.TypeCheck.check(query_or_combined) do
+      {:ok, query_or_combined, ctx}
     end
   end
 

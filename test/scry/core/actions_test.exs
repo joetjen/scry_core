@@ -1254,7 +1254,7 @@ line two""" { name }))
     end
   end
 
-  describe "TYPE declarations (lang_spec.md §7) -- parsed, not yet consumed" do
+  describe "TYPE declarations (lang_spec.md §7) -- parsed shape; consumption is Scry.Core.TypeCheck's own job" do
     test "a plain, non-nullable type", %{grammar: g} do
       assert {:ok, %Query{} = q} = run(g, ~s(TYPE Employee { id: Int } SELECT users { id }))
 
@@ -1305,11 +1305,11 @@ line two""" { name }))
              ]
     end
 
-    test "Json<{...}>, the lang_spec.md §7 worked example for an inline shape", %{grammar: g} do
+    test "JSON<{...}>, the lang_spec.md §7 worked example for an inline shape", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(
                  g,
-                 ~s(TYPE Purchase: relational { metadata: Json<{ color: String, size: ?Int }> } SELECT users { id })
+                 ~s(TYPE Purchase: relational { metadata: JSON<{ color: String, size: ?Int }> } SELECT users { id })
                )
 
       assert q.type_decls["Purchase"] == %{
@@ -1317,7 +1317,7 @@ line two""" { name }))
                kind: "relational",
                fields: [
                  {"metadata",
-                  {:named, "Json",
+                  {:named, "JSON",
                    {:shape,
                     [
                       {"color", {:named, "String", nil}},
@@ -1327,23 +1327,23 @@ line two""" { name }))
              }
     end
 
-    test "Json<[Type]>, a list-parameterized generic", %{grammar: g} do
+    test "JSON<[Type]>, a list-parameterized generic", %{grammar: g} do
       assert {:ok, %Query{} = q} =
-               run(g, ~s|TYPE Purchase { tags: Json<[String]> } SELECT users { id }|)
+               run(g, ~s|TYPE Purchase { tags: JSON<[String]> } SELECT users { id }|)
 
       assert q.type_decls["Purchase"].fields == [
-               {"tags", {:named, "Json", {:list, {:named, "String", nil}}}}
+               {"tags", {:named, "JSON", {:list, {:named, "String", nil}}}}
              ]
     end
 
-    test "Json used bare, with no parameter at all", %{grammar: g} do
+    test "JSON used bare, with no parameter at all", %{grammar: g} do
       assert {:ok, %Query{} = q} =
-               run(g, ~s(TYPE Purchase { metadata: Json } SELECT users { id }))
+               run(g, ~s(TYPE Purchase { metadata: JSON } SELECT users { id }))
 
-      assert q.type_decls["Purchase"].fields == [{"metadata", {:named, "Json", nil}}]
+      assert q.type_decls["Purchase"].fields == [{"metadata", {:named, "JSON", nil}}]
     end
 
-    test "a generic parameter is syntactically permitted on any name, not gated to \"Json\"",
+    test "a generic parameter is syntactically permitted on any name, not gated to \"JSON\"",
          %{grammar: g} do
       # Grammar stays permissive (execution/type-checking, not yet
       # implemented, would reject misuse) -- matches priv/grammar.aether's

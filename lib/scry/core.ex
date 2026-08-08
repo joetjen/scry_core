@@ -53,4 +53,28 @@ defmodule Scry.Core do
   def parse(source) when is_binary(source) do
     Scry.Core.Grammar.Compiled.run(source, nil)
   end
+
+  @doc """
+  Runs the introspection-assisted half of the compile-time type system
+  (`Scry.Core.TypeCheck.Introspection`) against `query_or_combined` --
+  an application calls this explicitly between `parse/1` and
+  `Scry.Core.Executor.run/3,4`, whenever it wants a real, already-
+  existing schema (via `engine_module`'s own optional `describe_source/2`
+  callback) to stand in for any source `parse/1`'s own inline `TYPE`
+  declarations left completely undeclared. Never called automatically:
+  unlike the purely structural checks `parse/1` already runs
+  unconditionally (`Scry.Core.TypeCheck.check/1` included), this one
+  needs a live `conn`, and `parse/1` stays a pure string-in/struct-out
+  function on purpose. `Scry.Core.Executor.run/3,4` itself is untouched
+  either way -- it stays the pure pass-through it already documents
+  itself as, whether or not a caller ever calls this function.
+  """
+  @spec check_types(Query.t() | CombinedQuery.t(), module(), term()) :: :ok | {:error, term()}
+  def check_types(query_or_combined, engine_module, conn) do
+    Scry.Core.TypeCheck.Introspection.check_with_introspection(
+      query_or_combined,
+      engine_module,
+      conn
+    )
+  end
 end

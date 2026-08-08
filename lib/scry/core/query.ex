@@ -149,15 +149,21 @@ defmodule Scry.Core.Query do
   query") mirrors `with_bindings`' own shape and top-level-only scope --
   a `name => type_decl()` map, populated once by `document`'s own
   handler, meaningful only on the query/combined-query `Scry.Core.parse/1`
-  hands back. **Still nothing in this codebase reads it** -- lang_spec
-  §7's full *compile-time* type system (union-type comparison checking
-  against a declared field's own type, a schema-registry hook, `Json
-  <Type>` field-access validation, and compile-time flow-sensitive
-  narrowing specifically) is a real, separate, much larger undertaking
-  than parsing the declaration shape; this is the same "grammar accepts
-  it, nothing consumes it yet" posture `body_item_ep1 := NEVER`/
-  `:variant` already have for an EP1(b)/(c)/(d) construct with no real
-  kind contributing one.
+  hands back. `Scry.Core.TypeCheck.check/1` now reads it -- run
+  unconditionally, right after `type_decls` itself is attached, inside
+  the same `handle_rule(:document, ...)` that builds it
+  (`Scry.Core.Actions`) -- for lang_spec §7's compile-time category
+  check, declared-field-type/union comparison check, `JSON`/`DXN`/
+  `DXNB<Type>` field-access validation, and flow-sensitive null-safety
+  narrowing, matched against whichever query node's own single-segment
+  `source` is byte-for-byte identical to a declared `TYPE`'s own name
+  (see that module's own moduledoc for the full matching rule and each
+  check's exact scope). `Scry.Core.TypeCheck.Introspection` layers an
+  optional, explicitly opt-in second pass on top -- a real adapter's own
+  `describe_source/2` (`Scry.Core.EngineBehaviour`) filling in a source
+  no inline `TYPE` declares at all -- invoked via `Scry.Core.
+  check_types/3`, never automatically, since it needs a live connection
+  and `Scry.Core.parse/1` stays a pure string-in/struct-out function.
 
   §7's *runtime* null-safety rule ("comparing a nullable field directly
   against a typed value is a hard error — always at runtime") **has**

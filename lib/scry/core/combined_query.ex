@@ -20,8 +20,10 @@ defmodule Scry.Core.CombinedQuery do
   whichever struct `document`'s own top-level result turns out to be
   (`Scry.Core.Actions`' own `handle_rule(:document, ...)`); `with_bindings`
   is read from there by `Scry.Core.Executor.run/4`'s public entry point,
-  `type_decls` by nothing yet (`Query.t()`'s own moduledoc has the full
-  "parsed, not yet consumed" scope reasoning).
+  `type_decls` by `Scry.Core.TypeCheck.check/1` (`Query.t()`'s own
+  moduledoc has the full compile-time type-checking scope reasoning --
+  applies identically here, since `Scry.Core.TypeCheck.Nodes` walks both
+  sides of `t()` the same way it walks a nested `Query.t()`).
 
   Deliberately scoped narrower than lang_spec's own grammar might allow
   in principle: a combinator only ever appears at the very top of a

@@ -33,7 +33,7 @@ defmodule Scry.Core.MixProject do
       # though it's still genuinely present and compiled in this
       # (`:test`) env, and `Scry.Core.Grammar`/`Scry.Core.GrammarCompose`
       # still reference its types (`Aether.Grammar.t/0`, ...) directly.
-      dialyzer: [plt_add_apps: [:mix, :ichor]]
+      dialyzer: [plt_add_apps: [:mix, :ichor], ignore_warnings: ".dialyzer_ignore.exs"]
     ]
   end
 

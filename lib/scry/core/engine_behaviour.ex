@@ -156,5 +156,46 @@ defmodule Scry.Core.EngineBehaviour do
   """
   @callback capabilities(conn :: term()) :: capabilities()
 
-  @optional_callbacks capabilities: 1
+  @typedoc """
+  One column/field an engine's own schema already knows about, as
+  reported by `describe_source/2` -- deliberately a narrower, purpose-
+  built shape, not `Scry.Core.Query.type_decl/0` reused verbatim.
+  Introspection can never honestly produce a `kind` tag or a nested
+  `JSON`/`DXN`/`DXNB` shape (an engine's own schema has no notion of
+  either), so this type doesn't offer a place to put one -- a caller
+  wanting those still writes an inline `TYPE` declaration by hand.
+  `scalar: :unknown` is a real, honest answer, not a placeholder: some
+  backends' own type systems (SQLite's type affinity, notably) can't
+  always distinguish `:integer` from `:float` for a given column.
+  """
+  @type introspected_field :: %{
+          name: String.t(),
+          nullable: boolean(),
+          scalar: :integer | :float | :string | :boolean | :json | :unknown
+        }
+
+  @doc """
+  **Optional.** Describes `source`'s own real, already-existing schema
+  against `conn`, for `Scry.Core.TypeCheck.Introspection` to fill in a
+  `type_decls` entry no hand-written `TYPE` declaration already covers
+  -- see that module's own moduledoc for the full inline-wins-entirely
+  precedence rule. Never consulted by `execute/3`'s own contract, and
+  never called for a source that already has an inline `TYPE`
+  declaration, even a partial one.
+
+  Returns `{:error, :not_found}` when `source` doesn't exist in the
+  underlying schema at all -- absorbed silently by `Introspection`, not
+  a compile error, mirroring this codebase's existing "absence isn't a
+  contradiction" posture elsewhere (an unmatched fragment/`TYPE` name).
+  Returns `{:error, {:introspection_error, detail}}` for a genuine
+  backend-level failure (a dropped connection, a permissions error) --
+  `Introspection` aborts on this one, since it means the answer is
+  simply unknown, not "no declared type".
+  """
+  @callback describe_source(conn :: term(), source :: String.t()) ::
+              {:ok, [introspected_field()]}
+              | {:error, :not_found}
+              | {:error, {:introspection_error, term()}}
+
+  @optional_callbacks capabilities: 1, describe_source: 2
 end
