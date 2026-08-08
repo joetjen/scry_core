@@ -255,6 +255,60 @@ defmodule Scry.Core.Executor.ParallelAggregationTest do
       end)
     end
 
+    test "a HAVING aggregate absent from select is still tracked at its own plan position" do
+      with_chunk_size(3, fn ->
+        # `count(v)` never appears in `select` -- it's only reachable
+        # through `having_calls`, exercising a plan slot the build side
+        # (`new_group`/`update_group`) and the `select`-driven read side
+        # (`finalize_body_item`) never share, so a position mix-up
+        # between them (e.g. `sum(v)`'s slot vs `count(v)`'s slot) can't
+        # be masked by both reading the same index by accident.
+        # Deliberately uneven group sizes ("a": 2, "b": 5, "c": 4, "d": 1)
+        # so the `count(v) > 3` filter actually excludes some groups
+        # rather than passing everything through unconditionally.
+        rows =
+          for {group, v} <- [
+                {"a", 1},
+                {"b", 2},
+                {"a", 3},
+                {"c", 4},
+                {"b", 5},
+                {"d", 6},
+                {"c", 7},
+                {"b", 8},
+                {"c", 9},
+                {"b", 10},
+                {"c", 11},
+                {"b", 12}
+              ],
+              do: %{"group" => group, "v" => v}
+
+        query = %Query{
+          source: ["items"],
+          group_bys: [["group"]],
+          havings: [{:cmp, :gt, {:call, "count", [{:field, ["v"]}]}, 3}],
+          order_bys: [{["group"], :asc}],
+          select: [
+            {:field, ["group"]},
+            {:computed, "total", {:call, "sum", [{:field, ["v"]}]}}
+          ]
+        }
+
+        assert {:ok, rows_out} = run(query, %{["items"] => rows})
+
+        expected =
+          rows
+          |> Enum.group_by(& &1["group"])
+          |> Enum.filter(fn {_group, members} -> length(members) > 3 end)
+          |> Enum.map(fn {group, members} ->
+            %{"group" => group, "total" => Enum.sum(Enum.map(members, & &1["v"]))}
+          end)
+          |> Enum.sort_by(& &1["group"])
+
+        assert rows_out == expected
+      end)
+    end
+
     test "a WHERE clause filters correctly before grouping, across chunk boundaries" do
       with_chunk_size(3, fn ->
         rows = for i <- 1..40, do: %{"v" => i}

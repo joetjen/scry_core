@@ -60,7 +60,7 @@ defmodule Scry.Core.Executor do
     `avg`/`count`/`min`/`max` (`count(distinct ...)` included) as the
     entire value of a `select`/`having` item, with `group_mode: :plain`.
     `chunk_fun` = `accumulate_chunk/5` (per-chunk group accumulators),
-    `merge_fun` = `merge_group_state/2` (representative row per group,
+    `merge_fun` = `merge_group_state/3` (representative row per group,
     first-appearance order, every running total, all merged correctly
     across chunk boundaries -- that function's own comment has the
     complete reasoning). `percentile`/`stddev*`/`var*`, `ROLLUP`/`CUBE`,
@@ -226,7 +226,7 @@ defmodule Scry.Core.Executor do
   `count(distinct)`'s plain-integer result needing no `MapSet` at all
   since pushdown never merges across chunks) is enforced in exactly one
   place regardless of which path computed the raw pieces
-  (`finalize_groups/5`, factored out of `grouped_base_rows_streaming/7`
+  (`finalize_groups/6`, factored out of `grouped_base_rows_streaming/7`
   for exactly this reuse).
 
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
@@ -1633,15 +1633,27 @@ defmodule Scry.Core.Executor do
   # list) across a bounded pool of supervised worker tasks
   # (`Scry.Core.TaskSupervisor`, `parallel_max_concurrency/0`), merging
   # each batch's own partial `{groups, order}` state into the running
-  # combined result *in fetch order* (`merge_group_state/2`) -- so the
+  # combined result *in fetch order* (`merge_group_state/3`) -- so the
   # final result (representative row per group, first-appearance order,
   # every running total) is byte-identical to what processing every row
   # one at a time, in a single process, would produce, regardless of
   # how many workers actually ran or in what order they finished
   # (`ordered: true` on the async stream is exactly what guarantees
   # this: results are consumed in submission order, never completion
-  # order). `groups` is a plain map (`group_key => %{representative:
-  # row, aggs: %{{name, args} => acc}}`); `order` tracks first-
+  # order). `groups` is a plain map (`group_key => {representative_row,
+  # aggs_tuple}`) -- `aggs_tuple` is a plain tuple with one element per
+  # `plan` entry, in `plan`'s own list order, not a map keyed by
+  # `{name, args}`: measured directly to cost ~1.8-2x less to build/
+  # copy across the worker `Task` boundary than the equivalent nested-
+  # map shape, at the scale a real `GROUP BY` over hundreds of
+  # thousands of groups actually runs at. `plan` itself (already
+  # deduplicated by both `streaming_aggregate_plan/1` and `aggregate_
+  # pushdown_plan/3`) is threaded alongside `groups`/`order` everywhere
+  # a group's aggregate slot needs to be built, updated, merged, or
+  # read back by `{name, args}` (`agg_position/2` below does the
+  # position lookup at read time -- `plan` is always tiny, 1-5 entries
+  # in practice, so this is simpler and just as fast as maintaining a
+  # second precomputed index map). `order` tracks first-
   # appearance order the same way `group_rows/3`'s own manual reduce
   # already does, for the same "well-defined even when not required"
   # determinism this module's `sort_rows/3` comment already documents
@@ -1700,7 +1712,7 @@ defmodule Scry.Core.Executor do
            fetch_rows(query, scope, params, with_bindings, engine_module, conn),
          {:ok, groups, order} <-
            accumulate_groups_parallel(source_cursor, query, plan, scope, params) do
-      {:ok, finalize_groups(query, groups, order, scope, params)}
+      {:ok, finalize_groups(query, groups, order, scope, params, plan)}
     end
   end
 
@@ -1709,11 +1721,11 @@ defmodule Scry.Core.Executor do
   # `try_aggregate_pushdown/6` (below) -- so `HAVING` filtering and
   # final projection behave identically regardless of which one
   # actually computed the raw aggregate state.
-  defp finalize_groups(query, groups, order, scope, params) do
+  defp finalize_groups(query, groups, order, scope, params, plan) do
     for key <- order,
         group_state = Map.fetch!(groups, key),
-        having_matches_streaming?(query.havings, group_state, scope, params) do
-      finalize_grouped_row(query, group_state, scope, params)
+        having_matches_streaming?(query.havings, group_state, scope, params, plan) do
+      finalize_grouped_row(query, group_state, scope, params, plan)
     end
   end
 
@@ -1737,9 +1749,9 @@ defmodule Scry.Core.Executor do
          true <- function_exported?(engine_module, :aggregate, 5) do
       case engine_module.aggregate(conn, query.source, query, plan, params) do
         {:ok, pushdown_rows} ->
-          {groups, order} = groups_from_pushdown(pushdown_rows, query.group_bys)
+          {groups, order} = groups_from_pushdown(pushdown_rows, query.group_bys, plan)
           {groups2, order2} = ensure_flat_group(query.group_bys, plan, groups, order)
-          rows = finalize_groups(query, groups2, order2, scope, params)
+          rows = finalize_groups(query, groups2, order2, scope, params, plan)
 
           {:ok,
            rows
@@ -1835,7 +1847,7 @@ defmodule Scry.Core.Executor do
   # synthesized directly from those same values since pushdown
   # eligibility already guarantees no `select` item needs anything else
   # from a real row.
-  defp groups_from_pushdown(pushdown_rows, group_bys) do
+  defp groups_from_pushdown(pushdown_rows, group_bys, plan) do
     {groups, reversed_order} =
       Enum.reduce(pushdown_rows, {%{}, []}, fn {group_by_values, agg_values}, {groups, order} ->
         representative =
@@ -1843,7 +1855,8 @@ defmodule Scry.Core.Executor do
           |> Enum.zip(group_by_values)
           |> Map.new(fn {path, value} -> {List.last(path), value} end)
 
-        state = %{representative: representative, aggs: agg_values}
+        aggs_tuple = plan |> Enum.map(&Map.fetch!(agg_values, &1)) |> List.to_tuple()
+        state = {representative, aggs_tuple}
         {Map.put(groups, group_by_values, state), [group_by_values | order]}
       end)
 
@@ -1867,7 +1880,7 @@ defmodule Scry.Core.Executor do
       process_chunks_parallel(
         cursor,
         &accumulate_chunk(&1, query, plan, scope, params),
-        &merge_group_state/2,
+        &merge_group_state(&1, &2, plan),
         {%{}, []}
       )
 
@@ -1998,10 +2011,8 @@ defmodule Scry.Core.Executor do
   # empty initial accumulator state, if (and only if) `group_bys == []`
   # and nothing created one already.
   defp ensure_flat_group([], plan, groups, _order) when map_size(groups) == 0 do
-    empty_state = %{
-      representative: %{},
-      aggs: Map.new(plan, fn {name, args} -> {{name, args}, init_agg(name, args)} end)
-    }
+    aggs_tuple = plan |> Enum.map(fn {name, args} -> init_agg(name, args) end) |> List.to_tuple()
+    empty_state = {%{}, aggs_tuple}
 
     {%{[] => empty_state}, [[]]}
   end
@@ -2010,9 +2021,9 @@ defmodule Scry.Core.Executor do
 
   # Pure -- no cursor, no shared state -- so many of these can run at
   # once, one per worker task, with nothing to coordinate until their
-  # own results get merged back in `merge_group_state/2`. `order`
+  # own results get merged back in `merge_group_state/3`. `order`
   # comes back in this chunk's own first-appearance order (forward, not
-  # reversed) -- `merge_group_state/2` relies on that directly.
+  # reversed) -- `merge_group_state/3` relies on that directly.
   defp accumulate_chunk(rows, query, plan, scope, params) do
     {groups, reversed_order} =
       Enum.reduce(rows, {%{}, []}, fn row, {groups, order} ->
@@ -2043,14 +2054,14 @@ defmodule Scry.Core.Executor do
   # `acc`'s own representative over the new chunk's) -- both exactly
   # matching what a single process working through the same rows, one
   # at a time, in the same order, would have produced.
-  defp merge_group_state({groups_acc, order_acc}, {groups_new, order_new}) do
+  defp merge_group_state({groups_acc, order_acc}, {groups_new, order_new}, plan) do
     {merged_groups, reversed_new_keys} =
       Enum.reduce(order_new, {groups_acc, []}, fn key, {groups, new_keys} ->
         new_state = Map.fetch!(groups_new, key)
 
         case Map.fetch(groups, key) do
           {:ok, existing_state} ->
-            {Map.put(groups, key, merge_group(existing_state, new_state)), new_keys}
+            {Map.put(groups, key, merge_group(existing_state, new_state, plan)), new_keys}
 
           :error ->
             {Map.put(groups, key, new_state), [key | new_keys]}
@@ -2060,13 +2071,16 @@ defmodule Scry.Core.Executor do
     {merged_groups, order_acc ++ Enum.reverse(reversed_new_keys)}
   end
 
-  defp merge_group(%{representative: rep, aggs: aggs1}, %{aggs: aggs2}) do
+  defp merge_group({rep, aggs1}, {_rep2, aggs2}, plan) do
     merged_aggs =
-      Map.new(aggs1, fn {{name, _args} = key, acc1} ->
-        {key, merge_agg(acc1, Map.fetch!(aggs2, key), name)}
+      plan
+      |> Enum.with_index()
+      |> Enum.map(fn {{name, _args}, index} ->
+        merge_agg(elem(aggs1, index), elem(aggs2, index), name)
       end)
+      |> List.to_tuple()
 
-    %{representative: rep, aggs: merged_aggs}
+    {rep, merged_aggs}
   end
 
   defp merge_agg(count1, count2, "count") when is_integer(count1) and is_integer(count2),
@@ -2091,20 +2105,25 @@ defmodule Scry.Core.Executor do
 
   defp new_group(row, plan, scope, params) do
     aggs =
-      Map.new(plan, fn {name, args} ->
-        {{name, args}, update_agg(init_agg(name, args), name, args, row, scope, params)}
+      plan
+      |> Enum.map(fn {name, args} ->
+        update_agg(init_agg(name, args), name, args, row, scope, params)
       end)
+      |> List.to_tuple()
 
-    %{representative: row, aggs: aggs}
+    {row, aggs}
   end
 
-  defp update_group(%{representative: rep, aggs: aggs}, plan, row, scope, params) do
+  defp update_group({rep, aggs}, plan, row, scope, params) do
     aggs2 =
-      Map.new(plan, fn {name, args} ->
-        {{name, args}, update_agg(Map.fetch!(aggs, {name, args}), name, args, row, scope, params)}
+      plan
+      |> Enum.with_index()
+      |> Enum.map(fn {{name, args}, index} ->
+        update_agg(elem(aggs, index), name, args, row, scope, params)
       end)
+      |> List.to_tuple()
 
-    %{representative: rep, aggs: aggs2}
+    {rep, aggs2}
   end
 
   defp init_agg("avg", _args), do: {:empty, 0}
@@ -2175,19 +2194,19 @@ defmodule Scry.Core.Executor do
             "nil-skipping); filter it out explicitly first"
   end
 
-  defp having_matches_streaming?(havings, group_state, scope, params),
-    do: Enum.all?(havings, &eval_having_streaming?(&1, group_state, scope, params))
+  defp having_matches_streaming?(havings, group_state, scope, params, plan),
+    do: Enum.all?(havings, &eval_having_streaming?(&1, group_state, scope, params, plan))
 
   # Mirrors `eval_predicate/4`'s own literal-`nil`-rhs exemption --
   # kept in parity with `eval_group_predicate/4`'s own identical clause,
   # the eager `HAVING` path's counterpart to this streaming one.
-  defp eval_having_streaming?({:cmp, op, lhs, nil}, group_state, scope, params),
-    do: compare(op, finalize_side(lhs, group_state, scope, params), nil)
+  defp eval_having_streaming?({:cmp, op, lhs, nil}, group_state, scope, params, plan),
+    do: compare(op, finalize_side(lhs, group_state, scope, params, plan), nil)
 
-  defp eval_having_streaming?({:cmp, op, lhs, rhs}, group_state, scope, params) do
-    left = finalize_side(lhs, group_state, scope, params)
+  defp eval_having_streaming?({:cmp, op, lhs, rhs}, group_state, scope, params, plan) do
+    left = finalize_side(lhs, group_state, scope, params, plan)
 
-    case finalize_side(rhs, group_state, scope, params) do
+    case finalize_side(rhs, group_state, scope, params, plan) do
       _ when is_nil(left) -> raise_null_safety_error()
       nil -> raise_null_safety_error()
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
@@ -2195,65 +2214,70 @@ defmodule Scry.Core.Executor do
     end
   end
 
-  defp eval_having_streaming?({:in, lhs, values}, group_state, scope, params)
+  defp eval_having_streaming?({:in, lhs, values}, group_state, scope, params, plan)
        when is_list(values) do
-    left = finalize_side(lhs, group_state, scope, params)
-    left in Enum.map(values, &finalize_side(&1, group_state, scope, params))
+    left = finalize_side(lhs, group_state, scope, params, plan)
+    left in Enum.map(values, &finalize_side(&1, group_state, scope, params, plan))
   end
 
-  defp eval_having_streaming?({:in, lhs, list_expr}, group_state, scope, params) do
-    left = finalize_side(lhs, group_state, scope, params)
+  defp eval_having_streaming?({:in, lhs, list_expr}, group_state, scope, params, plan) do
+    left = finalize_side(lhs, group_state, scope, params, plan)
 
-    case finalize_side(list_expr, group_state, scope, params) do
+    case finalize_side(list_expr, group_state, scope, params, plan) do
       list when is_list(list) -> left in list
       other -> raise ArgumentError, "in ... expects a list value, got: #{inspect(other)}"
     end
   end
 
-  defp eval_having_streaming?({:and, l, r}, group_state, scope, params),
+  defp eval_having_streaming?({:and, l, r}, group_state, scope, params, plan),
     do:
-      eval_having_streaming?(l, group_state, scope, params) and
-        eval_having_streaming?(r, group_state, scope, params)
+      eval_having_streaming?(l, group_state, scope, params, plan) and
+        eval_having_streaming?(r, group_state, scope, params, plan)
 
-  defp eval_having_streaming?({:or, l, r}, group_state, scope, params),
+  defp eval_having_streaming?({:or, l, r}, group_state, scope, params, plan),
     do:
-      eval_having_streaming?(l, group_state, scope, params) or
-        eval_having_streaming?(r, group_state, scope, params)
+      eval_having_streaming?(l, group_state, scope, params, plan) or
+        eval_having_streaming?(r, group_state, scope, params, plan)
 
-  defp eval_having_streaming?({:not, p}, group_state, scope, params),
-    do: not eval_having_streaming?(p, group_state, scope, params)
+  defp eval_having_streaming?({:not, p}, group_state, scope, params, plan),
+    do: not eval_having_streaming?(p, group_state, scope, params, plan)
 
-  defp finalize_side(path, %{representative: rep}, scope, _params) when is_list(path),
+  defp finalize_side(path, {rep, _aggs}, scope, _params, _plan) when is_list(path),
     do: get_path(rep, scope, path)
 
-  defp finalize_side({:literal, value}, _group_state, _scope, _params), do: value
+  defp finalize_side({:literal, value}, _group_state, _scope, _params, _plan), do: value
 
-  defp finalize_side({:call, name, args}, group_state, _scope, _params)
+  defp finalize_side({:call, name, args}, {_rep, aggs}, _scope, _params, plan)
        when name in @streaming_capable_aggregate_names,
-       do: finalize_agg(Map.fetch!(group_state.aggs, {name, args}), name)
+       do: finalize_agg(elem(aggs, agg_position(plan, name, args)), name)
 
-  defp finalize_side(expr, %{representative: rep}, scope, params),
+  defp finalize_side(expr, {rep, _aggs}, scope, params, _plan),
     do: resolve_rhs(expr, rep, scope, params)
 
-  defp finalize_grouped_row(query, group_state, scope, params),
-    do: Map.new(query.select, &finalize_body_item(&1, group_state, scope, params))
+  defp finalize_grouped_row(query, group_state, scope, params, plan),
+    do: Map.new(query.select, &finalize_body_item(&1, group_state, scope, params, plan))
 
-  defp finalize_body_item({:field, path}, %{representative: rep}, scope, _params),
+  defp finalize_body_item({:field, path}, {rep, _aggs}, scope, _params, _plan),
     do: {List.last(path), get_path(rep, scope, path)}
 
-  defp finalize_body_item({:computed, alias_name, expr}, group_state, scope, params),
-    do: {alias_name, finalize_expr(expr, group_state, scope, params)}
+  defp finalize_body_item({:computed, alias_name, expr}, group_state, scope, params, plan),
+    do: {alias_name, finalize_expr(expr, group_state, scope, params, plan)}
 
-  defp finalize_expr({:call, name, args}, group_state, _scope, _params)
+  defp finalize_expr({:call, name, args}, {_rep, aggs}, _scope, _params, plan)
        when name in @streaming_capable_aggregate_names,
-       do: finalize_agg(Map.fetch!(group_state.aggs, {name, args}), name)
+       do: finalize_agg(elem(aggs, agg_position(plan, name, args)), name)
 
-  defp finalize_expr(expr, %{representative: rep}, scope, params),
+  defp finalize_expr(expr, {rep, _aggs}, scope, params, _plan),
     do: resolve_rhs(expr, rep, scope, params)
+
+  # `plan` is always tiny (1-5 entries in practice), so a direct scan
+  # at the point of use is simpler than maintaining a second
+  # precomputed `{name, args} => index` map alongside it.
+  defp agg_position(plan, name, args), do: Enum.find_index(plan, &(&1 == {name, args}))
 
   # `:empty` (a group with zero contributing rows) can't actually occur
   # -- a group only ever exists because at least one row created it
-  # (`new_group/3`) -- but matches `apply_aggregate/2`'s own defined
+  # (`new_group/4`) -- but matches `apply_aggregate/2`'s own defined
   # "empty" answer defensively rather than leaving it a `FunctionClause
   # Error` waiting to happen if that invariant is ever weakened later.
   defp finalize_agg(:empty, _name), do: nil
@@ -2820,7 +2844,7 @@ defmodule Scry.Core.Executor do
   # counterpart of §5.8's aggregate one ("no silent nil-skipping" for
   # either), and shared verbatim by all three `{:cmp, ...}` evaluators
   # this file has (`eval_predicate/4`, `eval_group_predicate/4`,
-  # `eval_having_streaming?/4`) so the message -- and the rule itself --
+  # `eval_having_streaming?/5`) so the message -- and the rule itself --
   # stays in parity across all three, not just worded similarly by
   # convention.
   defp raise_null_safety_error do
