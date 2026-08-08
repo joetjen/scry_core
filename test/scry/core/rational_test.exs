@@ -92,6 +92,14 @@ defmodule Scry.Core.RationalTest do
       assert_raise ArithmeticError, fn -> Rational.div(1, Rational.new(0, 5)) end
     end
 
+    property "add/sub/mul's own integer+integer fast path matches the general new/2-based reduction path" do
+      check all(a <- integer(), b <- integer()) do
+        assert Rational.add(a, b) == Rational.new(a * 1 + b * 1, 1 * 1)
+        assert Rational.sub(a, b) == Rational.new(a * 1 - b * 1, 1 * 1)
+        assert Rational.mul(a, b) == Rational.new(a * b, 1 * 1)
+      end
+    end
+
     property "a + b - b == a (subtraction exactly undoes addition)" do
       check all(
               n1 <- integer(),
