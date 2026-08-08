@@ -43,29 +43,62 @@ defmodule Scry.Core.Executor do
   produced, correct by construction at every level without any
   rollup/cube-specific code of its own.
 
-  **Parallel streaming aggregation.** `sum`/`avg`/`count`/`min`/`max`
-  (`count(distinct ...)` included) as the entire value of a `select`/
-  `having` item, with `group_mode: :plain`, run through a genuinely
-  parallel path: the fetched source is split into fixed-size batches
-  (`parallel_chunk_size/0`, `config :scry_core, parallel_chunk_size:
-  n`) processed across a bounded pool of supervised worker tasks
-  (`Scry.Core.TaskSupervisor`, `parallel_max_concurrency/0`), merged
-  back together in strict fetch order so the result -- representative
-  row per group, first-appearance order, every running total -- is
-  byte-identical to what a single process working through the same
-  rows one at a time would produce (`run_grouped_streaming/7`'s own
-  comment has the complete mechanism and the correctness reasoning for
-  why this is safe). This trades the single-process streaming path's
-  `O(distinct groups)` memory bound for `O(distinct groups +
-  parallel_chunk_size * parallel_max_concurrency)` in exchange for
-  real wall-clock speedup on CPU-bound aggregation over large sources
-  -- it does not, and cannot, reduce the cost of the underlying
-  fetch itself (a single connection/cursor is an inherently serial
-  read), only the per-row processing on top of it. `percentile`/
-  `stddev*`/`var*`, `ROLLUP`/`CUBE`, and anything wider than a bare
-  aggregate call (nested inside arithmetic, a cast, a `WHEN`) fall back
-  to the older, fully eager, single-process `run_grouped/6` path,
-  unchanged.
+  **Parallel chunked processing (`process_chunks_parallel/4`).** Two
+  paths share one runner: the fetched source is split into fixed-size
+  batches (`parallel_chunk_size/0`, `config :scry_core,
+  parallel_chunk_size: n`) processed independently across a bounded
+  pool of supervised worker tasks (`Scry.Core.TaskSupervisor`,
+  `parallel_max_concurrency/0`), merged back together *in fetch order*
+  -- byte-identical to what a single process working through the same
+  rows one at a time would produce, regardless of how many workers ran
+  or in what order they finished. `process_chunks_parallel/4` itself
+  knows nothing about aggregation or projection; it only batches,
+  supervises, orders, and folds results via whichever `chunk_fun`/
+  `merge_fun` its caller supplies:
+
+  - **Streaming aggregation** (`run_grouped_streaming/7`) -- `sum`/
+    `avg`/`count`/`min`/`max` (`count(distinct ...)` included) as the
+    entire value of a `select`/`having` item, with `group_mode: :plain`.
+    `chunk_fun` = `accumulate_chunk/5` (per-chunk group accumulators),
+    `merge_fun` = `merge_group_state/2` (representative row per group,
+    first-appearance order, every running total, all merged correctly
+    across chunk boundaries -- that function's own comment has the
+    complete reasoning). `percentile`/`stddev*`/`var*`, `ROLLUP`/`CUBE`,
+    and anything wider than a bare aggregate call (nested inside
+    arithmetic, a cast, a `WHEN`) fall back to the older, fully eager,
+    single-process `run_grouped/6` path, unchanged.
+  - **Plain `WHERE`+projection** (`run_plain_parallel/7`) -- a `LIMIT`-
+    less, `ORDER BY`/`DISTINCT`/window-free, nested-`SELECT`-free plain
+    query (`run/6`'s own dispatch has the exact eligibility and why
+    `LIMIT` and nested queries are excluded). `chunk_fun` =
+    `filter_and_project_chunk/8` (the same per-row `matches_all?/4`/
+    `project/8` functions `run_plain/8` already uses, applied to a
+    batch), `merge_fun` = plain list concatenation in submission order.
+    Everything not eligible keeps using `run_plain_streaming/7`
+    (`LIMIT`-bound: wants centralized early-stop, which this path can't
+    give) or `run_plain/8` (`ORDER BY`/`DISTINCT`/windows: need the
+    whole set materialized regardless).
+
+  Both trade the fully single-process streaming path's own tighter
+  `O(distinct groups)` (or `O(1)`-per-row) memory bound for `O(...) +
+  parallel_chunk_size * parallel_max_concurrency` in exchange for real
+  wall-clock speedup on CPU-bound work over large sources -- neither
+  does, or can, reduce the cost of the underlying fetch itself (a
+  single connection/cursor is an inherently serial read), only the
+  per-row processing on top of it. `Task.Supervisor.async_stream_
+  nolink/4`, not a linked task, is what lets a worker's own crash
+  surface as an ordinary, callers-can-rescue exception in whatever
+  process called `Executor.run/4`, exactly like today's single-process
+  behavior, instead of an uncatchable `EXIT` that kills it outright --
+  `process_chunks_parallel/4`'s own comment has the full reasoning,
+  including a real, previously-shipped bug this uncovered: a worker
+  crashing from a genuine BEAM-level runtime error (a failed function-
+  clause match, say) exits with a *raw* reason, not a pre-built
+  exception struct the way an explicit `raise` does, and naively
+  assuming otherwise silently degrades back into an uncatchable crash
+  for exactly that case (`reduce_chunk_result/3`'s own comment has the
+  fix: reconstruct the original raise/throw/exit via `:erlang.raise/3`
+  rather than assume a struct is already there).
 
   `@aggregate_names` (`sum`/`avg`/`count`/`min`/`max`, plus `stddev_samp`/
   `stddev_pop`/`var_samp`/`var_pop`/`percentile` -- lang_spec §5.8's own
@@ -583,6 +616,10 @@ defmodule Scry.Core.Executor do
           {:ok, Cursor.new(rows)}
         end
 
+      windows == [] and query.order_bys == [] and not query.distinct and query.limit == nil and
+          not select_has_nested_query?(query.select) ->
+        run_plain_parallel(query, own_name, scope, params, with_bindings, engine_module, conn)
+
       windows == [] and query.order_bys == [] and not query.distinct ->
         run_plain_streaming(query, own_name, scope, params, with_bindings, engine_module, conn)
 
@@ -721,6 +758,131 @@ defmodule Scry.Core.Executor do
     with {:ok, enumerable} <- result do
       {:ok, Cursor.new(enumerable)}
     end
+  end
+
+  # A `LIMIT`-less, `ORDER BY`/`DISTINCT`/window-free plain query with no
+  # nested `SELECT` anywhere in `select` -- same eligibility `run_plain_
+  # streaming/7` below already has, narrowed by the two conditions that
+  # make chunked parallelism actually safe here (`run/6`'s own dispatch
+  # decides between the two): no `LIMIT` to enforce (partitioning into
+  # chunks processed independently means every chunk gets fully
+  # processed regardless of whether an early one already had enough
+  # rows -- strictly *more* work than the streaming path's own early
+  # stop, never less, so a `LIMIT`-bound query keeps using that instead);
+  # no nested query in `select` (a nested `SELECT` re-enters `Executor.
+  # run/3` -- `run_any/6` -- once per surviving row; doing that inside an
+  # already-parallel worker would let every worker's every row spawn a
+  # further parallel fan-out with no shared concurrency cap `Scry.Core.
+  # TaskSupervisor` enforces, unbounded process growth with query
+  # nesting depth -- excluded entirely rather than reasoning about which
+  # nested shapes might be safe enough).
+  #
+  # Splits the fetch `Cursor` into batches (`process_chunks_parallel/4`,
+  # shared with the streaming-aggregation path above), filters and
+  # projects each batch independently across a bounded worker pool using
+  # the *exact same* per-row `matches_all?/4`/`project/8` functions
+  # `run_plain/8` below already has (`filter_and_project_chunk/8`) --
+  # behavior stays identical by construction, only the iteration
+  # strategy differs -- then concatenates each batch's own already-
+  # filtered/projected row list back together in fetch order (`ordered:
+  # true` on the async stream, same guarantee the aggregation path
+  # relies on) before `paginate/3` applies whatever `OFFSET` the query
+  # still has (no `LIMIT`, by construction, but an `OFFSET`-only query is
+  # a real, legitimate shape this path still needs to handle).
+  defp run_plain_parallel(query, own_name, scope, params, with_bindings, engine_module, conn) do
+    with {:ok, cursor} <- fetch_rows(query, scope, params, with_bindings, engine_module, conn) do
+      # A fetch-level failure (an unknown source, say) surfaces eagerly
+      # above, matching every other path's own convention -- but the
+      # parallel dispatch/row-processing itself (where a `QueryError` or
+      # a hard aggregate/cast error can originate, `filter_and_project_
+      # chunk/8`'s own doc has the exact cases) must stay deferred until
+      # a caller actually pulls from the returned `Cursor`, the same
+      # "lazily-discovered failure never surfaces from `run/4` itself"
+      # contract `run_plain_streaming/7` already has -- `Stream.
+      # resource/3`'s own `start_fun`/`next_fun` don't run at all until
+      # the stream is first reduced, so wrapping the whole computation
+      # in one is what defers it, not an incidental side effect.
+      stream =
+        Stream.resource(
+          fn -> :pending end,
+          fn
+            :pending ->
+              chunk_fun =
+                &filter_and_project_chunk(
+                  &1,
+                  query,
+                  own_name,
+                  scope,
+                  params,
+                  with_bindings,
+                  engine_module,
+                  conn
+                )
+
+              rows =
+                cursor
+                |> process_chunks_parallel(chunk_fun, &prepend_chunk/2, [])
+                |> Enum.reverse()
+                |> Enum.concat()
+                |> paginate(query.limit, query.offset)
+
+              {rows, :done}
+
+            :done ->
+              {:halt, :done}
+          end,
+          fn _state -> :ok end
+        )
+
+      {:ok, Cursor.new(stream)}
+    end
+  end
+
+  defp select_has_nested_query?(select), do: Enum.any?(select, &match?(%Query{}, &1))
+
+  defp prepend_chunk(acc, chunk_rows), do: [chunk_rows | acc]
+
+  # Pure -- no cursor, no shared state -- one worker's own share of the
+  # source, filtered and projected exactly the way `plain_stream_row/5`
+  # already does one row at a time; a `:skip` (`REQUIRED`-dropped
+  # nested-query row -- never reached in practice here, since queries
+  # with a nested `SELECT` never dispatch to this path at all, but
+  # `project/8`'s own return shape still has the case) or a filtered-out
+  # row is simply omitted, not emitted as a hole; `project/8`'s own
+  # `{:error, reason}` (its `{:variant, _}` clause, today's only case)
+  # raises the exact same `QueryError` the streaming path already does,
+  # propagated through the owning worker task and re-raised in the
+  # calling process by `process_chunks_parallel/4`'s own error handling.
+  defp filter_and_project_chunk(
+         rows,
+         query,
+         own_name,
+         scope,
+         params,
+         with_bindings,
+         engine_module,
+         conn
+       ) do
+    Enum.flat_map(rows, fn row ->
+      if matches_all?(row, query.wheres, scope, params) do
+        case project(
+               row,
+               query.select,
+               own_name,
+               scope,
+               params,
+               with_bindings,
+               engine_module,
+               conn
+             ) do
+          {:ok, projected} -> [projected]
+          :skip -> []
+          {:error, reason} -> raise(QueryError, reason: reason)
+        end
+      else
+        []
+      end
+    end)
   end
 
   # The genuinely lazy plain-query path -- reached only when nothing
@@ -1107,7 +1269,7 @@ defmodule Scry.Core.Executor do
   # implementation detail. `_nolink`, dispatched through `Scry.Core.
   # TaskSupervisor` (started by `Scry.Core.Application`), instead
   # reports a failed batch as an ordinary `{:exit, reason}` tuple this
-  # module inspects and re-raises itself (`reduce_chunk_result/2`) --
+  # module inspects and re-raises itself (`reduce_chunk_result/3`) --
   # an ordinary, catchable exception in the calling process, exactly
   # matching today's single-process behavior; confirmed directly (a
   # real crashing batch, mid-stream, with more batches still queued)
@@ -1169,17 +1331,70 @@ defmodule Scry.Core.Executor do
 
   defp accumulate_groups_parallel(cursor, query, plan, scope, params) do
     {groups, order} =
-      Scry.Core.TaskSupervisor
-      |> Task.Supervisor.async_stream_nolink(
-        chunk_stream(cursor),
+      process_chunks_parallel(
+        cursor,
         &accumulate_chunk(&1, query, plan, scope, params),
-        ordered: true,
-        max_concurrency: parallel_max_concurrency()
+        &merge_group_state/2,
+        {%{}, []}
       )
-      |> Enum.reduce_while({%{}, []}, &reduce_chunk_result/2)
 
     {groups2, order2} = ensure_flat_group(query.group_bys, plan, groups, order)
     {:ok, groups2, order2}
+  end
+
+  # The shared runner behind every parallel-chunked path in this module
+  # (streaming aggregation above; the parallel plain `WHERE`+projection
+  # path below) -- fetches nothing and knows nothing about aggregates
+  # or projection itself, just: split `cursor` into fixed-size batches,
+  # process each independently on a bounded pool of supervised worker
+  # tasks, and fold results back together *in fetch order* via
+  # `merge_fun`, starting from `initial_acc`. `chunk_fun` (a batch's own
+  # row list -> that batch's own partial result) and `merge_fun` (an
+  # accumulated partial result + one more batch's own partial result ->
+  # the combined partial result) are the only two things that differ
+  # between callers; everything else -- batching, supervision,
+  # ordering, cleanup, error propagation -- is identical regardless of
+  # what's actually being computed.
+  #
+  # `Task.Supervisor.async_stream_nolink/4` (not plain `Task.async_
+  # stream/3`, and not a linked `Task.async/1`) is load-bearing, not a
+  # style choice -- verified directly (a real crashing task, not
+  # assumed): a *linked* task's own crash sends an uncatchable `EXIT`
+  # signal that kills the calling process outright, which would turn an
+  # ordinary, callers-can-rescue exception on the single-process path
+  # (a hard aggregate-nil error, say) into an unrescuable crash of
+  # whatever process called `Executor.run/4` -- a real behavior
+  # regression, not just an implementation detail. `_nolink`, dispatched
+  # through `Scry.Core.TaskSupervisor` (started by `Scry.Core.
+  # Application`), instead reports a failed batch as an ordinary
+  # `{:exit, reason}` tuple this module inspects and re-raises itself
+  # (`reduce_chunk_result/3`) -- an ordinary, catchable exception in the
+  # calling process, exactly matching today's single-process behavior;
+  # confirmed directly (a real crashing batch, mid-stream, with more
+  # batches still queued) that the remaining, not-yet-started batches
+  # never run once that happens (`Enum.reduce_while/3`'s own `{:halt,
+  # ...}` propagates back through the async stream and stops it from
+  # submitting more work), and that the source `Cursor`'s own cleanup
+  # (`Stream.resource/3`'s `after_fun`, inside `chunk_stream/1` below)
+  # still runs either way. `ordered: true` is what guarantees results
+  # are folded into `merge_fun` in submission (fetch) order, never
+  # completion order -- callers rely on this for byte-identical output
+  # to a single-process, one-batch-at-a-time run, regardless of how
+  # many workers actually ran or in what order they finished. Peak
+  # memory is whatever `initial_acc`/its merged form costs, plus
+  # `O(parallel_chunk_size * parallel_max_concurrency)` in flight across
+  # the worker pool -- a real, deliberate widening from a fully
+  # single-process streaming path's own tighter bound, the cost of
+  # genuine parallelism.
+  defp process_chunks_parallel(cursor, chunk_fun, merge_fun, initial_acc) do
+    Scry.Core.TaskSupervisor
+    |> Task.Supervisor.async_stream_nolink(
+      chunk_stream(cursor),
+      chunk_fun,
+      ordered: true,
+      max_concurrency: parallel_max_concurrency()
+    )
+    |> Enum.reduce_while(initial_acc, &reduce_chunk_result(&1, &2, merge_fun))
   end
 
   # `Stream.resource/3`, not `Stream.unfold/2` -- its own `after_fun`
@@ -1203,13 +1418,40 @@ defmodule Scry.Core.Executor do
     )
   end
 
-  defp reduce_chunk_result({:ok, chunk_state}, acc),
-    do: {:cont, merge_group_state(acc, chunk_state)}
+  defp reduce_chunk_result({:ok, chunk_result}, acc, merge_fun),
+    do: {:cont, merge_fun.(acc, chunk_result)}
 
-  defp reduce_chunk_result({:exit, {exception, stacktrace}}, _acc) when is_exception(exception),
-    do: reraise(exception, stacktrace)
+  # `Task.Supervised`'s own `exit_reason/3` (the real source of the
+  # `{:exit, reason}` tuple `async_stream_nolink` hands back) shapes
+  # `reason` differently per *original* failure kind -- `{value,
+  # stacktrace}` for `:error` (an explicit `raise`, but just as often a
+  # genuine BEAM-level runtime error like a failed function-clause
+  # match, which is *not* pre-built into an exception struct the way an
+  # explicit `raise SomeException` is -- confirmed directly, not
+  # assumed: a real `no function clause matching` crash comes back as
+  # `{:function_clause, stacktrace}`, a bare atom, not a struct, which
+  # an earlier `is_exception(exception)`-guarded version of this clause
+  # silently failed to match, falling through to a bare `exit/1` that
+  # crashed the *calling* process uncatchably instead of raising an
+  # ordinary, rescuable exception in it -- exactly the regression this
+  # whole mechanism exists to prevent), `{{:nocatch, value}, stacktrace}`
+  # for an uncaught `throw`, or a bare `reason` (no stacktrace) for an
+  # explicit `exit/1`. `:erlang.raise/3` with the reconstructed original
+  # kind reproduces exactly what would have happened had the same code
+  # run un-`Task`-wrapped in the calling process -- ordinary `rescue`/
+  # `catch` (including `assert_raise`) already normalizes a raw runtime
+  # reason like `:function_clause` into its `FunctionClauseError` form
+  # at the point something actually catches it, the same as it always
+  # does for a directly-raised error, so no manual normalization is
+  # needed here.
+  defp reduce_chunk_result({:exit, {{:nocatch, value}, stacktrace}}, _acc, _merge_fun),
+    do: :erlang.raise(:throw, value, stacktrace)
 
-  defp reduce_chunk_result({:exit, reason}, _acc), do: exit(reason)
+  defp reduce_chunk_result({:exit, {reason, stacktrace}}, _acc, _merge_fun)
+       when is_list(stacktrace),
+       do: :erlang.raise(:error, reason, stacktrace)
+
+  defp reduce_chunk_result({:exit, reason}, _acc, _merge_fun), do: exit(reason)
 
   # `group_rows/3`'s own `group_rows(rows, [], _scope), do: [rows]` --
   # a *flat* aggregate (no explicit `GROUP BY` at all) always collapses
