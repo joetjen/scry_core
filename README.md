@@ -30,8 +30,9 @@ once that project's own `config/config.exs` wires up at least one backend:
 
 ```elixir
 config :scry_core, :query_tool,
-  parser: Scry.TimeSeries,              # optional, defaults to Scry.Core
-  default: "postgres",                  # optional, needed only with >1 backend
+  parser: Scry.TimeSeries,                    # optional, defaults to Scry.Core
+  executor: {Scry.TimeSeries.Executor, :run},  # optional, defaults to {Scry.Core.Executor, :run}
+  default: "postgres",                        # optional, needed only with >1 backend
   backends: %{
     "in_memory" => {MyApp.Conn, :in_memory},
     "postgres" => {MyApp.Conn, :postgres}

@@ -38,8 +38,9 @@ defmodule Scry.Core.QueryTool do
   ```elixir
   # config/config.exs
   config :scry_core, :query_tool,
-    parser: Scry.TimeSeries,              # optional, defaults to Scry.Core; must expose parse/1
-    default: "postgres",                  # optional, only needed when more than one backend is configured
+    parser: Scry.TimeSeries,                        # optional, defaults to Scry.Core; must expose parse/1
+    executor: {Scry.TimeSeries.Executor, :run},      # optional, defaults to {Scry.Core.Executor, :run}
+    default: "postgres",                             # optional, only needed when more than one backend is configured
     backends: %{
       "in_memory" => {Scry.Test.Core.Conn, :in_memory},
       "postgres" => {Scry.Test.Core.Conn, :postgres}
@@ -51,10 +52,21 @@ defmodule Scry.Core.QueryTool do
   `<Kind>.parse/1` (e.g. `Scry.TimeSeries.parse/1`, built once at that
   package's own dev time via its checked-in grammar-composition
   generator script -- nothing new needed there). A project depending on
-  it just points `parser:` at that module. A `scry_engine_<driver>`
-  package "becomes usable" the same way -- a project depending on it
-  registers a named backend in `backends:` pointing at whatever function
-  opens a real connection and returns `{engine_module, conn}` (`{module,
+  it just points `parser:` at that module. **A kind whose queries need
+  more than `Scry.Core.Executor` understands (`Scry.TimeSeries`'s own
+  `LAST <duration> OF <field>`, say -- meaningless to `Scry.Core.
+  Executor` on its own, that package's own moduledoc has the full "why
+  a separate executor" reasoning) also configures `executor:`,
+  `{module, function}`, called as `function(query, engine, conn)`** --
+  found needed, not designed speculatively ahead of a real kind package
+  actually requiring it: `scry_time_series`'s own `Scry.TimeSeries.
+  Executor.run/5` has two further, defaulted arguments (`params`,
+  `now`) beyond the three this module ever calls it with, which Elixir
+  itself resolves to a real, callable `run/3` -- no shim needed on
+  either side for the common case. A `scry_engine_<driver>` package
+  "becomes usable" the same way -- a project depending on it registers
+  a named backend in `backends:` pointing at whatever function opens a
+  real connection and returns `{engine_module, conn}` (`{module,
   function}`, called with no arguments -- wrap it in your own zero-arity
   helper if it needs real arguments, e.g. connection options).
   """
@@ -160,20 +172,34 @@ defmodule Scry.Core.QueryTool do
   end
 
   @doc """
-  Runs an already-parsed `query` against `{engine, conn}` via `Scry.
-  Core.Executor.run/3`, and materializes the full result -- a plain
-  list of plain, human-readable maps (any `Scry.Core.Row` normalized
-  via `Row.to_map/1`, since a real pushdown engine's own direct path
-  may return one), never a lazy `Scry.Core.Cursor.t()`. `Scry.Core.
-  Executor.QueryError` (raised lazily, only once a caller actually
-  pulls far enough to reach the offending row) is caught and folded
-  back into the same `{:error, reason}` shape a parse failure or an
-  engine's own decline already use.
+  Runs an already-parsed `query` against `{engine, conn}` via the
+  configured `:executor` (defaulting to `Scry.Core.Executor.run/3`),
+  and materializes the full result -- a plain list of plain, human-
+  readable maps (any `Scry.Core.Row` normalized via `Row.to_map/1`,
+  since a real pushdown engine's own direct path may return one),
+  never a lazy `Scry.Core.Cursor.t()`. A `Scry.Core.Executor.QueryError`
+  (raised lazily, only once a caller actually pulls far enough to reach
+  the offending row) is caught and folded back into the same
+  `{:error, reason}` shape a parse failure or an engine's own decline
+  already use -- true of any kind-specific executor too, since every
+  one of them still raises this same exception for the same reason
+  (they all delegate the underlying row-processing machinery to
+  `Scry.Core.QueryOps`, which is where this exception actually
+  originates).
   """
   @spec execute(term(), {module(), term()}) :: {:ok, [row()]} | {:error, term()}
   def execute(query, {engine, conn}) do
-    with {:ok, cursor} <- Scry.Core.Executor.run(query, engine, conn) do
+    {executor_module, executor_function} = resolve_executor()
+
+    with {:ok, cursor} <- apply(executor_module, executor_function, [query, engine, conn]) do
       materialize(cursor)
+    end
+  end
+
+  defp resolve_executor do
+    case Keyword.get(config(), :executor) do
+      nil -> {Scry.Core.Executor, :run}
+      {module, function} when is_atom(module) and is_atom(function) -> {module, function}
     end
   end
 

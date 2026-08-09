@@ -138,6 +138,16 @@ defmodule Scry.Core.QueryToolTest do
 
       assert {:error, _reason} = QueryTool.execute(query, backend)
     end
+
+    test "execute/2 calls the configured :executor instead of the Scry.Core.Executor default", %{
+      backend: backend
+    } do
+      put_config(executor: {__MODULE__.FakeExecutor, :run})
+      {:ok, query} = Scry.Core.parse(~s(SELECT users WHERE id = 1 { name }))
+
+      assert {:ok, [row]} = QueryTool.execute(query, backend)
+      assert row["via_fake_executor"] == true
+    end
   end
 
   describe "format_error/1" do
@@ -166,4 +176,23 @@ defmodule Scry.Core.QueryToolTest do
 
   def fake_conn, do: {ReferenceEngine, %{}}
   def other_fake_conn, do: {ReferenceEngine, %{other: true}}
+
+  defmodule FakeExecutor do
+    @moduledoc """
+    A stand-in for a kind-specific executor (`Scry.TimeSeries.Executor`,
+    e.g.) -- proves `Scry.Core.QueryTool.execute/2` actually calls
+    whatever `{module, function}` is configured, not just the
+    `Scry.Core.Executor` default it happens to delegate to internally.
+    """
+    def run(query, engine, conn) do
+      with {:ok, cursor} <- Scry.Core.Executor.run(query, engine, conn) do
+        rows =
+          cursor
+          |> Scry.Core.Cursor.to_list()
+          |> Enum.map(&Map.put(&1, "via_fake_executor", true))
+
+        {:ok, Scry.Core.Cursor.new(rows)}
+      end
+    end
+  end
 end
