@@ -33,7 +33,19 @@ defmodule Scry.Core.MixProject do
       # though it's still genuinely present and compiled in this
       # (`:test`) env, and `Scry.Core.Grammar`/`Scry.Core.GrammarCompose`
       # still reference its types (`Aether.Grammar.t/0`, ...) directly.
-      dialyzer: [plt_add_apps: [:mix, :ichor], ignore_warnings: ".dialyzer_ignore.exs"]
+      # `:iex` -- `mix scry.iex`'s own `IEx.started?/0` check needs
+      # Dialyzer's own PLT to know the function exists. Deliberately
+      # *not* also in `extra_applications` below -- confirmed
+      # empirically (in `scry_test_core`, the package this task moved
+      # here from) that starting the `:iex` OTP application (which
+      # declaring it there would trigger, via `Mix.Task.run(
+      # "app.start")`) flips `IEx.started?/0` to `true` all by itself,
+      # with no real interactive session involved at all, defeating
+      # the whole point of checking it. `IEx`'s own module is already
+      # on the code path without starting its application (part of
+      # the Elixir installation itself), so no `extra_applications`
+      # entry is needed for the call to actually work at runtime.
+      dialyzer: [plt_add_apps: [:mix, :ichor, :iex], ignore_warnings: ".dialyzer_ignore.exs"]
     ]
   end
 
