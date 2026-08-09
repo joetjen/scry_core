@@ -108,6 +108,13 @@ defmodule Scry.Core.Query.EscapeTest do
                {:call, "sum", [{:arith, :mul, {:field, ["price"]}, {:field, ["quantity"]}}]}
     end
 
+    test "rate/1 (lang_spec.md §5.8/§8.2) -- a plain number of seconds, no 5s-shaped literal" do
+      # No `5s`-style duration literal exists in Elixir -- a builder
+      # caller passes a plain number of seconds directly, the same way
+      # percentile(x, 0.5)'s own `p` argument already does.
+      assert expr(quote(do: rate(5))) == {:call, "rate", [5]}
+    end
+
     test "an unrecognized function name is a clear error" do
       assert_raise ArgumentError, ~r/not a recognized Scry function/, fn ->
         expr(quote(do: length(u.name)))

@@ -76,7 +76,7 @@ defmodule Scry.Core.Query.Escape do
   @type vars :: %{atom() => :self | String.t()}
 
   @call_names ~w(
-    sum avg count min max stddev_samp stddev_pop var_samp var_pop percentile
+    sum avg count min max stddev_samp stddev_pop var_samp var_pop percentile rate
     string int exact inexact json
     row_number rank first_value last_value
   )
@@ -329,8 +329,8 @@ defmodule Scry.Core.Query.Escape do
   # ... ROWS BETWEEN ... AND ...`) has no natural Elixir infix
   # equivalent to mirror directly. `call` itself is escaped through the
   # ordinary escape_call!/4 -- any of the recognized names, not
-  # restricted to the 4 window-only ones or the 10 real aggregates
-  # here; `Scry.Core.Executor.compute_window_values/4` is what actually
+  # restricted to the 4 window-only ones or the 11 real aggregates
+  # here; `Scry.Core.Executor.compute_window_values/5` is what actually
   # rejects a nonsensical one (`over(string(x), ...)`), the same
   # "grammar/builder stays permissive, execution rejects misuse"
   # posture every other construct in this module already has.

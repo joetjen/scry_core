@@ -571,7 +571,7 @@ defmodule Scry.Core.Actions do
   def handle_rule(:primary, %{call_with_path: cap}, ctx), do: cap.eval.(ctx)
 
   # lang_spec §5.8's built-in functions (sum/avg/count/min/max/etc,
-  # this phase's real set) -- Scry.Core.QueryOps.eval_aggregate/5 decides
+  # this phase's real set) -- Scry.Core.QueryOps.eval_aggregate/6 decides
   # which `name`s it actually knows how to run, not this module (same
   # split as body_item_ep1's own {:variant, value}, a construct the
   # grammar accepts generally that only *some* of the pipeline

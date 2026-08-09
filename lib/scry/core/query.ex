@@ -20,6 +20,27 @@ defmodule Scry.Core.Query do
   shaped construct from a loaded kind populates (impl_spec.md §2); core
   itself never writes to it.
 
+  `time_field` is a different kind of extension slot than `variant`:
+  where `variant` must be fully lowered away (emptied) by the time
+  `Scry.Core.Executor.run/3,4` runs (`Scry.Core.EngineBehaviour`'s own
+  "what a kind package must guarantee" contract), `time_field` is a
+  genuine top-level field a kind's own lowering pass may leave set
+  *past* that point -- every query that never touches it simply keeps
+  the default `nil`, zero behavior change. Today it has exactly one
+  producer and one consumer: `scry_time_series`'s own `LAST <duration>
+  OF <field>` lowering (`Scry.TimeSeries.Executor.lower_last/2`) sets
+  it to `[field]` (the same path already used to build the `LAST`
+  predicate itself) when it turns `LAST` into an ordinary `WHERE`
+  filter, and `Scry.Core.QueryOps`'s own `rate(<duration>)` aggregate
+  (lang_spec.md §5.8) is the only thing that ever reads it -- to know
+  which field to measure elapsed time against, since `rate`'s own
+  duration argument is deliberately independent of `LAST`'s (see that
+  aggregate's own comment in `query_ops.ex` for why). Kept generic
+  (not named after `rate` or `LAST`) on purpose, the same "grammar/type
+  stays generic, execution decides what it means" posture `variant`/
+  `{:call, ...}` already have -- nothing stops a future construct from
+  reading or writing it too.
+
   `new/1` through `select/2`, below the struct definition, are impl_spec
   .md §7's own Layer 1 -- the composable functional API, "the one that
   matters most for dynamic query building" per that section's own
@@ -82,7 +103,7 @@ defmodule Scry.Core.Query do
   `Scry.Core.QueryOps` against the current row (and, via `{:field,
   ...}`, an enclosing row too, the same scope-chain correlation a
   `where` predicate already gets). `{:call, ...}` splits two ways there:
-  `sum`/`avg`/`count`/`min`/`max` (`Scry.Core.QueryOps.eval_aggregate/5`)
+  `sum`/`avg`/`count`/`min`/`max` (`Scry.Core.QueryOps.eval_aggregate/6`)
   only mean anything across a group's own member rows (tied to `group
   by`/`having`, §5.2), while `string`/`int`/`exact`/`inexact`
   (`Scry.Core.QueryOps`'s own `apply_cast/2`) are ordinary per-row
@@ -197,20 +218,24 @@ defmodule Scry.Core.Query do
 
   `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8, the fixed
   built-in-function surface -- `sum`/`avg`/`count`/`min`/`max`/
-  `stddev_samp`/`stddev_pop`/`var_samp`/`var_pop`/`percentile`,
+  `stddev_samp`/`stddev_pop`/`var_samp`/`var_pop`/`percentile`/`rate`,
   `string`/`int`/`exact`/`inexact`, `json`, and (only meaningful wrapped
   in `{:window, ...}` below) `row_number`/`rank`/`first_value`/
-  `last_value` are the 19 names actually executable today) is
+  `last_value` are the 20 names actually executable today) is
   deliberately not restricted to a known `name` at this type's own
   level, the same way `:variant` isn't restricted to a known kind -- the
   grammar (and this type) accept any `identifier(args)` call (lang_spec
   §5.8's own framing: "anything else ... is either an EP2 namespaced
   extension call, or ... `logic`'s EP2 bare call"), and it's
   `Scry.Core.QueryOps` that decides, at execution time, which names it
-  actually knows how to run (`eval_aggregate/5` for the 10 aggregates,
+  actually knows how to run (`eval_aggregate/6` for the 11 aggregates,
   `apply_cast/2` for the 5 casts -- `json` included, alongside
   `string`/`int`/`exact`/`inexact` -- and the window-value dispatch
-  inside `compute_window_values/4` for the 4 window-only names).
+  inside `compute_window_values/5` for the 4 window-only names).
+  `rate(<duration>)` is the one aggregate that doesn't fit `sum`/`avg`'s
+  own "reduce a flat list of per-row values" shape -- it needs the
+  query's own `time_field` (below) too, so it skips `apply_aggregate/2`
+  entirely and is computed directly inside `eval_aggregate/6`.
 
   `expr()`'s own `{:window, call, partition_by, order_bys, frame}`
   (lang_spec.md §5.5: "`<fn>() OVER [PARTITION BY <field>,...] [ORDER BY
@@ -254,7 +279,7 @@ defmodule Scry.Core.Query do
 
   `expr()`'s own `{:distinct, expr}` (lang_spec.md §5.8: `count(distinct
   …)`, "Distinct-value count") is meaningful only as `count`'s own
-  single argument (`Scry.Core.QueryOps.eval_aggregate/5` dedupes the
+  single argument (`Scry.Core.QueryOps.eval_aggregate/6` dedupes the
   resolved per-member-row values before counting) -- syntactically
   permitted as a prefix on *any* call argument (`priv/grammar.aether`'s
   own `call_arg` comment has the "grammar stays permissive, execution
@@ -398,7 +423,8 @@ defmodule Scry.Core.Query do
           select: [body_item()],
           variant: %{optional(atom()) => term()},
           with_bindings: %{optional(String.t()) => t()},
-          type_decls: %{optional(String.t()) => type_decl()}
+          type_decls: %{optional(String.t()) => type_decl()},
+          time_field: [String.t()] | nil
         }
 
   defstruct source: nil,
@@ -414,7 +440,8 @@ defmodule Scry.Core.Query do
             select: [],
             variant: %{},
             with_bindings: %{},
-            type_decls: %{}
+            type_decls: %{},
+            time_field: nil
 
   @doc """
   Starts a new, empty query against `source` -- impl_spec.md §7's

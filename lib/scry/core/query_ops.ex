@@ -61,18 +61,21 @@ defmodule Scry.Core.QueryOps do
     "stddev_pop",
     "var_samp",
     "var_pop",
-    "percentile"
+    "percentile",
+    "rate"
   ]
 
   @cast_names ["string", "int", "exact", "inexact", "json"]
 
-  # Only these 5 (of `@aggregate_names`'s full 10) are computable one row
+  # Only these 5 (of `@aggregate_names`'s full 11) are computable one row
   # at a time as a running total per group -- `percentile` needs every
   # value, sorted; `stddev*`/`var*` would need Welford's algorithm to go
-  # single-pass, deliberately not attempted. Used only by the streaming-
-  # eligibility family (`streaming_aggregate_plan/1` and friends) and by
-  # `finalize_side/expr`'s own plan-position lookup -- never by the eager
-  # per-row/per-group evaluators, which handle all 10 via `@aggregate_names`.
+  # single-pass, deliberately not attempted; `rate` needs the group's own
+  # min/max timestamp, not a running fold either. Used only by the
+  # streaming-eligibility family (`streaming_aggregate_plan/1` and
+  # friends) and by `finalize_side/expr`'s own plan-position lookup --
+  # never by the eager per-row/per-group evaluators, which handle all 11
+  # via `@aggregate_names`.
   @streaming_capable_aggregate_names ~w(sum avg count min max)
 
   @doc """
@@ -603,7 +606,7 @@ defmodule Scry.Core.QueryOps do
   # `query.select`/`filtered`.
   defp run_plain(query, filtered, scope, params) do
     {windows, select} = collect_and_rewrite_window_calls(query.select)
-    augmented = augment_with_window_values(filtered, windows, scope, params)
+    augmented = augment_with_window_values(filtered, windows, scope, params, query.time_field)
     sorted = sort_rows(augmented, query.order_bys, scope)
 
     with {:ok, projected} <- project_all(select, sorted, params) do
@@ -1109,7 +1112,7 @@ defmodule Scry.Core.QueryOps do
     with {:ok, base_rows} <- base_result do
       final_rows =
         base_rows
-        |> augment_with_window_values(windows, [], params)
+        |> augment_with_window_values(windows, [], params, query.time_field)
         |> Enum.map(&finalize_windowed_row(&1, window_select, windows, params))
 
       {:ok,
@@ -1421,13 +1424,13 @@ defmodule Scry.Core.QueryOps do
 
   # ---- GROUP BY / HAVING / aggregate-function evaluation (eager path) ----
 
-  defp eval_group_predicate({:cmp, op, lhs, nil}, member_rows, scope, params),
-    do: compare(op, resolve_group_lhs(lhs, member_rows, scope, params), nil)
+  defp eval_group_predicate({:cmp, op, lhs, nil}, member_rows, scope, params, time_field),
+    do: compare(op, resolve_group_lhs(lhs, member_rows, scope, params, time_field), nil)
 
-  defp eval_group_predicate({:cmp, op, lhs, rhs}, member_rows, scope, params) do
-    left = resolve_group_lhs(lhs, member_rows, scope, params)
+  defp eval_group_predicate({:cmp, op, lhs, rhs}, member_rows, scope, params, time_field) do
+    left = resolve_group_lhs(lhs, member_rows, scope, params, time_field)
 
-    case resolve_group_rhs(rhs, member_rows, scope, params) do
+    case resolve_group_rhs(rhs, member_rows, scope, params, time_field) do
       _ when is_nil(left) -> raise_null_safety_error()
       nil -> raise_null_safety_error()
       %Regex{} = regex when op == :match -> Regex.match?(regex, left)
@@ -1435,98 +1438,114 @@ defmodule Scry.Core.QueryOps do
     end
   end
 
-  defp eval_group_predicate({:in, lhs, values}, member_rows, scope, params)
+  defp eval_group_predicate({:in, lhs, values}, member_rows, scope, params, time_field)
        when is_list(values) do
-    left = resolve_group_lhs(lhs, member_rows, scope, params)
-    left in Enum.map(values, &resolve_group_rhs(&1, member_rows, scope, params))
+    left = resolve_group_lhs(lhs, member_rows, scope, params, time_field)
+    left in Enum.map(values, &resolve_group_rhs(&1, member_rows, scope, params, time_field))
   end
 
-  defp eval_group_predicate({:in, lhs, list_expr}, member_rows, scope, params) do
-    left = resolve_group_lhs(lhs, member_rows, scope, params)
+  defp eval_group_predicate({:in, lhs, list_expr}, member_rows, scope, params, time_field) do
+    left = resolve_group_lhs(lhs, member_rows, scope, params, time_field)
 
-    case resolve_group_rhs(list_expr, member_rows, scope, params) do
+    case resolve_group_rhs(list_expr, member_rows, scope, params, time_field) do
       list when is_list(list) -> left in list
       other -> raise ArgumentError, "in ... expects a list value, got: #{inspect(other)}"
     end
   end
 
-  defp eval_group_predicate({:and, l, r}, member_rows, scope, params),
+  defp eval_group_predicate({:and, l, r}, member_rows, scope, params, time_field),
     do:
-      eval_group_predicate(l, member_rows, scope, params) and
-        eval_group_predicate(r, member_rows, scope, params)
+      eval_group_predicate(l, member_rows, scope, params, time_field) and
+        eval_group_predicate(r, member_rows, scope, params, time_field)
 
-  defp eval_group_predicate({:or, l, r}, member_rows, scope, params),
+  defp eval_group_predicate({:or, l, r}, member_rows, scope, params, time_field),
     do:
-      eval_group_predicate(l, member_rows, scope, params) or
-        eval_group_predicate(r, member_rows, scope, params)
+      eval_group_predicate(l, member_rows, scope, params, time_field) or
+        eval_group_predicate(r, member_rows, scope, params, time_field)
 
-  defp eval_group_predicate({:not, p}, member_rows, scope, params),
-    do: not eval_group_predicate(p, member_rows, scope, params)
+  defp eval_group_predicate({:not, p}, member_rows, scope, params, time_field),
+    do: not eval_group_predicate(p, member_rows, scope, params, time_field)
 
-  defp resolve_group_lhs({:call, name, args}, member_rows, scope, params) do
+  defp resolve_group_lhs({:call, name, args}, member_rows, scope, params, time_field) do
     if name in @aggregate_names do
-      eval_aggregate(name, args, member_rows, scope, params)
+      eval_aggregate(name, args, member_rows, scope, params, time_field)
     else
-      apply_cast(name, Enum.map(args, &resolve_group_rhs(&1, member_rows, scope, params)))
+      apply_cast(
+        name,
+        Enum.map(args, &resolve_group_rhs(&1, member_rows, scope, params, time_field))
+      )
     end
   end
 
-  defp resolve_group_lhs({:dot, base, path}, member_rows, scope, params) do
-    get_path_in(resolve_group_rhs(base, member_rows, scope, params), path)
+  defp resolve_group_lhs({:dot, base, path}, member_rows, scope, params, time_field) do
+    get_path_in(resolve_group_rhs(base, member_rows, scope, params, time_field), path)
   end
 
-  defp resolve_group_lhs(path, member_rows, scope, _params) when is_list(path),
+  defp resolve_group_lhs(path, member_rows, scope, _params, _time_field) when is_list(path),
     do: get_path(representative(member_rows), scope, path)
 
-  defp resolve_group_lhs({:literal, value}, _member_rows, _scope, _params), do: value
+  defp resolve_group_lhs({:literal, value}, _member_rows, _scope, _params, _time_field),
+    do: value
 
-  defp resolve_group_rhs({:call, name, args}, member_rows, scope, params) do
+  defp resolve_group_rhs({:call, name, args}, member_rows, scope, params, time_field) do
     if name in @aggregate_names do
-      eval_aggregate(name, args, member_rows, scope, params)
+      eval_aggregate(name, args, member_rows, scope, params, time_field)
     else
-      apply_cast(name, Enum.map(args, &resolve_group_rhs(&1, member_rows, scope, params)))
+      apply_cast(
+        name,
+        Enum.map(args, &resolve_group_rhs(&1, member_rows, scope, params, time_field))
+      )
     end
   end
 
-  defp resolve_group_rhs({:field, path}, member_rows, scope, _params),
+  defp resolve_group_rhs({:field, path}, member_rows, scope, _params, _time_field),
     do: get_path(representative(member_rows), scope, path)
 
-  defp resolve_group_rhs({:param, name}, _member_rows, _scope, params) do
+  defp resolve_group_rhs({:param, name}, _member_rows, _scope, params, _time_field) do
     case Map.fetch(params, name) do
       {:ok, value} -> value
       :error -> raise ArgumentError, "missing external parameter: #{inspect(name)}"
     end
   end
 
-  defp resolve_group_rhs({:arith, op, left_expr, right_expr}, member_rows, scope, params) do
-    left = resolve_group_rhs(left_expr, member_rows, scope, params)
-    right = resolve_group_rhs(right_expr, member_rows, scope, params)
+  defp resolve_group_rhs(
+         {:arith, op, left_expr, right_expr},
+         member_rows,
+         scope,
+         params,
+         time_field
+       ) do
+    left = resolve_group_rhs(left_expr, member_rows, scope, params, time_field)
+    right = resolve_group_rhs(right_expr, member_rows, scope, params, time_field)
     arith(op, left, right)
   end
 
-  defp resolve_group_rhs({:when, clauses, else_expr}, member_rows, scope, params) do
+  defp resolve_group_rhs({:when, clauses, else_expr}, member_rows, scope, params, time_field) do
     case Enum.find(clauses, fn {predicate, _then_expr} ->
-           eval_group_predicate(predicate, member_rows, scope, params)
+           eval_group_predicate(predicate, member_rows, scope, params, time_field)
          end) do
-      {_predicate, then_expr} -> resolve_group_rhs(then_expr, member_rows, scope, params)
-      nil -> resolve_group_rhs(else_expr, member_rows, scope, params)
+      {_predicate, then_expr} ->
+        resolve_group_rhs(then_expr, member_rows, scope, params, time_field)
+
+      nil ->
+        resolve_group_rhs(else_expr, member_rows, scope, params, time_field)
     end
   end
 
-  defp resolve_group_rhs({:distinct, _expr}, _member_rows, _scope, _params) do
+  defp resolve_group_rhs({:distinct, _expr}, _member_rows, _scope, _params, _time_field) do
     raise ArgumentError, "distinct is only valid inside count(distinct ...), not any other call"
   end
 
-  defp resolve_group_rhs({:dot, base, path}, member_rows, scope, params) do
-    get_path_in(resolve_group_rhs(base, member_rows, scope, params), path)
+  defp resolve_group_rhs({:dot, base, path}, member_rows, scope, params, time_field) do
+    get_path_in(resolve_group_rhs(base, member_rows, scope, params, time_field), path)
   end
 
-  defp resolve_group_rhs(literal, _member_rows, _scope, _params), do: literal
+  defp resolve_group_rhs(literal, _member_rows, _scope, _params, _time_field), do: literal
 
   defp representative([]), do: %{}
   defp representative([row | _rest]), do: row
 
-  defp eval_aggregate("count", [{:distinct, arg}], member_rows, scope, params) do
+  defp eval_aggregate("count", [{:distinct, arg}], member_rows, scope, params, _time_field) do
     values = Enum.map(member_rows, &resolve_rhs(arg, &1, scope, params))
 
     if Enum.any?(values, &is_nil/1) do
@@ -1539,11 +1558,18 @@ defmodule Scry.Core.QueryOps do
     values |> Enum.uniq() |> length()
   end
 
-  defp eval_aggregate(name, [{:distinct, _arg}], _member_rows, _scope, _params) do
+  defp eval_aggregate(name, [{:distinct, _arg}], _member_rows, _scope, _params, _time_field) do
     raise ArgumentError, "distinct is only valid inside count(distinct ...), not #{name}(...)"
   end
 
-  defp eval_aggregate("percentile", [value_arg, p_arg], member_rows, scope, params) do
+  defp eval_aggregate(
+         "percentile",
+         [value_arg, p_arg],
+         member_rows,
+         scope,
+         params,
+         _time_field
+       ) do
     p = resolve_rhs(p_arg, representative(member_rows), scope, params)
 
     unless compare(:ge, p, 0) and compare(:le, p, 1) do
@@ -1563,12 +1589,65 @@ defmodule Scry.Core.QueryOps do
     apply_percentile(values, p)
   end
 
-  defp eval_aggregate("percentile", args, _member_rows, _scope, _params) do
+  defp eval_aggregate("percentile", args, _member_rows, _scope, _params, _time_field) do
     raise ArgumentError,
           "aggregate percentile/2 expects exactly two arguments (value, p), got #{length(args)}"
   end
 
-  defp eval_aggregate(name, [arg], member_rows, scope, params) do
+  # rate(<duration>) -- lang_spec.md §5.8/§8.2: an events-per-time-unit
+  # aggregate (LogQL's own rate() flavor, not PromQL's counter-reset-
+  # compensated slope) -- count(rows in scope) normalized to a per-
+  # <duration> figure using the group's own min/max value of whatever
+  # field the query's own `LAST <duration> OF <field>` clause named
+  # (`time_field`, threaded down from `%Scry.Core.Query{}` -- see that
+  # module's own moduledoc). `rate`'s own duration argument is
+  # deliberately independent of `LAST`'s own duration -- two unrelated
+  # numbers, not a default/override pair. Doesn't fit `apply_aggregate/2`
+  # 's "reduce a flat already-extracted values list" contract (it needs
+  # the raw rows to pull `time_field` from each one, plus `scope`/
+  # `params` to resolve its own duration argument), so unlike every
+  # other aggregate here it's computed directly, with no
+  # `apply_aggregate("rate", ...)` clause at all.
+  defp eval_aggregate("rate", [_duration_arg], _member_rows, _scope, _params, nil) do
+    raise ArgumentError,
+          "rate(...) needs a LAST <duration> OF <field> clause somewhere in this query to " <>
+            "know which timestamp field to measure elapsed time against (lang_spec.md §8.2) " <>
+            "-- this query has none"
+  end
+
+  defp eval_aggregate("rate", [_duration_arg], [], _scope, _params, _time_field), do: nil
+
+  defp eval_aggregate("rate", [duration_arg], member_rows, scope, params, time_field) do
+    timestamps = Enum.map(member_rows, &get_path(&1, scope, time_field))
+
+    if Enum.any?(timestamps, &is_nil/1) do
+      raise ArgumentError,
+            "aggregate rate(...) encountered a nil value in its own LAST ... OF " <>
+              "#{inspect(time_field)} timestamp field -- lang_spec.md's own \"Aggregates " <>
+              "over nullable fields hard-error the same way\" (no silent nil-skipping); " <>
+              "filter it out explicitly first"
+    end
+
+    min_ts = Enum.reduce(timestamps, &pick_min/2)
+    max_ts = Enum.reduce(timestamps, &pick_max/2)
+    elapsed = elapsed_seconds(min_ts, max_ts)
+
+    # A single-row group (min_ts == max_ts): no elapsed interval to
+    # measure a density against, both mathematically (division by zero)
+    # and physically -- nil, the same "no meaningful value" convention
+    # every other aggregate already uses for an empty group, not a
+    # crash. Fine-grained GROUP BY usage produces single-row groups
+    # constantly in ordinary use; crashing the whole query over one
+    # would be far worse than a documented nil.
+    if compare(:eq, elapsed, 0) do
+      nil
+    else
+      duration_seconds = resolve_rhs(duration_arg, representative(member_rows), scope, params)
+      Rational.div(Rational.mul(length(member_rows), duration_seconds), elapsed)
+    end
+  end
+
+  defp eval_aggregate(name, [arg], member_rows, scope, params, _time_field) do
     values = Enum.map(member_rows, &resolve_rhs(arg, &1, scope, params))
 
     if Enum.any?(values, &is_nil/1) do
@@ -1581,7 +1660,7 @@ defmodule Scry.Core.QueryOps do
     apply_aggregate(name, values)
   end
 
-  defp eval_aggregate(name, args, _member_rows, _scope, _params) do
+  defp eval_aggregate(name, args, _member_rows, _scope, _params, _time_field) do
     raise ArgumentError, "aggregate #{name}/1 expects exactly one argument, got #{length(args)}"
   end
 
@@ -1638,6 +1717,28 @@ defmodule Scry.Core.QueryOps do
 
   defp pick_min(a, b), do: if(term_order(a, b) == :lt, do: a, else: b)
   defp pick_max(a, b), do: if(term_order(a, b) == :gt, do: a, else: b)
+
+  # rate(...)'s own elapsed-time-span helper -- microsecond precision,
+  # matching the finest precision this codebase's own timestamp
+  # fixtures already exercise.
+  defp elapsed_seconds(%DateTime{} = min_ts, %DateTime{} = max_ts),
+    do: Rational.new(DateTime.diff(max_ts, min_ts, :microsecond), 1_000_000)
+
+  defp elapsed_seconds(%NaiveDateTime{} = min_ts, %NaiveDateTime{} = max_ts),
+    do: Rational.new(NaiveDateTime.diff(max_ts, min_ts, :microsecond), 1_000_000)
+
+  defp elapsed_seconds(min_ts, max_ts)
+       when (is_integer(min_ts) or is_float(min_ts) or is_struct(min_ts, Rational)) and
+              (is_integer(max_ts) or is_float(max_ts) or is_struct(max_ts, Rational)) do
+    Rational.sub(max_ts, min_ts)
+  end
+
+  defp elapsed_seconds(min_ts, max_ts) do
+    raise ArgumentError,
+          "rate(...)'s own LAST ... OF <field> timestamp field must be a DateTime, " <>
+            "NaiveDateTime, or plain numeric value on every row of the group -- got " <>
+            "#{inspect(min_ts)}/#{inspect(max_ts)}"
+  end
 
   # ---- Explicit casts ------------------------------------------------------
 
@@ -1746,11 +1847,13 @@ defmodule Scry.Core.QueryOps do
     do: {:error, {:unsupported_body_item, item}}
 
   defp project_groups(query, grouped, scope, params) do
+    time_field = query.time_field
+
     Enum.reduce_while(grouped, {:ok, []}, fn {active_fields, member_rows}, {:ok, acc} ->
-      if having_matches?(query.havings, member_rows, scope, params) do
+      if having_matches?(query.havings, member_rows, scope, params, time_field) do
         rolled_up = query.group_bys -- active_fields
 
-        case project_group(query.select, member_rows, rolled_up, scope, params) do
+        case project_group(query.select, member_rows, rolled_up, scope, params, time_field) do
           {:ok, row} -> {:cont, {:ok, [row | acc]}}
           {:error, _} = err -> {:halt, err}
         end
@@ -1764,19 +1867,19 @@ defmodule Scry.Core.QueryOps do
     end
   end
 
-  defp having_matches?(havings, member_rows, scope, params),
-    do: Enum.all?(havings, &eval_group_predicate(&1, member_rows, scope, params))
+  defp having_matches?(havings, member_rows, scope, params, time_field),
+    do: Enum.all?(havings, &eval_group_predicate(&1, member_rows, scope, params, time_field))
 
-  defp project_group(select_items, member_rows, rolled_up, scope, params) do
+  defp project_group(select_items, member_rows, rolled_up, scope, params, time_field) do
     Enum.reduce_while(select_items, {:ok, %{}}, fn item, {:ok, acc} ->
-      case project_group_item(item, member_rows, rolled_up, scope, params) do
+      case project_group_item(item, member_rows, rolled_up, scope, params, time_field) do
         {:ok, key, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
         {:error, _} = err -> {:halt, err}
       end
     end)
   end
 
-  defp project_group_item({:field, path}, member_rows, rolled_up, scope, _params) do
+  defp project_group_item({:field, path}, member_rows, rolled_up, scope, _params, _time_field) do
     if path in rolled_up do
       {:ok, List.last(path), nil}
     else
@@ -1784,11 +1887,18 @@ defmodule Scry.Core.QueryOps do
     end
   end
 
-  defp project_group_item({:computed, alias_name, expr}, member_rows, _rolled_up, scope, params) do
-    {:ok, alias_name, resolve_group_rhs(expr, member_rows, scope, params)}
+  defp project_group_item(
+         {:computed, alias_name, expr},
+         member_rows,
+         _rolled_up,
+         scope,
+         params,
+         time_field
+       ) do
+    {:ok, alias_name, resolve_group_rhs(expr, member_rows, scope, params, time_field)}
   end
 
-  defp project_group_item(item, _member_rows, _rolled_up, _scope, _params),
+  defp project_group_item(item, _member_rows, _rolled_up, _scope, _params, _time_field),
     do: {:error, {:unsupported_grouped_body_item, item}}
 
   # ---- Window functions (lang_spec.md §5.5/§5.8) --------------------------
@@ -1848,14 +1958,14 @@ defmodule Scry.Core.QueryOps do
 
   defp window_key(index), do: "0_scry_window_#{index}"
 
-  defp augment_with_window_values(filtered, [], _scope, _params), do: filtered
+  defp augment_with_window_values(filtered, [], _scope, _params, _time_field), do: filtered
 
-  defp augment_with_window_values(filtered, windows, scope, params) do
+  defp augment_with_window_values(filtered, windows, scope, params, time_field) do
     keyed_value_lists =
       windows
       |> Enum.with_index()
       |> Enum.map(fn {window, index} ->
-        {window_key(index), compute_window_values(window, filtered, scope, params)}
+        {window_key(index), compute_window_values(window, filtered, scope, params, time_field)}
       end)
 
     filtered
@@ -1871,7 +1981,8 @@ defmodule Scry.Core.QueryOps do
          {:window, {:call, name, args}, partition_by, order_bys, frame},
          filtered_rows,
          scope,
-         params
+         params,
+         time_field
        ) do
     filtered_rows
     |> Enum.with_index()
@@ -1888,7 +1999,20 @@ defmodule Scry.Core.QueryOps do
       sorted_indexed
       |> Enum.with_index()
       |> Enum.map(fn {{_row, original_index}, pos} ->
-        value = window_value(name, args, sorted_rows, pos, n, order_bys, frame, scope, params)
+        value =
+          window_value(
+            name,
+            args,
+            sorted_rows,
+            pos,
+            n,
+            order_bys,
+            frame,
+            scope,
+            params,
+            time_field
+          )
+
         {original_index, value}
       end)
     end)
@@ -1896,8 +2020,19 @@ defmodule Scry.Core.QueryOps do
     |> Enum.map(&elem(&1, 1))
   end
 
-  defp window_value("row_number", [], _sorted_rows, pos, _n, _order_bys, _frame, _scope, _params),
-    do: pos + 1
+  defp window_value(
+         "row_number",
+         [],
+         _sorted_rows,
+         pos,
+         _n,
+         _order_bys,
+         _frame,
+         _scope,
+         _params,
+         _time_field
+       ),
+       do: pos + 1
 
   defp window_value(
          "row_number",
@@ -1908,19 +2043,53 @@ defmodule Scry.Core.QueryOps do
          _order_bys,
          _frame,
          _scope,
-         _params
+         _params,
+         _time_field
        ) do
     raise ArgumentError, "row_number()/0 expects no arguments, got #{length(args)}"
   end
 
-  defp window_value("rank", [], sorted_rows, pos, _n, order_bys, _frame, scope, _params),
-    do: rank_at(sorted_rows, pos, order_bys, scope)
+  defp window_value(
+         "rank",
+         [],
+         sorted_rows,
+         pos,
+         _n,
+         order_bys,
+         _frame,
+         scope,
+         _params,
+         _time_field
+       ),
+       do: rank_at(sorted_rows, pos, order_bys, scope)
 
-  defp window_value("rank", args, _sorted_rows, _pos, _n, _order_bys, _frame, _scope, _params) do
+  defp window_value(
+         "rank",
+         args,
+         _sorted_rows,
+         _pos,
+         _n,
+         _order_bys,
+         _frame,
+         _scope,
+         _params,
+         _time_field
+       ) do
     raise ArgumentError, "rank()/0 expects no arguments, got #{length(args)}"
   end
 
-  defp window_value("first_value", [arg], sorted_rows, pos, n, _order_bys, frame, scope, params) do
+  defp window_value(
+         "first_value",
+         [arg],
+         sorted_rows,
+         pos,
+         n,
+         _order_bys,
+         frame,
+         scope,
+         params,
+         _time_field
+       ) do
     {lo, _hi} = frame_range(frame, pos, n)
     resolve_rhs(arg, Enum.at(sorted_rows, lo), scope, params)
   end
@@ -1934,12 +2103,24 @@ defmodule Scry.Core.QueryOps do
          _order_bys,
          _frame,
          _scope,
-         _params
+         _params,
+         _time_field
        ) do
     raise ArgumentError, "first_value/1 expects exactly one argument, got #{length(args)}"
   end
 
-  defp window_value("last_value", [arg], sorted_rows, pos, n, _order_bys, frame, scope, params) do
+  defp window_value(
+         "last_value",
+         [arg],
+         sorted_rows,
+         pos,
+         n,
+         _order_bys,
+         frame,
+         scope,
+         params,
+         _time_field
+       ) do
     {_lo, hi} = frame_range(frame, pos, n)
     resolve_rhs(arg, Enum.at(sorted_rows, hi), scope, params)
   end
@@ -1953,19 +2134,31 @@ defmodule Scry.Core.QueryOps do
          _order_bys,
          _frame,
          _scope,
-         _params
+         _params,
+         _time_field
        ) do
     raise ArgumentError, "last_value/1 expects exactly one argument, got #{length(args)}"
   end
 
-  defp window_value(name, args, sorted_rows, pos, n, _order_bys, frame, scope, params)
+  defp window_value(name, args, sorted_rows, pos, n, _order_bys, frame, scope, params, time_field)
        when name in @aggregate_names do
     {lo, hi} = frame_range(frame, pos, n)
     frame_rows = slice_frame(sorted_rows, lo, hi)
-    eval_aggregate(name, args, frame_rows, scope, params)
+    eval_aggregate(name, args, frame_rows, scope, params, time_field)
   end
 
-  defp window_value(name, _args, _sorted_rows, _pos, _n, _order_bys, _frame, _scope, _params) do
+  defp window_value(
+         name,
+         _args,
+         _sorted_rows,
+         _pos,
+         _n,
+         _order_bys,
+         _frame,
+         _scope,
+         _params,
+         _time_field
+       ) do
     raise ArgumentError, "#{name}(...) is not a valid window function"
   end
 

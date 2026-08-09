@@ -31,6 +31,29 @@ defmodule Scry.Core.ExecutorTest do
     %{"name" => "standup", "at" => ~N[2026-01-01 09:00:00.500000]}
   ]
 
+  # For rate(<duration>): svc-a's 4 rows span exactly 120s, svc-b's 3
+  # rows span exactly 60s -- both hand-computable (rate(30s): svc-a is
+  # 4*30/120 = 1, svc-b is 3*30/60 = 1.5), and different enough from
+  # each other that a GROUP BY test can't pass by accident.
+  @rate_events [
+    %{"service" => "svc-a", "at" => ~U[2026-01-01 00:00:00.000000Z]},
+    %{"service" => "svc-a", "at" => ~U[2026-01-01 00:00:40.000000Z]},
+    %{"service" => "svc-a", "at" => ~U[2026-01-01 00:01:20.000000Z]},
+    %{"service" => "svc-a", "at" => ~U[2026-01-01 00:02:00.000000Z]},
+    %{"service" => "svc-b", "at" => ~U[2026-01-01 00:00:00.000000Z]},
+    %{"service" => "svc-b", "at" => ~U[2026-01-01 00:00:30.000000Z]},
+    %{"service" => "svc-b", "at" => ~U[2026-01-01 00:01:00.000000Z]}
+  ]
+
+  # A NaiveDateTime-timestamped sibling, to exercise elapsed_seconds/2's
+  # other clause -- 3 rows spanning exactly 60s (rate(30s) = 1.5, same
+  # arithmetic as svc-b above).
+  @rate_events_naive [
+    %{"service" => "svc-c", "at" => ~N[2026-01-01 00:00:00.000000]},
+    %{"service" => "svc-c", "at" => ~N[2026-01-01 00:00:30.000000]},
+    %{"service" => "svc-c", "at" => ~N[2026-01-01 00:01:00.000000]}
+  ]
+
   # Fetch order (A, B, C, D) deliberately doesn't match sort order by
   # either field -- lets a stability/tie-breaking test tell a real sort
   # apart from an accidental one.
@@ -157,7 +180,9 @@ defmodule Scry.Core.ExecutorTest do
     ["cards"] => @cards,
     ["measurements"] => @measurements,
     ["employees"] => @employees,
-    ["sales"] => @sales
+    ["sales"] => @sales,
+    ["rate_events"] => @rate_events,
+    ["rate_events_naive"] => @rate_events_naive
   }
 
   # `Executor.run/3,4` returns `{:ok, Cursor.t()}` now, not `{:ok, [row()]}`
@@ -2124,6 +2149,181 @@ defmodule Scry.Core.ExecutorTest do
       }
 
       assert {:ok, [%{"sd" => "2.0"}]} = run(query)
+    end
+  end
+
+  describe "rate(<duration>) aggregate (lang_spec.md §5.8/§8.2)" do
+    test "count(rows) * duration / elapsed, GROUP BY-scoped, via a DateTime timestamp field" do
+      query = %Query{
+        source: ["rate_events"],
+        group_bys: [["service"]],
+        order_bys: [{["service"], :asc}],
+        time_field: ["at"],
+        select: [
+          {:field, ["service"]},
+          {:computed, "r", {:call, "rate", [30]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"service" => "svc-a", "r" => 1},
+               %{"service" => "svc-b", "r" => Rational.new(3, 2)}
+             ]
+    end
+
+    test "the same computation via a NaiveDateTime timestamp field, no GROUP BY at all" do
+      query = %Query{
+        source: ["rate_events_naive"],
+        time_field: ["at"],
+        select: [{:computed, "r", {:call, "rate", [30]}}]
+      }
+
+      assert {:ok, [%{"r" => r}]} = run(query)
+      assert r == Rational.new(3, 2)
+    end
+
+    test "with no LAST ... OF <field> clause in the query, time_field stays nil and this is a clear error" do
+      query = %Query{
+        source: ["rate_events"],
+        select: [{:computed, "r", {:call, "rate", [30]}}]
+      }
+
+      assert_raise ArgumentError, ~r/needs a LAST <duration> OF <field> clause/, fn ->
+        run(query)
+      end
+    end
+
+    test "an empty group is nil, same empty-aggregate convention as sum/avg" do
+      query = %Query{
+        source: ["rate_events"],
+        wheres: [{:cmp, :eq, ["service"], "nonexistent"}],
+        time_field: ["at"],
+        select: [{:computed, "r", {:call, "rate", [30]}}]
+      }
+
+      assert {:ok, [%{"r" => nil}]} = run(query)
+    end
+
+    test "a single-row group is nil -- no elapsed interval to measure a density against" do
+      query = %Query{
+        source: ["rate_events"],
+        wheres: [{:cmp, :eq, ["at"], ~U[2026-01-01 00:00:40.000000Z]}],
+        time_field: ["at"],
+        select: [{:computed, "r", {:call, "rate", [30]}}]
+      }
+
+      assert {:ok, [%{"r" => nil}]} = run(query)
+    end
+
+    test "a nil value in the query's own time_field hard-errors, same as every other aggregate" do
+      rows = [
+        %{"service" => "x", "at" => nil},
+        %{"service" => "x", "at" => ~U[2026-01-01 00:00:00.000000Z]}
+      ]
+
+      data = Map.put(@data, ["rate_events"], rows)
+
+      query = %Query{
+        source: ["rate_events"],
+        time_field: ["at"],
+        select: [{:computed, "r", {:call, "rate", [30]}}]
+      }
+
+      assert_raise ArgumentError, ~r/encountered a nil value.*LAST/s, fn ->
+        Executor.run(query, FakeEngine, data) |> materialize()
+      end
+    end
+
+    test "the wrong arity raises a clear error, not a raw FunctionClauseError" do
+      query = %Query{
+        source: ["rate_events"],
+        time_field: ["at"],
+        select: [{:computed, "r", {:call, "rate", []}}]
+      }
+
+      assert_raise ArgumentError, ~r/rate\/1 expects exactly one argument/, fn -> run(query) end
+    end
+
+    test "HAVING rate(...) > x works, and does so via the eager (non-streaming) path" do
+      # rate is deliberately not in @streaming_capable_aggregate_names --
+      # if it were mistakenly treated as streamable with no init_agg/
+      # update_agg/merge_agg/finalize_agg clauses of its own, this would
+      # crash with a FunctionClauseError instead of returning the
+      # correct, hand-computed answer.
+      query = %Query{
+        source: ["rate_events"],
+        group_bys: [["service"]],
+        havings: [{:cmp, :gt, {:call, "rate", [30]}, 1}],
+        time_field: ["at"],
+        select: [
+          {:field, ["service"]},
+          {:computed, "r", {:call, "rate", [30]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"service" => "svc-b", "r" => Rational.new(3, 2)}]
+    end
+
+    test "rate(...) OVER (PARTITION BY ...) works as a window function, without collapsing row count" do
+      query = %Query{
+        source: ["rate_events"],
+        time_field: ["at"],
+        select: [
+          {:field, ["service"]},
+          {:computed, "r", {:window, {:call, "rate", [30]}, [["service"]], [], nil}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert length(rows) == length(@rate_events)
+
+      assert rows |> Enum.filter(&(&1["service"] == "svc-a")) |> Enum.all?(&(&1["r"] == 1))
+
+      assert rows
+             |> Enum.filter(&(&1["service"] == "svc-b"))
+             |> Enum.all?(&(&1["r"] == Rational.new(3, 2)))
+    end
+
+    test "used as an ordinary per-row expression (never grouped) raises the clear aggregate error" do
+      query = %Query{
+        source: ["rate_events"],
+        wheres: [{:cmp, :gt, {:call, "rate", [30]}, 1}],
+        time_field: ["at"],
+        select: [{:field, ["service"]}]
+      }
+
+      assert_raise ArgumentError, ~r/only valid inside GROUP BY\/HAVING/, fn -> run(query) end
+    end
+
+    property "always matches a naive reference implementation: count * duration / elapsed" do
+      check all(
+              offsets <- list_of(integer(0..3600), min_length: 0, max_length: 20),
+              duration <- integer(1..120)
+            ) do
+        base = ~U[2026-01-01 00:00:00.000000Z]
+        rows = Enum.map(offsets, &%{"at" => DateTime.add(base, &1, :second)})
+        data = Map.put(@data, ["rate_events"], rows)
+
+        query = %Query{
+          source: ["rate_events"],
+          time_field: ["at"],
+          select: [{:computed, "r", {:call, "rate", [duration]}}]
+        }
+
+        assert {:ok, [%{"r" => actual}]} = Executor.run(query, FakeEngine, data) |> materialize()
+
+        {min_o, max_o} = if offsets == [], do: {0, 0}, else: Enum.min_max(offsets)
+
+        if length(offsets) <= 1 or max_o == min_o do
+          assert actual == nil
+        else
+          expected = Rational.new(length(offsets) * duration, max_o - min_o)
+          assert Rational.compare(actual, expected) == :eq
+        end
+      end
     end
   end
 
