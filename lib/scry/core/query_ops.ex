@@ -471,6 +471,17 @@ defmodule Scry.Core.QueryOps do
     {{:not, p2}, acc}
   end
 
+  # An unresolved `{:variant, ...}` predicate (EP1(e), e.g. `search`'s
+  # own `SEARCH`) has nothing for correlation rewriting to do -- it's
+  # opaque to core, and `correlation_refs/2`'s own identical-shaped
+  # catch-all (`defp correlation_refs(_other, _own_name), do: []`,
+  # right above) already treats it the same way for the sibling
+  # "does this predicate reference the ancestor at all" scan. Passed
+  # through unchanged, `acc` untouched -- same "no-op" treatment every
+  # other predicate-tree walker in this module now gives this shape.
+  defp rewrite_predicate_correlation({:variant, _} = predicate, _own_name, _outer_row, acc),
+    do: {predicate, acc}
+
   # `"0_scry_correlation_N"` is provably collision-proof with a real
   # `$name` param the same way `window_key/1`'s own synthetic field
   # name already is -- a real identifier can never start with a digit.

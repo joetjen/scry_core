@@ -340,6 +340,32 @@ defmodule Scry.Core.ExecutorTest do
     assert_raise ArgumentError, ~r/unresolved.*variant.*predicate/s, fn -> run(query) end
   end
 
+  test "an unresolved {:variant, ...} predicate in a nested SELECT survives correlation rewriting, then hard-errors at evaluation" do
+    # Found building scry_search: rewrite_predicate_correlation/4 (the
+    # nested-SELECT correlation rewriter, run before a nested leaf ever
+    # reaches eval_predicate/4) had no {:variant, ...} clause either,
+    # so a query combining real correlation with an (incompletely
+    # lowered) SEARCH-shaped predicate in the same nested wheres
+    # crashed one step earlier than this test's own sibling above,
+    # inside correlation rewriting itself, not at evaluation.
+    query = %Query{
+      source: ["customers"],
+      select: [
+        {:field, ["name"]},
+        %Query{
+          source: ["customer_orders"],
+          wheres: [
+            {:and, {:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}},
+             {:variant, {:search, ["notes"], "x"}}}
+          ],
+          select: [{:field, ["id"]}]
+        }
+      ]
+    }
+
+    assert_raise ArgumentError, ~r/unresolved.*variant.*predicate/s, fn -> run(query) end
+  end
+
   test "an unknown source propagates the adapter's own error" do
     query = %Query{source: ["nonexistent"], select: []}
 
