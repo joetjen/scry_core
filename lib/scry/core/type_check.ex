@@ -178,6 +178,17 @@ defmodule Scry.Core.TypeCheck do
   defp walk_type_check({:not, p}, type_decl, source_name),
     do: walk_type_check(p, type_decl, source_name)
 
+  # An unresolved EP1(e) `{:variant, ...}` predicate (e.g. `search`'s
+  # own `SEARCH`, `Scry.Core.Query`'s own moduledoc has the full shape)
+  # is opaque to core -- no declared-field-type info to check against
+  # until the kind's own executor lowers it. `:ok`, not an error: a
+  # kind package contributing here is required to fully lower every
+  # such leaf before `Scry.Core.Executor.run/3,4` runs (`Scry.Core.
+  # EngineBehaviour`'s own contract), but that's a separate, later
+  # concern from this compile-time pass, which only ever runs against
+  # the raw parsed document.
+  defp walk_type_check({:variant, _}, _type_decl, _source_name), do: :ok
+
   defp literal_rhs?({:field, path}) when is_list(path), do: false
   defp literal_rhs?({:param, name}) when is_binary(name), do: false
   defp literal_rhs?(_other), do: true
@@ -274,6 +285,10 @@ defmodule Scry.Core.TypeCheck do
   end
 
   defp walk_json_check({:not, p}, type_decl), do: walk_json_check(p, type_decl)
+
+  # Same reasoning as `walk_type_check`'s own `{:variant, ...}` clause
+  # above -- opaque to core, no JSON/DXN/DXNB path to validate yet.
+  defp walk_json_check({:variant, _}, _type_decl), do: :ok
 
   defp json_path_check([_single], _type_decl), do: :ok
 
@@ -410,6 +425,13 @@ defmodule Scry.Core.TypeCheck do
       {:ok, false_p, true_p}
     end
   end
+
+  # Same reasoning as `walk_type_check`'s own `{:variant, ...}` clause
+  # above -- opaque to core, proves nothing either way about
+  # nullability yet, the same "no-op" treatment the generic `{:cmp, _,
+  # _, _}` catch-all above already gets.
+  defp check_predicate({:variant, _}, proven, _type_decl, _source_name),
+    do: {:ok, proven, proven}
 
   @spec null_check_facts(:eq | :not_eq | :lt | :gt | :le | :ge | :match, String.t()) ::
           {MapSet.t(), MapSet.t()}

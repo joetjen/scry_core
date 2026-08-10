@@ -498,4 +498,53 @@ defmodule Scry.Core.TypeCheckTest do
 
     assert :ok = TypeCheck.check(query, %{})
   end
+
+  describe "an unresolved {:variant, ...} predicate (EP1(e), e.g. search's own SEARCH)" do
+    test "is inert with no TYPE declaration at all -- the real regression this covers" do
+      # Found building scry_search: every one of walk_type_check/3,
+      # walk_json_check/2, and check_predicate/4 lacked a {:variant, ...}
+      # clause, so parsing *any* query using SEARCH crashed with a raw
+      # FunctionClauseError here, unconditionally -- not gated behind a
+      # TYPE declaration existing at all (this test has none).
+      query = %Query{
+        source: ["articles"],
+        select: [{:field, ["title"]}],
+        wheres: [{:variant, {:search, ["content"], "machine learning"}}]
+      }
+
+      assert :ok = TypeCheck.check(query, %{})
+    end
+
+    test "is inert nested inside AND/OR/NOT too" do
+      query = %Query{
+        source: ["articles"],
+        select: [{:field, ["title"]}],
+        wheres: [
+          {:and, {:cmp, :eq, ["category"], "research"},
+           {:not, {:variant, {:search, ["content"], "ml"}}}}
+        ]
+      }
+
+      assert :ok = TypeCheck.check(query, %{})
+    end
+
+    test "is inert even with a real TYPE declaration for the same source" do
+      type_decls = %{
+        "articles" => %{
+          name: "articles",
+          kind: "relational",
+          fields: [{"title", {:named, "String", nil}}]
+        }
+      }
+
+      query = %Query{
+        source: ["articles"],
+        select: [{:field, ["title"]}],
+        wheres: [{:variant, {:search, ["content"], "ml"}}],
+        type_decls: type_decls
+      }
+
+      assert :ok = TypeCheck.check(query)
+    end
+  end
 end
