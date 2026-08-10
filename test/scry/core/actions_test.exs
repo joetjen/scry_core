@@ -257,14 +257,14 @@ defmodule Scry.Core.ActionsTest do
 
   test "order by, default direction is ascending", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT users ORDER BY age { name }))
-    assert q.order_bys == [{["age"], :asc}]
+    assert q.order_bys == [{{:field, ["age"]}, :asc}]
   end
 
   test "order by, explicit desc/asc, multiple fields, case-insensitive", %{grammar: g} do
     assert {:ok, %Query{} = q} =
              run(g, ~s(SELECT users ORDER BY age desc, name ASC { name }))
 
-    assert q.order_bys == [{["age"], :desc}, {["name"], :asc}]
+    assert q.order_bys == [{{:field, ["age"]}, :desc}, {{:field, ["name"]}, :asc}]
   end
 
   test "limit alone", %{grammar: g} do
@@ -290,7 +290,7 @@ defmodule Scry.Core.ActionsTest do
     assert q.wheres == [{:cmp, :gt, ["total"], 50}]
     assert q.group_bys == [["status"]]
     assert q.distinct
-    assert q.order_bys == [{["status"], :asc}]
+    assert q.order_bys == [{{:field, ["status"]}, :asc}]
     assert q.limit == 5
     assert q.offset == 1
     assert q.required
@@ -948,7 +948,7 @@ line two""" { name }))
 
     assert %Query{
              wheres: [{:cmp, :gt, ["total"], 10}],
-             order_bys: [{["total"], :desc}],
+             order_bys: [{{:field, ["total"]}, :desc}],
              limit: 5
            } = q.with_bindings["top"]
   end
@@ -1169,7 +1169,8 @@ line two""" { name }))
       assert q.select == [
                {:field, ["name"]},
                {:computed, "rank",
-                {:window, {:call, "row_number", []}, [["department"]], [{["salary"], :desc}], nil}}
+                {:window, {:call, "row_number", []}, [["department"]],
+                 [{{:field, ["salary"]}, :desc}], nil}}
              ]
     end
 
@@ -1186,7 +1187,8 @@ line two""" { name }))
       assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { n: row_number() OVER ORDER BY id }])
 
       assert q.select == [
-               {:computed, "n", {:window, {:call, "row_number", []}, [], [{["id"], :asc}], nil}}
+               {:computed, "n",
+                {:window, {:call, "row_number", []}, [], [{{:field, ["id"]}, :asc}], nil}}
              ]
     end
 
@@ -1199,8 +1201,8 @@ line two""" { name }))
 
       assert q.select == [
                {:computed, "s",
-                {:window, {:call, "sum", [{:field, ["total"]}]}, [["region"]], [{["id"], :asc}],
-                 {{:preceding, 1}, {:following, 2}}}}
+                {:window, {:call, "sum", [{:field, ["total"]}]}, [["region"]],
+                 [{{:field, ["id"]}, :asc}], {{:preceding, 1}, {:following, 2}}}}
              ]
     end
 
@@ -1227,7 +1229,7 @@ line two""" { name }))
 
       assert q.select == [
                {:computed, "s",
-                {:window, {:call, "sum", [{:field, ["total"]}]}, [], [{["id"], :asc}],
+                {:window, {:call, "sum", [{:field, ["total"]}]}, [], [{{:field, ["id"]}, :asc}],
                  {:current_row, :current_row}}}
              ]
     end

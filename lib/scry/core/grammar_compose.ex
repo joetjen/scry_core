@@ -123,7 +123,7 @@ defmodule Scry.Core.GrammarCompose do
   # and at this size (two entries, growing slowly) there's no
   # performance reason to prefer a MapSet anyway.
   @spec extension_points() :: [atom()]
-  defp extension_points, do: [:select_ep1a, :body_item_ep1]
+  defp extension_points, do: [:select_ep1a, :body_item_ep1, :comparison_ep1e]
 
   defp check_skip_match(%{skip: same}, %{skip: same}), do: :ok
 

@@ -70,11 +70,18 @@ defmodule Scry.Core.EngineBehaviour do
 
   ## What a kind package must guarantee
 
-  A `:variant` body item and a populated `query.variant` are the one
-  thing `execute/3` must never see: a kind package (`scry_time_series`,
-  ...) is required to fully lower its own EP1/EP2 vocabulary into
-  ordinary core AST before ever calling `Scry.Core.Executor.run/3,4`,
-  exactly what every existing kind package already does.
+  A `:variant` body item, a populated `query.variant`, and a `{:variant,
+  term()}` predicate leaf anywhere in `wheres`/`havings` (`Scry.Core.
+  Query`'s own moduledoc has the full shape -- core's third extension
+  point, EP1(e), an infix comparison-tier operator like `search`'s own
+  `SEARCH`) are the things `execute/3` must never see: a kind package
+  (`scry_time_series`, ...) is required to fully lower its own EP1/EP2
+  vocabulary into ordinary core AST before ever calling `Scry.Core.
+  Executor.run/3,4`, exactly what every existing kind package already
+  does. A predicate-leaf `:variant` needs a real tree walk, not just a
+  top-level check -- it can appear nested arbitrarily deep inside
+  `{:and, ...}`/`{:or, ...}`/`{:not, ...}`, since an infix operator is
+  syntactically legal anywhere an ordinary comparison is.
   """
 
   @typedoc "A single result row -- either a plain string-keyed map, matching `Scry.Core.Query`'s own path segments, or a `Scry.Core.Row.t()`."

@@ -708,7 +708,18 @@ order_item_list := head:order_item (COMMA tail:order_item)*
 ; spurious capture under whichever of `KW_DESC`/`KW_ASC` actually
 ; matched (same class of finding as `select_ep1a?`'s own history, just
 ; not a problem here since Scry.Core.Actions only ever reads `dir`).
-order_item := field:path dir:(KW_DESC | KW_ASC)?
+;
+; `key:expression`, not `field:path` -- widened from a bare field path
+; to the same general `expr()` shape a `{:computed, ...}` body item's
+; own value already is (lang_spec §8.5's own `ORDER BY relevance()
+; DESC` needs a call here, not just a field; `ORDER BY price * quantity
+; DESC`, for any kind, falls out for free from the same widening, not a
+; second special case). A bare field reference through `expression` ->
+; `primary` still reduces to the exact same `{:field, path}` tag every
+; other `expr()` position already produces (`Scry.Core.Actions`'s own
+; `primary`/`path` handler) -- the common case is unaffected in shape,
+; just now wrapped, not a plain bare path list.
+order_item := key:expression dir:(KW_DESC | KW_ASC)?
 
 limit_clause  := KW_LIMIT n:INTEGER offset_clause?
 offset_clause := KW_OFFSET n:INTEGER
@@ -816,6 +827,36 @@ comparison := left:predicate_lhs op:comp_op right:literal
             | left:in_lhs in:KW_IN items_expr:call_with_path
             | left:in_lhs in:KW_IN items_expr:call
             | left:in_lhs in:KW_IN items_expr:path
+            | comparison_ep1e
+
+; core's EP1(e) infix comparison-tier operator extension point (lang_
+; spec §2, §8.5's `SEARCH`) -- the third extension point, after
+; `select_ep1a`/`body_item_ep1` above. Unlike either of those, exactly
+; one kind may ever fill this in practice today (only `search` nominates
+; this position at all), but it's still built the same union-of-
+; simultaneous-contributions way (`NEVER` default, `Scry.Core.
+; GrammarCompose.merge/2` unions each loaded fragment's own
+; contribution via `union_rule/2`) rather than a dangling reference
+; exactly one fragment is allowed to supply -- consistent with the
+; other two, not a special case, and future-proof if a second kind ever
+; nominates an infix operator here too.
+comparison_ep1e := NEVER
+
+; comparison_ep1e := <supplied by a kind fragment, e.g.
+;   left:predicate_lhs KW_SEARCH right:STRING>
+;
+; A kind's own fragment produces a `predicate()` core cannot interpret
+; on its own -- tagged `{:variant, term()}` by that kind's own Actions,
+; the exact same opaque-to-core idiom `body_item_ep1`'s own `{:variant,
+; term()}` body-item shape already established (`Scry.Core.Query`'s own
+; moduledoc has the full reasoning for that one; this is its predicate-
+; tree counterpart). A kind package contributing here must fully lower
+; every `{:variant, ...}` predicate leaf, anywhere in `wheres`/`havings`
+; (including nested inside `and`/`or`/`not`), before ever calling `Scry.
+; Core.Executor.run/3,4` -- the same "what a kind package must
+; guarantee" contract `Scry.Core.EngineBehaviour`'s own moduledoc
+; already states for `query.variant` and a `:variant` body item, now
+; extended to cover this new leaf shape too.
 
 predicate_lhs := call_with_path | call | path
 

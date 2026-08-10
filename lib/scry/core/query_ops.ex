@@ -607,7 +607,7 @@ defmodule Scry.Core.QueryOps do
   defp run_plain(query, filtered, scope, params) do
     {windows, select} = collect_and_rewrite_window_calls(query.select)
     augmented = augment_with_window_values(filtered, windows, scope, params, query.time_field)
-    sorted = sort_rows(augmented, query.order_bys, scope)
+    sorted = sort_rows(augmented, query.order_bys, scope, params)
 
     with {:ok, projected} <- project_all(select, sorted, params) do
       {:ok,
@@ -635,7 +635,7 @@ defmodule Scry.Core.QueryOps do
       else
         Enum.reduce(rows, [], fn row, buffer ->
           if matches_all?(row, query.wheres, scope, params) do
-            insert_topk(buffer, row, k, query.order_bys, scope)
+            insert_topk(buffer, row, k, query.order_bys, scope, params)
           else
             buffer
           end
@@ -647,21 +647,21 @@ defmodule Scry.Core.QueryOps do
     end
   end
 
-  defp insert_topk(buffer, row, k, order_bys, scope) when length(buffer) < k,
-    do: insert_sorted(buffer, row, order_bys, scope)
+  defp insert_topk(buffer, row, k, order_bys, scope, params) when length(buffer) < k,
+    do: insert_sorted(buffer, row, order_bys, scope, params)
 
-  defp insert_topk(buffer, row, _k, order_bys, scope) do
+  defp insert_topk(buffer, row, _k, order_bys, scope, params) do
     worst = List.last(buffer)
 
-    if sorts_before?(row, worst, order_bys, scope) do
-      buffer |> List.delete_at(-1) |> insert_sorted(row, order_bys, scope)
+    if sorts_before?(row, worst, order_bys, scope, params) do
+      buffer |> List.delete_at(-1) |> insert_sorted(row, order_bys, scope, params)
     else
       buffer
     end
   end
 
-  defp insert_sorted(buffer, row, order_bys, scope) do
-    {before, rest} = Enum.split_while(buffer, &sorts_before?(&1, row, order_bys, scope))
+  defp insert_sorted(buffer, row, order_bys, scope, params) do
+    {before, rest} = Enum.split_while(buffer, &sorts_before?(&1, row, order_bys, scope, params))
     before ++ [row | rest]
   end
 
@@ -728,6 +728,16 @@ defmodule Scry.Core.QueryOps do
 
   defp streaming_predicate_calls({:not, p}), do: streaming_predicate_calls(p)
 
+  # An unresolved EP1(e) `{:variant, ...}` predicate (a kind package's
+  # own incomplete lowering pass -- Scry.Core.Query's own moduledoc has
+  # the full shape) forces the eager path, the same as any other
+  # genuinely-can't-stream construct here -- `eval_group_predicate/5`'s
+  # own matching clause is what actually raises the clear, named error;
+  # this clause exists purely so that error is what a caller sees,
+  # rather than this function's own `FunctionClauseError` on a shape it
+  # was never meant to recognize.
+  defp streaming_predicate_calls({:variant, _}), do: :not_streamable
+
   defp combine_streaming({:ok, a}, {:ok, b}), do: {:ok, a ++ b}
   defp combine_streaming(_a, _b), do: :not_streamable
 
@@ -753,7 +763,7 @@ defmodule Scry.Core.QueryOps do
     with {:ok, groups, order} <- accumulate_groups_parallel(rows, query, plan, scope, params) do
       {:ok,
        finalize_groups(query, groups, order, scope, params, plan)
-       |> sort_rows(query.order_bys, [])
+       |> sort_rows(query.order_bys, [], params)
        |> maybe_dedupe(query.distinct)
        |> paginate(query.limit, query.offset)}
     end
@@ -1065,7 +1075,7 @@ defmodule Scry.Core.QueryOps do
     with {:ok, projected} <- grouped_base_rows(query, filtered, scope, params) do
       {:ok,
        projected
-       |> sort_rows(query.order_bys, [])
+       |> sort_rows(query.order_bys, [], params)
        |> maybe_dedupe(query.distinct)
        |> paginate(query.limit, query.offset)}
     end
@@ -1117,7 +1127,7 @@ defmodule Scry.Core.QueryOps do
 
       {:ok,
        final_rows
-       |> sort_rows(query.order_bys, [])
+       |> sort_rows(query.order_bys, [], params)
        |> maybe_dedupe(query.distinct)
        |> paginate(query.limit, query.offset)}
     end
@@ -1201,6 +1211,15 @@ defmodule Scry.Core.QueryOps do
 
   defp predicate_has_aggregate_call?({:not, p}), do: predicate_has_aggregate_call?(p)
 
+  # An unresolved `{:variant, ...}` predicate (EP1(e), e.g. `SEARCH`) is
+  # opaque to core -- never itself an aggregate-routing trigger. `false`
+  # here just means "this predicate isn't why the query would need the
+  # grouped path"; if it's genuinely unresolved, `eval_predicate/4` or
+  # `eval_group_predicate/5` (whichever path the query actually takes)
+  # raises the real, clear error once evaluation actually reaches it --
+  # this function only decides routing, not correctness.
+  defp predicate_has_aggregate_call?({:variant, _}), do: false
+
   defp lhs_has_aggregate_call?({:call, name, args}),
     do: name in @aggregate_names or Enum.any?(args, &expr_has_aggregate_call?/1)
 
@@ -1228,20 +1247,37 @@ defmodule Scry.Core.QueryOps do
 
   # ---- Sorting / dedup / pagination ---------------------------------------
 
-  defp sort_rows(rows, [], _scope), do: rows
+  defp sort_rows(rows, [], _scope, _params), do: rows
 
-  defp sort_rows(rows, order_bys, scope),
-    do: Enum.sort(rows, &sorts_before?(&1, &2, order_bys, scope))
+  defp sort_rows(rows, order_bys, scope, params),
+    do: Enum.sort(rows, &sorts_before?(&1, &2, order_bys, scope, params))
 
-  defp sorts_before?(_a, _b, [], _scope), do: true
+  defp sorts_before?(_a, _b, [], _scope, _params), do: true
 
-  defp sorts_before?(a, b, [{path, direction} | rest], scope) do
-    case term_order(get_path(a, scope, path), get_path(b, scope, path)) do
-      :eq -> sorts_before?(a, b, rest, scope)
+  defp sorts_before?(a, b, [{key, direction} | rest], scope, params) do
+    case term_order(
+           resolve_order_key(key, a, scope, params),
+           resolve_order_key(key, b, scope, params)
+         ) do
+      :eq -> sorts_before?(a, b, rest, scope, params)
       :lt -> direction == :asc
       :gt -> direction == :desc
     end
   end
+
+  # An `ORDER BY`/window `order_bys` key is either the original bare
+  # field path every caller before this widening already built (`Scry.
+  # Core.Query.t()`'s own moduledoc explains why that shape stays valid
+  # forever, not just during a migration window) or a full `expr()`
+  # (lang_spec.md §8.5's own `ORDER BY relevance() DESC`, `priv/grammar
+  # .aether`'s own `order_item` comment) -- resolved via `resolve_rhs/4`
+  # like any other expression position. The two are unambiguous: a bare
+  # key is always `[String.t(), ...]` (every segment a string), which no
+  # tagged `expr()` tuple can ever collide with.
+  defp resolve_order_key(path, row, scope, _params) when is_list(path),
+    do: get_path(row, scope, path)
+
+  defp resolve_order_key(expr, row, scope, params), do: resolve_rhs(expr, row, scope, params)
 
   defp maybe_dedupe(rows, false), do: rows
   defp maybe_dedupe(rows, true), do: Enum.uniq(rows)
@@ -1301,6 +1337,27 @@ defmodule Scry.Core.QueryOps do
 
   defp eval_predicate({:not, p}, row, scope, params),
     do: not eval_predicate(p, row, scope, params)
+
+  defp eval_predicate({:variant, _} = predicate, _row, _scope, _params),
+    do: raise_unresolved_variant_predicate(predicate)
+
+  # A kind package's own EP1(e) infix-operator predicate (`Scry.Core.
+  # Query`'s own moduledoc has the full shape) reaching a generic
+  # predicate evaluator unresolved is a contract violation on that
+  # package's own part (`Scry.Core.EngineBehaviour`'s own "what a kind
+  # package must guarantee" section) -- a clear, named error, not the
+  # `FunctionClauseError` every other unrecognized-shape case here would
+  # otherwise raise, since this one specific shape has a real, known
+  # cause worth naming (an incomplete lowering pass), not an arbitrary
+  # malformed AST.
+  defp raise_unresolved_variant_predicate({:variant, detail}) do
+    raise ArgumentError,
+          "an unresolved {:variant, #{inspect(detail)}} predicate reached generic predicate " <>
+            "evaluation -- the kind package that produced it must fully lower every SEARCH-" <>
+            "shaped (EP1(e)) predicate leaf, anywhere in wheres/havings, before calling " <>
+            "Scry.Core.Executor.run/3,4 (Scry.Core.EngineBehaviour's own moduledoc has the " <>
+            "full contract)"
+  end
 
   defp resolve_predicate_lhs({:call, name, _args}, _row, _scope, _params)
        when name in @aggregate_names do
@@ -1465,6 +1522,15 @@ defmodule Scry.Core.QueryOps do
 
   defp eval_group_predicate({:not, p}, member_rows, scope, params, time_field),
     do: not eval_group_predicate(p, member_rows, scope, params, time_field)
+
+  defp eval_group_predicate(
+         {:variant, _} = predicate,
+         _member_rows,
+         _scope,
+         _params,
+         _time_field
+       ),
+       do: raise_unresolved_variant_predicate(predicate)
 
   defp resolve_group_lhs({:call, name, args}, member_rows, scope, params, time_field) do
     if name in @aggregate_names do
@@ -1991,7 +2057,9 @@ defmodule Scry.Core.QueryOps do
     end)
     |> Enum.flat_map(fn {_partition_key, indexed_rows} ->
       sorted_indexed =
-        Enum.sort(indexed_rows, fn {a, _}, {b, _} -> sorts_before?(a, b, order_bys, scope) end)
+        Enum.sort(indexed_rows, fn {a, _}, {b, _} ->
+          sorts_before?(a, b, order_bys, scope, params)
+        end)
 
       sorted_rows = Enum.map(sorted_indexed, &elem(&1, 0))
       n = length(sorted_rows)
@@ -2058,10 +2126,10 @@ defmodule Scry.Core.QueryOps do
          order_bys,
          _frame,
          scope,
-         _params,
+         params,
          _time_field
        ),
-       do: rank_at(sorted_rows, pos, order_bys, scope)
+       do: rank_at(sorted_rows, pos, order_bys, scope, params)
 
   defp window_value(
          "rank",
@@ -2176,22 +2244,26 @@ defmodule Scry.Core.QueryOps do
   defp slice_frame(_rows, lo, hi) when lo > hi, do: []
   defp slice_frame(rows, lo, hi), do: Enum.slice(rows, lo..hi)
 
-  defp rank_at(sorted_rows, pos, order_bys, scope),
-    do: pos + 1 - count_ties_before(sorted_rows, pos, order_bys, scope)
+  defp rank_at(sorted_rows, pos, order_bys, scope, params),
+    do: pos + 1 - count_ties_before(sorted_rows, pos, order_bys, scope, params)
 
-  defp count_ties_before(_sorted_rows, 0, _order_bys, _scope), do: 0
+  defp count_ties_before(_sorted_rows, 0, _order_bys, _scope, _params), do: 0
 
-  defp count_ties_before(sorted_rows, pos, order_bys, scope) do
-    if ties?(Enum.at(sorted_rows, pos - 1), Enum.at(sorted_rows, pos), order_bys, scope) do
-      1 + count_ties_before(sorted_rows, pos - 1, order_bys, scope)
+  defp count_ties_before(sorted_rows, pos, order_bys, scope, params) do
+    if ties?(Enum.at(sorted_rows, pos - 1), Enum.at(sorted_rows, pos), order_bys, scope, params) do
+      1 + count_ties_before(sorted_rows, pos - 1, order_bys, scope, params)
     else
       0
     end
   end
 
-  defp ties?(a, b, order_bys, scope) do
-    Enum.all?(order_bys, fn {path, _direction} ->
-      term_order(get_path(a, scope, path), get_path(b, scope, path)) == :eq
+  defp ties?(a, b, order_bys, scope, params) do
+    Enum.all?(order_bys, fn {key, _direction} ->
+      term_order(
+        resolve_order_key(key, a, scope, params),
+        resolve_order_key(key, b, scope, params)
+      ) ==
+        :eq
     end)
   end
 end

@@ -207,7 +207,19 @@ defmodule Scry.Core.Query.EscapeTest do
         end
 
       assert expr(ast) ==
-               {:window, {:call, "row_number", []}, [["department"]], [{["salary"], :desc}], nil}
+               {:window, {:call, "row_number", []}, [["department"]],
+                [{{:field, ["salary"]}, :desc}], nil}
+    end
+
+    test "order_by:'s own key is a full expr() now, not just a bare field -- an arithmetic key" do
+      ast =
+        quote do
+          over(row_number(), order_by: [desc: u.price * u.quantity])
+        end
+
+      assert expr(ast) ==
+               {:window, {:call, "row_number", []}, [],
+                [{{:arith, :mul, {:field, ["price"]}, {:field, ["quantity"]}}, :desc}], nil}
     end
 
     test "an aggregate reused as a window function, with no partition/order at all" do

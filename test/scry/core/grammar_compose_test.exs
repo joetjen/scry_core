@@ -77,6 +77,29 @@ defmodule Scry.Core.GrammarComposeTest do
   KW_VIA := "via"
   """
 
+  # An EP1(e) infix comparison-tier operator, standing in for
+  # scry_search's `<field> SEARCH <string>` (lang_spec §8.5) -- fills
+  # `comparison_ep1e`, the third extension point, in `comparison`'s own
+  # top-level alternation, not a nested position the way `body_item_ep1`
+  # reuses `body_list` recursively. Unlike either EP1(a) fragment above,
+  # this one's own `right` is deliberately `STRING` specifically, not
+  # `literal`/`path` the way core's own `comparison` alternatives are --
+  # `SEARCH`'s own right-hand side is always a fuzzy-match query string,
+  # never a field reference or an arbitrary literal.
+  @search_like_fragment """
+  @grammar "fake_search_fragment"
+  @root comparison_ep1e
+  @case_insensitive
+  @skip TRIVIA
+
+  COMMENT := "#" (!"\\n" .)*
+  TRIVIA  := (SPACE | COMMENT)*
+
+  comparison_ep1e := left:predicate_lhs KW_SEARCH right:STRING
+
+  KW_SEARCH := "search"
+  """
+
   @mismatched_skip_fragment """
   @grammar "fake_bad_fragment"
   @root select_ep1a
@@ -267,6 +290,83 @@ defmodule Scry.Core.GrammarComposeTest do
 
       assert %Ichor.Node{rule: :body_list, captures: %{head: %Ichor.Node{rule: :path}}} =
                captures.body
+    end
+  end
+
+  describe "merge/2 with an EP1(e) infix comparison-tier fragment (comparison_ep1e)" do
+    setup do
+      core = parse!(@core_source, "priv/grammar.aether")
+      search = parse!(@search_like_fragment, "search.aether")
+      {:ok, merged} = GrammarCompose.merge(core, search)
+      {:ok, analyzed} = Grammar.Analysis.run(merged)
+      %{grammar: analyzed}
+    end
+
+    # `where_clause.cond` always wraps a bare comparison in `disjunction
+    # -> conjunction -> negation` (ordinary precedence climbing, no
+    # `AND`/`OR`/`NOT` actually used here) -- unwraps down to whichever
+    # `comparison` alternative actually matched, the same way `sorts
+    # -before?`'s own callers never see the climbing layers either.
+    defp unwrap_comparison(%Ichor.Node{rule: :disjunction, captures: %{left: conjunction}}),
+      do: unwrap_comparison(conjunction)
+
+    defp unwrap_comparison(%Ichor.Node{rule: :conjunction, captures: %{left: negation}}),
+      do: unwrap_comparison(negation)
+
+    defp unwrap_comparison(%Ichor.Node{rule: :negation, captures: %{expr: comparison}}),
+      do: comparison
+
+    test "the infix operator itself parses as an ordinary WHERE comparison", %{grammar: g} do
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(
+                 g,
+                 ~s(SELECT articles WHERE content SEARCH "machine learning" { title })
+               )
+
+      assert %Ichor.Node{rule: :where_clause, captures: %{cond: cond_node}} =
+               captures.where_clause
+
+      assert %Ichor.Node{rule: :comparison_ep1e, captures: search_captures} =
+               unwrap_comparison(cond_node)
+
+      assert %Ichor.Node{rule: :path, captures: %{head: "content"}} = search_captures.left
+      assert search_captures.right == ~s("machine learning")
+    end
+
+    test "composes with an ordinary core AND alongside it", %{grammar: g} do
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(
+                 g,
+                 ~s(SELECT articles WHERE category = "research" AND content SEARCH "ml" { title })
+               )
+
+      assert %Ichor.Node{rule: :where_clause, captures: %{cond: cond_node}} =
+               captures.where_clause
+
+      assert %Ichor.Node{rule: :disjunction, captures: %{left: conjunction}} = cond_node
+
+      assert %Ichor.Node{
+               rule: :conjunction,
+               captures: %{left: left_negation, right: [right_negation]}
+             } = conjunction
+
+      assert %Ichor.Node{rule: :negation, captures: %{expr: left_comparison}} = left_negation
+      assert %Ichor.Node{rule: :comparison, captures: _} = left_comparison
+
+      assert %Ichor.Node{rule: :negation, captures: %{expr: right_comparison}} = right_negation
+      assert %Ichor.Node{rule: :comparison_ep1e, captures: _} = right_comparison
+    end
+
+    test "still falls back to an ordinary comparison when the construct isn't used", %{
+      grammar: g
+    } do
+      assert %Ichor.Node{rule: :select, captures: captures} =
+               parse_select!(g, ~s(SELECT articles WHERE category = "research" { title }))
+
+      assert %Ichor.Node{rule: :where_clause, captures: %{cond: cond_node}} =
+               captures.where_clause
+
+      assert %Ichor.Node{rule: :comparison, captures: _} = unwrap_comparison(cond_node)
     end
   end
 

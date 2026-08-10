@@ -193,9 +193,12 @@ defmodule Scry.Core.Query.Escape do
   end
 
   @doc """
-  Escapes `ast` as a bare field path (`group_by:`/`order_by:`'s own
-  entries -- `Scry.Core.Query.group_by/2`/`order_by/2` expect
-  `[String.t()]`, not a wrapped `{:field, ...}` expr()).
+  Escapes `ast` as a bare field path (`group_by:`'s own entries --
+  `Scry.Core.Query.group_by/2` expects `[String.t()]`, not a wrapped
+  `{:field, ...}` expr()). `order_by:` used to be restricted the same
+  way; it now accepts a full `expr()` instead (see
+  `escape_order_by_entries/3` below), since lang_spec.md §8.5's own
+  `ORDER BY relevance() DESC` needs a call there, not just a field.
   """
   @spec escape_path(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
   def escape_path(ast, vars, _env), do: resolve_path!(ast, vars)
@@ -204,15 +207,21 @@ defmodule Scry.Core.Query.Escape do
   Escapes an `order_by:` keyword-list AST (`[asc: u.name, desc: u.age]`
   -- the same `asc:`/`desc:` shorthand `Scry.Core.Query.From`'s own
   `order_by:` clause and `over/2`'s own `order_by:` option both take)
-  into the quoted `[{path, :asc | :desc}]` list `Scry.Core.Query.
+  into the quoted `[{key, :asc | :desc}]` list `Scry.Core.Query.
   order_by/2` expects. Shared by both callers rather than duplicated.
+  Each `key` is escaped via `escape_expr/3`, the same as any other
+  expression position -- a bare field (`u.name`) becomes `{:field,
+  [...]}`, exactly what `Scry.Core.QueryOps`'s own key resolver already
+  handles identically to the plain-path shape every caller before this
+  widening produced; a call (`relevance()`, an arithmetic expression)
+  works the same way for free, no special-casing needed here.
   """
   @spec escape_order_by_entries(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
   def escape_order_by_entries(entries, vars, env) when is_list(entries) do
     Enum.map(entries, fn
-      {dir, path_ast} when dir in [:asc, :desc] ->
-        path = escape_path(path_ast, vars, env)
-        quote do: {unquote(path), unquote(dir)}
+      {dir, key_ast} when dir in [:asc, :desc] ->
+        key = escape_expr(key_ast, vars, env)
+        quote do: {unquote(key), unquote(dir)}
 
       other ->
         raise ArgumentError,

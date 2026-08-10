@@ -297,6 +297,49 @@ defmodule Scry.Core.ExecutorTest do
     assert {:error, {:unsupported_body_item, {:variant, _}}} = run(query)
   end
 
+  test "an unresolved {:variant, ...} predicate (EP1(e), e.g. SEARCH) hard-errors with a clear message, ungrouped path" do
+    query = %Query{
+      source: ["users"],
+      wheres: [{:variant, {:search, ["name"], "alice"}}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert_raise ArgumentError, ~r/unresolved.*variant.*predicate.*fully lower/s, fn ->
+      run(query)
+    end
+  end
+
+  test "an unresolved {:variant, ...} predicate also hard-errors nested inside AND/OR" do
+    query = %Query{
+      source: ["users"],
+      wheres: [{:and, {:cmp, :eq, ["status"], "active"}, {:variant, {:search, ["name"], "a"}}}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert_raise ArgumentError, ~r/unresolved.*variant.*predicate/s, fn -> run(query) end
+  end
+
+  test "an unresolved {:variant, ...} predicate hard-errors in HAVING too, grouped path" do
+    query = %Query{
+      source: ["customer_orders"],
+      group_bys: [["customer_id"]],
+      havings: [{:variant, {:search, ["id"], "1"}}],
+      select: [{:field, ["customer_id"]}]
+    }
+
+    assert_raise ArgumentError, ~r/unresolved.*variant.*predicate/s, fn -> run(query) end
+  end
+
+  test "an unresolved {:variant, ...} predicate in HAVING also hard-errors with no GROUP BY at all (the flat-aggregate path, aggregate_query?'s own group_bys-empty branch)" do
+    query = %Query{
+      source: ["customer_orders"],
+      havings: [{:variant, {:search, ["id"], "1"}}],
+      select: [{:computed, "total", {:call, "sum", [{:field, ["total"]}]}}]
+    }
+
+    assert_raise ArgumentError, ~r/unresolved.*variant.*predicate/s, fn -> run(query) end
+  end
+
   test "an unknown source propagates the adapter's own error" do
     query = %Query{source: ["nonexistent"], select: []}
 
@@ -411,6 +454,29 @@ defmodule Scry.Core.ExecutorTest do
     query = %Query{
       source: ["accounts"],
       order_bys: [{["score"], :asc}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["name"]) == ["B", "C", "A", "D"]
+  end
+
+  test "order_by's own key can be a full expr(), not just a bare field -- an arithmetic key" do
+    # Widget: 3 * 4 = 12, Gadget: 4 * 2 = 8 -- Widget sorts first descending.
+    query = %Query{
+      source: ["products"],
+      order_bys: [{{:arith, :mul, {:field, ["price"]}, {:field, ["cost"]}}, :desc}],
+      select: [{:field, ["name"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["name"]) == ["Widget", "Gadget"]
+  end
+
+  test "order_by's own key still accepts the explicit {:field, path} tag, not just a bare list" do
+    query = %Query{
+      source: ["accounts"],
+      order_bys: [{{:field, ["score"]}, :asc}],
       select: [{:field, ["name"]}]
     }
 

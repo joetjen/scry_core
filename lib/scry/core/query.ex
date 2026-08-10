@@ -65,6 +65,25 @@ defmodule Scry.Core.Query do
   is `t()` directly, not wrapped in its own tag -- already
   self-describing via its struct, unlike the other two shapes.
 
+  `predicate()`'s own `{:variant, term()}` is `body_item()`'s own
+  `{:variant, term()}` idiom's counterpart one level down, for core's
+  third extension point (EP1(e), `priv/grammar.aether`'s own
+  `comparison_ep1e`, lang_spec.md §2/§8.5's `SEARCH`) -- an infix
+  comparison-tier operator a kind's own fragment contributes, producing
+  a `predicate()` core has no way to evaluate on its own. Unlike
+  `select`'s own `:variant` (which only ever appears as a whole body
+  item, never nested inside another body item), this one can appear
+  *anywhere* an ordinary predicate can -- nested arbitrarily deep inside
+  `{:and, ...}`/`{:or, ...}`/`{:not, ...}`, in either `wheres` or
+  `havings` -- since `SEARCH` is an infix operator, syntactically
+  interchangeable with `=`/`>`/etc. wherever a comparison is legal. The
+  same `EngineBehaviour` contract that requires `query.variant` be
+  empty and every body item's own `:variant` resolved before `Scry.Core
+  .Executor.run/3,4` runs applies here too: a kind package contributing
+  here must walk its own query's *entire* `wheres`/`havings` tree and
+  fully lower every `{:variant, ...}` predicate leaf it finds, not just
+  check the top level.
+
   `predicate()`'s own `{:field, path}` (lang_spec.md §5.9: a
   comparison's right-hand side may be another field path, not just a
   literal) reuses the exact same tag `body_item()` uses above --
@@ -367,8 +386,7 @@ defmodule Scry.Core.Query do
           | {:distinct, expr()}
           | {:dot, base :: expr(), path :: [String.t()]}
           | {:window, call :: {:call, String.t(), [expr()]}, partition_by :: [[String.t()]],
-             order_bys :: [{[String.t()], :asc | :desc}],
-             frame :: {frame_bound(), frame_bound()} | nil}
+             order_bys :: [{expr(), :asc | :desc}], frame :: {frame_bound(), frame_bound()} | nil}
 
   @type predicate ::
           {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match,
@@ -388,6 +406,7 @@ defmodule Scry.Core.Query do
           | {:and, predicate(), predicate()}
           | {:or, predicate(), predicate()}
           | {:not, predicate()}
+          | {:variant, term()}
 
   @type body_item ::
           {:field, [String.t()]}
@@ -416,7 +435,7 @@ defmodule Scry.Core.Query do
           group_mode: :plain | :rollup | :cube,
           havings: [predicate()],
           distinct: boolean(),
-          order_bys: [{[String.t()], :asc | :desc}],
+          order_bys: [{expr(), :asc | :desc}],
           limit: non_neg_integer() | nil,
           offset: non_neg_integer() | nil,
           required: boolean(),
@@ -534,11 +553,15 @@ defmodule Scry.Core.Query do
 
   @doc """
   Sets (not accumulates) `query`'s own `order_bys` to `order_bys` --
-  `{path, direction}` pairs matching `t()`'s own type exactly, the same
+  `{key, direction}` pairs matching `t()`'s own type exactly, the same
   "one clause, several keys" shape `group_by/2` has, since `ORDER BY`
-  is a single clause with multiple keys too (lang_spec.md §5.2).
+  is a single clause with multiple keys too (lang_spec.md §5.2). `key`
+  is any `expr()` (a plain field path is `{:field, path}`, matching
+  `select/2`'s own body items and every other `expr()` position) --
+  not restricted to a bare field the way it once was, since lang_spec.md
+  §8.5's own `ORDER BY relevance() DESC` needs a call here too.
   """
-  @spec order_by(t(), [{[String.t()], :asc | :desc}]) :: t()
+  @spec order_by(t(), [{expr(), :asc | :desc}]) :: t()
   def order_by(%__MODULE__{} = query, order_bys) when is_list(order_bys),
     do: %{query | order_bys: order_bys}
 

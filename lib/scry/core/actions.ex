@@ -756,11 +756,15 @@ defmodule Scry.Core.Actions do
   # present, any case per @case_insensitive) -- see priv/grammar.aether's
   # own comment on `order_item` for why this is a value check, not
   # Map.has_key?/2, unlike every *rule*-shaped optional in this file.
-  def handle_rule(:order_item, %{field: field_cap, dir: dir_cap}, ctx) do
-    with {:ok, field, ctx} <- field_cap.eval.(ctx),
+  # `key` is a full `expr()` now (priv/grammar.aether's own `order_item`
+  # comment), not a bare field path -- `key_cap.eval.(ctx)` already
+  # returns the fully-tagged shape (`{:field, path}` for the common bare
+  # case, same as any other `expression`-derived position).
+  def handle_rule(:order_item, %{key: key_cap, dir: dir_cap}, ctx) do
+    with {:ok, key, ctx} <- key_cap.eval.(ctx),
          {:ok, dir_text, ctx} <- dir_cap.eval.(ctx) do
       direction = if String.downcase(dir_text) == "desc", do: :desc, else: :asc
-      {:ok, {field, direction}, ctx}
+      {:ok, {key, direction}, ctx}
     end
   end
 
