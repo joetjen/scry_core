@@ -1,5 +1,6 @@
 defmodule Scry.Core.ActionsTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Scry.Core.{CombinedQuery, Query, Rational}
 
@@ -45,6 +46,100 @@ defmodule Scry.Core.ActionsTest do
                select: [{:field, ["id"]}, {:field, ["total"]}]
              }
            ]
+  end
+
+  describe "body-item separator (lang_spec.md §6)" do
+    test "comma required when two items share a physical line", %{grammar: g} do
+      assert {:error, error} = run(g, "SELECT users { name email }")
+      assert error.message =~ "comma required"
+    end
+
+    test "a line break alone suffices when each item is on its own line", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, "SELECT users {\n  name\n  email\n}")
+      assert q.select == [{:field, ["name"]}, {:field, ["email"]}]
+    end
+
+    test "comma is still accepted (and required) on a single line", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, "SELECT users { name, email }")
+      assert q.select == [{:field, ["name"]}, {:field, ["email"]}]
+    end
+
+    test "a trailing comma is permitted before the closing brace", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, "SELECT users { name, email, }")
+      assert q.select == [{:field, ["name"]}, {:field, ["email"]}]
+
+      assert {:ok, %Query{} = q2} = run(g, "SELECT users {\n  name\n  email,\n}")
+      assert q2.select == [{:field, ["name"]}, {:field, ["email"]}]
+    end
+
+    test "comma and newline separators can mix freely across a longer list", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, "SELECT users { name,\n  email\n  age, status }")
+
+      assert q.select == [
+               {:field, ["name"]},
+               {:field, ["email"]},
+               {:field, ["age"]},
+               {:field, ["status"]}
+             ]
+    end
+
+    test "a `#` comment between two items counts as crossing a line, same as a bare newline", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} = run(g, "SELECT users { name #comment\n  email }")
+      assert q.select == [{:field, ["name"]}, {:field, ["email"]}]
+    end
+
+    # A field's own trailing `IF $param?` is a real, separate optional
+    # lookahead inside `body_item` itself -- found (while building this
+    # very feature) to unconditionally consume trivia while checking for
+    # an `IF` that isn't there, which would otherwise hide the newline
+    # from this check entirely. `Scry.Core.Grammar.BodyListSep`'s own
+    # moduledoc has the full story; this is the regression test for it.
+    test "a same-line-no-IF field still lets a following newline count as a separator", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} = run(g, "SELECT users {\n  name\n  email IF $inc\n}")
+      assert q.select == [{:field, ["name"]}, {:field, ["email"], {:param, "inc"}}]
+    end
+
+    test "a same-line-no-IF field with no separator at all is still rejected", %{grammar: g} do
+      assert {:error, error} = run(g, "SELECT users { name email IF $inc }")
+      assert error.message =~ "comma required"
+    end
+
+    test "nested SELECT body items are unaffected (already end in a required RBRACE)", %{
+      grammar: g
+    } do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 "SELECT users {\n  name\n  SELECT orders { id }\n}"
+               )
+
+      assert q.select == [
+               {:field, ["name"]},
+               %Query{source: ["orders"], select: [{:field, ["id"]}]}
+             ]
+    end
+
+    property "any valid mix of comma- and newline-separated fields parses to the same list, in order",
+             %{grammar: g} do
+      check all(
+              fields <- list_of(member_of(~w(a b c d e f)), min_length: 1, max_length: 8),
+              separators <-
+                list_of(member_of([", ", ",\n", "\n", " ,\n", ", "]), length: length(fields) - 1)
+            ) do
+        body_text =
+          [fields, separators ++ [""]]
+          |> Enum.zip()
+          |> Enum.map_join("", fn {field, sep} -> field <> sep end)
+
+        assert {:ok, %Query{} = q} = run(g, "SELECT users { #{body_text} }")
+        assert q.select == Enum.map(fields, &{:field, [&1]})
+      end
+    end
   end
 
   test "a where clause with a numeric comparison", %{grammar: g} do

@@ -703,10 +703,62 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  def handle_rule(:body_list, %{head: head_cap, tail: tail_caps}, ctx) do
+  def handle_rule(:body_list, %{head: head_cap, body_list_tail: tail_cap}, ctx) do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),
-         {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
+         {:ok, tail, ctx} <- tail_cap.eval.(ctx) do
       {:ok, [head | tail], ctx}
+    end
+  end
+
+  # `body_list_tail := (~body_list_sep tail:body_item ~body_list_tail)?`
+  # (priv/grammar.aether's own comment there has the full "why
+  # right-recursion" reasoning) -- an unmatched `?` group evaluates via
+  # `Ichor.Actions`' default fallback to a `%Ichor.Node{captures: %{}}`
+  # for an *empty* capture map (confirmed via scratch grammar, not
+  # assumed), never `nil`/`[]` directly, so this clause matches on the
+  # empty map itself, not on an absent key. The matched-something clause
+  # below evaluates `body_list_sep` purely to force its own
+  # same-line-vs-newline validation to run (its `:ok` value is
+  # otherwise discarded) -- `with`'s short-circuit is what turns a
+  # `body_list_sep` validation failure into this whole chain's error,
+  # exactly like every other error in this pipeline.
+  def handle_rule(:body_list_tail, captures, ctx) when map_size(captures) == 0,
+    do: {:ok, [], ctx}
+
+  def handle_rule(
+        :body_list_tail,
+        %{body_list_sep: sep_cap, tail: tail_cap, body_list_tail: rest_cap},
+        ctx
+      ) do
+    with {:ok, _sep, ctx} <- sep_cap.eval.(ctx),
+         {:ok, tail, ctx} <- tail_cap.eval.(ctx),
+         {:ok, rest, ctx} <- rest_cap.eval.(ctx) do
+      {:ok, [tail | rest], ctx}
+    end
+  end
+
+  # lang_spec §6: comma required when two items share a physical line,
+  # optional (a line break suffices) when each is on its own line.
+  # `status` is `Scry.Core.Grammar.BodyListSep.match/4`'s own
+  # classification ("ok"/"missing_comma") of a forward+backward token
+  # stream scan (that module's own moduledoc has the full "why not
+  # ordinary grammar composition" story) -- this handler's only job is
+  # turning that into a real `{:error, ...}` when the answer was no.
+  # `Ichor.Error.new/1`'s `stage: :action` is the intended tag for a
+  # validation failure raised from inside a `handle_rule` callback
+  # rather than from parsing/lexing itself.
+  def handle_rule(:body_list_sep, %{status: status_cap}, ctx) do
+    with {:ok, status, ctx} <- status_cap.eval.(ctx) do
+      if status == "ok" do
+        {:ok, :ok, ctx}
+      else
+        {:error,
+         Ichor.Error.new(
+           message:
+             "comma required between two body items on the same physical line (lang_spec.md §6)",
+           stage: :action
+         )}
+      end
     end
   end
 

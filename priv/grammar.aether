@@ -411,13 +411,82 @@ NEVER := []
 ;
 ; The comma-optional-on-newline half of `body_list`'s own gap (lang_spec
 ; §6: "optional -- a line break suffices -- when each item is on its own
-; line") is *not* fixed here -- newline is currently just another
-; character inside `TRIVIA`'s own `SPACE`, indistinguishable from a
-; plain space by the time any rule sees it skipped; making it
-; significant needs a real token-level restructuring (a dedicated
-; `NEWLINE` token no longer folded into skip-trivia, threaded through
-; every separator position that should accept it), not a one-line
-; addition the way this fix is.
+; line") *is* fixed here, but not the way the earlier version of this
+; comment predicted. A dedicated `NEWLINE` token pulled out of skip-trivia
+; turns out to be a dead end: `Grammar.VM.Tokenizer`'s own tokenizer is a
+; single, whole-file, maximal-munch pass over *every* declared token,
+; context-free (confirmed by reading it directly, not assumed) -- ties
+; broken by declaration order, longest match wins otherwise. Any new
+; token whose character class overlaps `SPACE`/`COMMA` (a `NEWLINE`
+; token, or a `@native` lexeme recognizing "trivia, optional comma, more
+; trivia" in one bite) inevitably ties or competes with `SPACE`/`COMMA`
+; at *every* position those already appear, everywhere in the whole
+; grammar, not just here -- corrupting ordinary comma-separated
+; constructs (call args, `GROUP BY a, b`) and ordinary multi-line
+; skip-splicing far outside `body_list`. Confirmed the hard way (a
+; scratch grammar with a competing `ITEM_SEP` token parsed `{x, x}`
+; fine but rejected `{x,x}` and `{x\nx}` -- ties going to whichever
+; token was declared first) before abandoning that approach.
+;
+; `body_list_tail`'s own repetition uses two mechanisms already proven
+; safe elsewhere in this file: right-recursion, and `~` (Aether's
+; "suppress `@skip` splicing before this term" operator,
+; `guides/aether/AETHER.md`'s own operator table -- unused anywhere else
+; in this file until now). `~` only accepts a bare, unquantified,
+; uncaptured token/rule reference (confirmed empirically: `~(a b)*` and
+; `~name:a` both raise "~ may only prefix a bare token or rule name,
+; with no capture and no quantifier" at grammar-parse time) -- which is
+; exactly why `body_list_tail` below is itself a bare, right-recursive
+; rule (no `*`/`+` at any `~`-suppressed reference site) rather than the
+; more obvious `(sep tail:body_item)*` shape. Without `~`, the
+; auto-spliced `Star(TRIVIA)` ordinary rule composition inserts between
+; every sequence element would silently consume whatever trivia sits
+; between two items before `body_list_sep` (below) ever got a chance to
+; inspect it.
+;
+; That's necessary, but on its own turned out *not* to be sufficient --
+; found by testing this shape against this file's own real grammar, not
+; just the scratch grammar that first validated `~`+right-recursion in
+; isolation. `body_item` itself (concretely: `field_body_item`'s own
+; `field:path if_clause?`, and `path`'s own `(DOT tail:field_name)*`)
+; has *its own* trailing, non-suppressed optional/repeated elements
+; checking for an `IF`/a dotted continuation that usually isn't there.
+; Ordinary `@skip` splicing before a non-first Seq element runs
+; unconditionally, before the following `Opt`/`Star` even gets a chance
+; to succeed or fail -- so a failed `if_clause`/dot-chain attempt still
+; leaves whatever trivia it spliced past permanently gone, even though
+; the attempt itself matched nothing. This is invisible to every other
+; construct in this file (that trivia was headed for the skip-token
+; either way) but means `body_list_sep`, entered right after `body_item`
+; returns, can already be looking at a position *past* the very
+; newline it needs to see -- confirmed by tracing the compiled output
+; for exactly this case, not guessed. Making every such trailing
+; lookahead in `body_item`'s own (large, recursive, EP1(b)/(c)/(d)-open)
+; transitive grammar leak-proof one at a time isn't a one-line fix and
+; isn't this round's scope.
+;
+; `body_list_sep` sidesteps the leak entirely instead of chasing it:
+; it's rule-position `@native` (`guides/aether/AETHER.md`'s own
+; `@native`/`@hint` section, "at rule position" -- distinct from the
+; token-position `@native` `BLOCK_COMMENT` already uses above), handed
+; the same compiled token `stream`/`pos` any ordinary rule matcher works
+; over. `Scry.Core.Grammar.BodyListSep.match/4` reads `stream` directly
+; -- scanning *forward* from `pos` for the ordinary "no leak happened"
+; case (a `TRIVIA`/`COMMA`/`TRIVIA` run still sits right there,
+; unconsumed) and *backward* from wherever that leaves it for the
+; leaked case (whatever `body_item` already spliced past is still a
+; real, distinct token in the stream -- just one `pos` has already moved
+; beyond -- so looking behind recovers it without needing `body_item`'s
+; own internals to cooperate at all). This is genuinely robust against
+; the leak, unlike composing ordinary suppressed rule references, since
+; it reads the stream's own ground truth rather than trusting grammar
+; composition to have preserved it. Confirmed via scratch grammar
+; against both `Grammar.VM` (interpreted) and the native/compiled
+; backend (`use Ichor`) before landing this shape, including a
+; deliberately reconstructed leak (a mock body-item shape with its own
+; bare trailing `?`) to prove the forward+backward scan actually
+; survives it, not just the non-leaking case the first, insufficient
+; design happened to pass.
 ; `fragment_decl*` before `with_decl*` -- a fixed relative order between
 ; the two declaration kinds, not something lang_spec mandates one way or
 ; the other (its own §9 never shows them mixed). Simpler than a unified
@@ -1167,4 +1236,43 @@ body_item_ep1 := NEVER
 ; comment used to also describe -- trailing trivia after a top-level
 ; query's own final `RBRACE` not being consumed -- is fixed now, by
 ; `document`'s own trailing `TRIVIA?`.
-body_list := head:body_item (COMMA tail:body_item)*
+; Trailing `COMMA?` -- lang_spec §6's own "trailing comma permitted",
+; deliberately handled with plain default splicing (unlike the
+; mid-list separator below) since there's no same-line-vs-newline
+; distinction to make once the list is already ending: a trailing comma
+; is always optional, full stop, whether or not a newline follows it.
+body_list := head:body_item ~body_list_tail trailing_comma:COMMA?
+
+; Right-recursive on purpose (`document`'s own nearby comment has the
+; full reasoning for why this shape, not a `(body_list_sep
+; tail:body_item)*` quantified group, is what makes `~`-suppression
+; possible at all here). `~body_list_sep` and the recursive `~
+; body_list_tail` are both bare, unquantified, uncaptured references
+; (auto-captured under their own rule name regardless -- Aether's own
+; "a bare reference to a named token or rule is implicitly captured
+; under its own name" rule, unaffected by `~`), satisfying `~`'s own
+; "bare reference only" restriction while still handing
+; `Scry.Core.Actions` a real value to walk. `Scry.Core.Actions`' own
+; `body_list_tail` handler is what turns this right-recursive chain
+; back into a flat list, and what forces `body_list_sep`'s own
+; same-line validation to actually run (`body_list_sep`'s capture is a
+; bare `:ok`, otherwise unused, evaluated purely for that
+; side effect -- documented on the handler itself).
+body_list_tail := (~body_list_sep tail:body_item ~body_list_tail)?
+
+; Comma required when two items share a physical line, optional (a line
+; break suffices) when each is on its own line, lang_spec §6's own
+; wording -- validated in `Scry.Core.Actions`' own `body_list_sep`
+; handler, not expressible as a hard grammar-level rejection (a
+; same-line, no-comma gap has to parse structurally, the same as every
+; other shape here, so the error can carry a clear message instead of
+; the generic, positionless "input does not match" a raw grammar
+; failure would give). Always succeeds, zero-width or not (`@hint
+; (nullable: true)`) -- `Scry.Core.Grammar.BodyListSep.match/4`'s own
+; moduledoc has the full scan design; the *only* thing it hands back is
+; a `status` of `"ok"` or `"missing_comma"`, resolved into `:ok` or a
+; real `{:error, ...}` by `Scry.Core.Actions`' own handler, the same
+; "grammar overmatches, an Actions callback decides validity" split
+; `BLOCK_COMMENT` and the JS string-interpolation example in Ichor's own
+; guides both already use.
+body_list_sep := @native("Scry.Core.Grammar.BodyListSep", "match") @hint(nullable: true)

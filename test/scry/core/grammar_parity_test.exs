@@ -32,7 +32,13 @@ defmodule Scry.Core.GrammarParityTest do
     {"block comment (via a commented-out WITH decl) before a real query",
      ";with x = SELECT y { z }\nSELECT users { name }"},
     {"block comment containing braces in a nested body",
-     ";with x = SELECT y { z, SELECT w { v } }\nSELECT users { name }"}
+     ";with x = SELECT y { z, SELECT w { v } }\nSELECT users { name }"},
+    {"body items separated by a bare newline, no comma", "SELECT users {\n  name\n  email\n}"},
+    {"body items on the same line with no comma -- both backends must reject this identically",
+     "SELECT users { name email }"},
+    {"a trailing comma before the closing brace", "SELECT users { name, email, }"},
+    {"an IF-clause field followed by a newline separator (the leak-regression case)",
+     "SELECT users {\n  name\n  email IF $inc\n}"}
   ]
 
   for {label, query} <- @queries do

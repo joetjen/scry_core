@@ -265,9 +265,14 @@ defmodule Scry.Core.GrammarComposeTest do
                parse_select!(g, ~s(SELECT users { name, via knows { id } }))
 
       assert %Ichor.Node{rule: :body_list, captures: body} = captures.body
-      # `tail` sits under `*` (a repeated capture), so it's always a
-      # list -- same rule already established for path's own `tail`.
-      assert [%Ichor.Node{rule: :body_item_ep1, captures: via}] = body.tail
+      # `body_list_tail` is right-recursive now (priv/grammar.aether's
+      # own comment on it has the full reasoning), so the second item
+      # sits one level down, under its own `tail` key -- not a flat
+      # list the way `path`'s own `tail` still is.
+      assert %Ichor.Node{rule: :body_list_tail, captures: %{tail: via_item}} =
+               body.body_list_tail
+
+      assert %Ichor.Node{rule: :body_item_ep1, captures: via} = via_item
       assert %Ichor.Node{rule: :path, captures: %{head: "knows"}} = via.edge
     end
 
