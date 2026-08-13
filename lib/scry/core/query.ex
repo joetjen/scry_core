@@ -41,6 +41,27 @@ defmodule Scry.Core.Query do
   `{:call, ...}` already have -- nothing stops a future construct from
   reading or writing it too.
 
+  `goal_args` is the same kind of extension slot as `time_field` --
+  a genuine top-level field, not `variant`, defaulting to `nil` with
+  zero behavior change for every query that never sets it. Text
+  `SELECT <name>(<args>) { ... }` (a call-shaped source, lang_spec.md
+  §8.4's Datalog/Prolog-flavored `logic` variant: `SELECT ancestor(X,
+  "bob") WHERE age(X) > 30 { X }`) parses `<name>` into the ordinary
+  `source` field exactly as any other bare source name would, and
+  `(<args>)` into this field -- reusing `call`'s own `call_args`
+  production verbatim, so an argument is any ordinary `expr()`, with no
+  new grammar for "this one is a logic variable" (`scry_logic`'s own
+  executor decides that at *execution* time: a bare, unqualified
+  `{:field, [name]}` argument is a variable keyed by `name`, repeated
+  names within one query unify, per lang_spec.md §8.4's own "every
+  Scry constant already carries a distinct marker" reasoning -- nothing
+  else needs to). Deliberately a plain core grammar addition, not
+  gated to `logic` at the grammar level -- `Scry.Core.TypeCheck`'s own
+  compile-time category check is what rejects a non-nil `goal_args`
+  against a non-`logic` source, the same "grammar answers whether a
+  construct exists, the category check answers whether it's legal
+  here" split lang_spec.md §2 already draws for `via`/`last`/`deep`.
+
   `new/1` through `select/2`, below the struct definition, are impl_spec
   .md §7's own Layer 1 -- the composable functional API, "the one that
   matters most for dynamic query building" per that section's own
@@ -443,7 +464,8 @@ defmodule Scry.Core.Query do
           variant: %{optional(atom()) => term()},
           with_bindings: %{optional(String.t()) => t()},
           type_decls: %{optional(String.t()) => type_decl()},
-          time_field: [String.t()] | nil
+          time_field: [String.t()] | nil,
+          goal_args: [expr()] | nil
         }
 
   defstruct source: nil,
@@ -460,7 +482,8 @@ defmodule Scry.Core.Query do
             variant: %{},
             with_bindings: %{},
             type_decls: %{},
-            time_field: nil
+            time_field: nil,
+            goal_args: nil
 
   @doc """
   Starts a new, empty query against `source` -- impl_spec.md §7's

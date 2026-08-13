@@ -175,6 +175,7 @@ defmodule Scry.Core.Actions do
   @impl true
   def handle_rule(:select, captures, ctx) do
     with {:ok, source, ctx} <- captures.source.eval.(ctx),
+         {:ok, goal_args, ctx} <- maybe_eval(captures, :goal_args, ctx),
          {:ok, ep1a, ctx} <- maybe_eval(captures, :select_ep1a, ctx),
          {:ok, where_pred, ctx} <- maybe_eval(captures, :where_clause, ctx),
          {:ok, group_by, ctx} <- maybe_eval(captures, :group_by_clause, ctx),
@@ -203,8 +204,24 @@ defmodule Scry.Core.Actions do
          offset: offset,
          required: required != :absent,
          select: select,
-         variant: variant
+         variant: variant,
+         goal_args: absent_to(nil, goal_args)
        }, ctx}
+    end
+  end
+
+  # `goal_args := LPAREN call_args? RPAREN` (lang_spec §8.4's call-shaped
+  # `logic` source) -- bare `call_args?`, not `args:call_args?`, and
+  # `captures.call_args` read the same way `call`'s own handler already
+  # does, for the identical reason `priv/grammar.aether`'s own comment
+  # on `select_ep1a`/`where_clause` gives: a *renamed* optional rule
+  # reference resolves via raw text, not real evaluation. Zero-arity
+  # `SELECT ancestor() { ... }` still resolves to `[]`, not `:absent`,
+  # matching `call`'s own identical "present but empty" vs "absent
+  # entirely" distinction.
+  def handle_rule(:goal_args, captures, ctx) do
+    with {:ok, args, ctx} <- maybe_eval(captures, :call_args, ctx) do
+      {:ok, absent_to([], args), ctx}
     end
   end
 

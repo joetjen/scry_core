@@ -63,6 +63,49 @@ defmodule Scry.Core.TypeCheckTest do
 
       assert :ok = TypeCheck.check(query, type_decls)
     end
+
+    test "goal_args (a call-shaped source, lang_spec §8.4) against a non-logic kind is a hard error" do
+      type_decls = %{"ancestor" => %{name: "ancestor", kind: "graph", fields: []}}
+      query = %Query{source: ["ancestor"], select: [], goal_args: [{:field, ["X"]}, "bob"]}
+
+      assert {:error, {:kind_category_mismatch, "ancestor", "graph", [:goal_args]}} =
+               TypeCheck.check(query, type_decls)
+    end
+
+    test "goal_args against a degenerate kind (relational) is also a hard error" do
+      type_decls = %{"ancestor" => %{name: "ancestor", kind: "relational", fields: []}}
+      query = %Query{source: ["ancestor"], select: [], goal_args: []}
+
+      assert {:error, {:kind_category_mismatch, "ancestor", "relational", [:goal_args]}} =
+               TypeCheck.check(query, type_decls)
+    end
+
+    test "goal_args against a logic-tagged source is fine" do
+      type_decls = %{"ancestor" => %{name: "ancestor", kind: "logic", fields: []}}
+      query = %Query{source: ["ancestor"], select: [], goal_args: [{:field, ["X"]}, "bob"]}
+
+      assert :ok = TypeCheck.check(query, type_decls)
+    end
+
+    test "goal_args with no declared kind at all is fine (unregistered source stays silent)" do
+      type_decls = %{"ancestor" => %{name: "ancestor", kind: nil, fields: []}}
+      query = %Query{source: ["ancestor"], select: [], goal_args: []}
+
+      assert :ok = TypeCheck.check(query, type_decls)
+    end
+
+    test "goal_args with no matching TYPE at all is fine" do
+      query = %Query{source: ["ancestor"], select: [], goal_args: []}
+
+      assert :ok = TypeCheck.check(query, %{})
+    end
+
+    test "a nil goal_args (an ordinary query) against any kind is unaffected" do
+      type_decls = %{"users" => %{name: "users", kind: "graph", fields: []}}
+      query = %Query{source: ["users"], select: []}
+
+      assert :ok = TypeCheck.check(query, type_decls)
+    end
   end
 
   describe "2. declared-field-type / union comparison check" do

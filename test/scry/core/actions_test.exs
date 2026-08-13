@@ -48,6 +48,33 @@ defmodule Scry.Core.ActionsTest do
            ]
   end
 
+  describe "goal_args -- a call-shaped source (lang_spec.md §8.4)" do
+    test "an ordinary SELECT leaves goal_args nil", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, "SELECT users { name }")
+      assert q.goal_args == nil
+    end
+
+    test "the lang_spec.md §8.4 worked example", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, "SELECT ancestor(X, \"bob\") WHERE age(X) > 30 { X }")
+
+      assert q.source == ["ancestor"]
+      assert q.goal_args == [{:field, ["X"]}, "bob"]
+      assert q.wheres == [{:cmp, :gt, {:call, "age", [{:field, ["X"]}]}, 30}]
+      assert q.select == [{:field, ["X"]}]
+    end
+
+    test "a zero-arity goal resolves to an empty list, not nil", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, "SELECT flag() { ok }")
+      assert q.goal_args == []
+    end
+
+    test "a single-argument goal", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, "SELECT even(2) { ok }")
+      assert q.goal_args == [2]
+    end
+  end
+
   describe "body-item separator (lang_spec.md §6)" do
     test "comma required when two items share a physical line", %{grammar: g} do
       assert {:error, error} = run(g, "SELECT users { name email }")

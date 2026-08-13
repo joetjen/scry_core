@@ -704,9 +704,35 @@ list_type := LBRACK inner:type_expr RBRACK
 ; Last in the chain for that reason (nothing before this query's own
 ; closing `}` can know its final row count), not because it's "evaluated
 ; last" as a step of its own the way the other six are.
-select := KW_SELECT source:path select_ep1a? where_clause? group_by_clause?
-          having_clause? distinct_clause? order_by_clause? limit_clause?
-          required_clause? LBRACE body:body_list RBRACE
+; Bare `goal_args?`, not `goal_args:goal_call_args?` -- found empirically
+; (`Scry.Core.Actions`' own `handle_rule(:goal_args, ...)` never even
+; ran under the renamed-capture form): an *explicitly renamed* optional
+; capture (`name:rule?`, a different name than the rule itself) resolves
+; via raw source-text concatenation of whatever the optional matched
+; (the same convention `trailing_comma:COMMA?` above already relies on,
+; deliberately, for a plain presence check with no structure to build) --
+; not by evaluating the rule's own `handle_rule` and threading its real
+; result through. A *bare* `name?` (quantified with no rename at all)
+; auto-captures under its own rule name and *does* dispatch to
+; `handle_rule` normally, genuinely absent (no key) when unmatched --
+; exactly what a structured value like this one needs, so the rule
+; itself is just named `goal_args` directly, referenced bare.
+select := KW_SELECT source:path goal_args? select_ep1a?
+          where_clause? group_by_clause? having_clause? distinct_clause?
+          order_by_clause? limit_clause? required_clause?
+          LBRACE body:body_list RBRACE
+
+; lang_spec §8.4's `logic` variant, a call-shaped source (`SELECT
+; ancestor(X, "bob") WHERE ...`). Plain core grammar, not gated to
+; `logic` here -- `Scry.Core.Query`'s own moduledoc (the `goal_args`
+; field) has the full "grammar exists, category check decides legality"
+; reasoning. Reuses `call`'s own `call_args` production verbatim rather
+; than inventing a parallel one -- an argument is any ordinary `expr()`,
+; including a bare field reference, which is exactly what a logic
+; variable needs to parse as (no new "this is a variable" syntax --
+; `scry_logic`'s own executor decides that at execution time, per
+; `Scry.Core.Query`'s own comment).
+goal_args := LPAREN call_args? RPAREN
 
 ; core's EP1(a) header-modifier extension point (lang_spec §2, §5.2).
 ; Unlike the language spec's own text, this is *not* "exactly one kind

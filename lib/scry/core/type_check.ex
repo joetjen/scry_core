@@ -136,6 +136,21 @@ defmodule Scry.Core.TypeCheck do
     {:error, {:kind_category_mismatch, source_name, kind, Map.keys(variant)}}
   end
 
+  # `goal_args` (a call-shaped source, lang_spec §8.4's `logic` variant)
+  # is plain core grammar, not gated to `logic` at parse time at all
+  # (`Scry.Core.Query`'s own moduledoc has the "grammar exists, category
+  # check decides legality" reasoning) -- this is where that legality
+  # actually gets enforced, the same "degenerate kind + non-empty
+  # variant" shape as the clause above, just keyed off a different
+  # field. Only checked when a `TYPE` declares a *real, non-nil* `kind`
+  # -- `kind: nil` (declared with no `KIND`), or no matching `TYPE` at
+  # all, stays silent, the same leniency every other check here already
+  # has for an unregistered/untyped source.
+  defp category_check(%Query{goal_args: goal_args}, %{kind: kind}, source_name)
+       when not is_nil(goal_args) and not is_nil(kind) and kind != "logic" do
+    {:error, {:kind_category_mismatch, source_name, kind, [:goal_args]}}
+  end
+
   defp category_check(_query, _type_decl, _source_name), do: :ok
 
   # ---- 2. Declared-field-type / union comparison check ---------------------
