@@ -186,6 +186,62 @@ defmodule Scry.Core.QueryOps do
     run_document(conn, query_or_combined, params, engine_module, query_or_combined.with_bindings)
   end
 
+  @doc """
+  Resolves one nested-`SELECT` body item (`nested`, already known to be
+  a `%Scry.Core.Query{}`) against `outer_row`, correlating any
+  `{:field, [own_name, field]}` reference in its own `wheres` to
+  `outer_row`'s own value for `field` -- the identical correlation
+  `run_document/4`'s own internal `expand_row/7` already performs for
+  an ordinary `Scry.Core.EngineBehaviour`-based engine, exposed here as
+  a standalone, reusable primitive.
+
+  **Why this exists**: `run_flat/3` is explicitly "flat" -- this
+  module's own moduledoc states it operates only "over `rows` already
+  in hand," never resolving a nested `%Scry.Core.Query{}` body item at
+  all (confirmed the hard way, not assumed: `Scry.Core.QueryOps.
+  project_item/3` genuinely has no clause for a bare `%Query{}`, a real
+  `FunctionClauseError` if one ever reaches it). A kind package whose
+  own executor bypasses `EngineBehaviour` entirely (`scry_document`/
+  `scry_graph`, needing the *whole* document/graph space, not one
+  already-resolved source) has no way to reach `run_document/4`'s own
+  whole-query orchestration either, since that function fetches every
+  flat leaf via `engine_module.execute/3` -- a contract neither
+  package's own bespoke `conn` implements. This function factors out
+  just the correlation-rewrite step `run_document/4` already has
+  (`rewrite_correlation/3`, this module's own private helper) so such a
+  package can resolve a nested `SELECT` sibling of its own pseudo-field
+  body items correctly, without duplicating correlation semantics
+  (`AND`/`OR`/`NOT`/`IN` nesting included) independently.
+
+  `fetch_fn` is how the caller actually runs the (correlation-rewritten)
+  query against its own backend once rewritten -- typically `&__MODULE__.
+  run(&1, conn, &2)`, recursing back into the *caller's own* top-level
+  entry point (so a nested `SELECT` can itself contain another nested
+  `SELECT`, or the caller's own pseudo-fields, fully recursively, for
+  free) rather than a new, parallel resolution path.
+  """
+  @spec resolve_correlated_nested(
+          Query.t(),
+          EngineBehaviour.row(),
+          String.t(),
+          params(),
+          (Query.t(), params() -> {:ok, Enumerable.t()} | {:error, term()})
+        ) :: {:ok, [EngineBehaviour.row()]} | {:error, term()}
+  def resolve_correlated_nested(
+        %Query{wheres: wheres} = nested,
+        outer_row,
+        own_name,
+        params,
+        fetch_fn
+      ) do
+    {rewritten_wheres, extra_params} = rewrite_correlation(wheres, own_name, outer_row)
+    rewritten = %{nested | wheres: rewritten_wheres}
+
+    with {:ok, rows} <- fetch_fn.(rewritten, Map.merge(params, extra_params)) do
+      {:ok, Enum.map(Enum.to_list(rows), &to_plain_row/1)}
+    end
+  end
+
   defp run_document(
          conn,
          %CombinedQuery{op: op, left: left, right: right},

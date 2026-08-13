@@ -709,6 +709,75 @@ defmodule Scry.Core.ExecutorTest do
     assert_raise ArgumentError, ~r/null-safety/, fn -> run(query) end
   end
 
+  describe "resolve_correlated_nested/5 -- the standalone correlation primitive" do
+    alias Scry.Core.QueryOps
+
+    test "correlates and resolves a nested SELECT against one outer row" do
+      nested = %Query{
+        source: ["customer_orders"],
+        wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      outer_row = %{"id" => 1, "name" => "Alice"}
+      fetch_fn = fn q, p -> QueryOps.run_flat(@customer_orders, q, p) end
+
+      assert {:ok, rows} =
+               QueryOps.resolve_correlated_nested(nested, outer_row, "customers", %{}, fetch_fn)
+
+      assert rows == [%{"id" => 100}, %{"id" => 101}]
+    end
+
+    test "a different outer row correlates to a different result" do
+      nested = %Query{
+        source: ["customer_orders"],
+        wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      outer_row = %{"id" => 2, "name" => "Bob"}
+      fetch_fn = fn q, p -> QueryOps.run_flat(@customer_orders, q, p) end
+
+      assert {:ok, rows} =
+               QueryOps.resolve_correlated_nested(nested, outer_row, "customers", %{}, fetch_fn)
+
+      assert rows == []
+    end
+
+    test "fetch_fn receives the rewritten query, correlation resolved to a real param" do
+      nested = %Query{
+        source: ["customer_orders"],
+        wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      outer_row = %{"id" => 3}
+
+      fetch_fn = fn q, _p ->
+        assert [{:cmp, :eq, ["customer_id"], {:param, _}}] = q.wheres
+        {:ok, []}
+      end
+
+      assert {:ok, []} =
+               QueryOps.resolve_correlated_nested(nested, outer_row, "customers", %{}, fetch_fn)
+    end
+
+    test "this is the exact primitive a kind package bypassing EngineBehaviour needs -- run_flat/3 alone can't do it" do
+      nested = %Query{
+        source: ["customer_orders"],
+        wheres: [{:cmp, :eq, ["customer_id"], {:field, ["customers", "id"]}}],
+        select: [{:field, ["id"]}]
+      }
+
+      shell = %Query{source: ["customers"], select: [{:field, ["name"]}, nested]}
+
+      assert_raise FunctionClauseError, fn ->
+        {:ok, rows} = QueryOps.run_flat(@customers, shell, %{})
+        Enum.to_list(rows)
+      end
+    end
+  end
+
   test "an external parameter is resolved against the params map at execution time" do
     query = %Query{
       source: ["users"],
