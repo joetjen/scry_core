@@ -570,6 +570,11 @@ defmodule Scry.Core.QueryOps do
   defp expr_has_call?({:arith, _op, l, r}),
     do: expr_has_call?(l) or expr_has_call?(r)
 
+  defp expr_has_call?({:bitwise, _op, l, r}),
+    do: expr_has_call?(l) or expr_has_call?(r)
+
+  defp expr_has_call?({:unary, _op, expr}), do: expr_has_call?(expr)
+
   defp expr_has_call?({:when, clauses, else_expr}) do
     Enum.any?(clauses, fn {_predicate, expr} -> expr_has_call?(expr) end) or
       expr_has_call?(else_expr)
@@ -1303,6 +1308,11 @@ defmodule Scry.Core.QueryOps do
   defp expr_has_aggregate_call?({:arith, _op, l, r}),
     do: expr_has_aggregate_call?(l) or expr_has_aggregate_call?(r)
 
+  defp expr_has_aggregate_call?({:bitwise, _op, l, r}),
+    do: expr_has_aggregate_call?(l) or expr_has_aggregate_call?(r)
+
+  defp expr_has_aggregate_call?({:unary, _op, expr}), do: expr_has_aggregate_call?(expr)
+
   defp expr_has_aggregate_call?({:when, clauses, else_expr}) do
     Enum.any?(clauses, fn {predicate, expr} ->
       predicate_has_aggregate_call?(predicate) or expr_has_aggregate_call?(expr)
@@ -1511,6 +1521,16 @@ defmodule Scry.Core.QueryOps do
     arith(op, left, right)
   end
 
+  defp resolve_rhs({:bitwise, op, left_expr, right_expr}, row, scope, params) do
+    left = resolve_rhs(left_expr, row, scope, params)
+    right = resolve_rhs(right_expr, row, scope, params)
+    bitwise(op, left, right)
+  end
+
+  defp resolve_rhs({:unary, op, expr}, row, scope, params) do
+    unary(op, resolve_rhs(expr, row, scope, params))
+  end
+
   defp resolve_rhs({:when, clauses, else_expr}, row, scope, params) do
     case Enum.find(clauses, fn {predicate, _then_expr} ->
            eval_predicate(predicate, row, scope, params)
@@ -1545,6 +1565,36 @@ defmodule Scry.Core.QueryOps do
   defp arith(:mul, a, b), do: Rational.mul(a, b)
   defp arith(:div, a, b), do: Rational.div(a, b)
   defp arith(:pow, a, b), do: Rational.pow(a, b)
+
+  # lang_spec §5.10's own bitwise AND/OR -- integer-only, unlike
+  # `arith/3` just above: `Scry.Core.Rational`'s own numeric tower has
+  # no bitwise closure at all (a bitwise operation on a genuine
+  # fraction, or on a float, has no defined meaning), so an operand
+  # that isn't already a plain Elixir `integer()` (the exact-rational
+  # tower's own collapse-to-integer form, `Rational`'s own moduledoc)
+  # is a real, honest runtime error, the same "hard error, not a silent
+  # wrong answer" posture null-safety (§7) already takes elsewhere in
+  # this module.
+  defp bitwise(:band, a, b) when is_integer(a) and is_integer(b), do: Bitwise.band(a, b)
+  defp bitwise(:bor, a, b) when is_integer(a) and is_integer(b), do: Bitwise.bor(a, b)
+
+  defp bitwise(op, a, b) do
+    raise ArgumentError,
+          "bitwise #{op} requires two integer operands, got #{inspect(a)} and #{inspect(b)}"
+  end
+
+  # Unary minus/unary bitwise-NOT (lang_spec §5's own precedence-table
+  # tier 1). `:neg` closes over the same numeric tower `arith/3`'s own
+  # `:sub` already does (`Rational.sub(0, a)` -- there's no dedicated
+  # `Rational.negate/1`, and building one just to skip one subtraction
+  # isn't worth a new public function); `:bnot`, like `bitwise/3` above,
+  # is integer-only.
+  defp unary(:neg, a), do: Rational.sub(0, a)
+  defp unary(:bnot, a) when is_integer(a), do: Bitwise.bnot(a)
+
+  defp unary(:bnot, a) do
+    raise ArgumentError, "bitwise ! requires an integer operand, got #{inspect(a)}"
+  end
 
   # ---- GROUP BY / HAVING / aggregate-function evaluation (eager path) ----
 
@@ -1651,6 +1701,22 @@ defmodule Scry.Core.QueryOps do
     left = resolve_group_rhs(left_expr, member_rows, scope, params, time_field)
     right = resolve_group_rhs(right_expr, member_rows, scope, params, time_field)
     arith(op, left, right)
+  end
+
+  defp resolve_group_rhs(
+         {:bitwise, op, left_expr, right_expr},
+         member_rows,
+         scope,
+         params,
+         time_field
+       ) do
+    left = resolve_group_rhs(left_expr, member_rows, scope, params, time_field)
+    right = resolve_group_rhs(right_expr, member_rows, scope, params, time_field)
+    bitwise(op, left, right)
+  end
+
+  defp resolve_group_rhs({:unary, op, expr}, member_rows, scope, params, time_field) do
+    unary(op, resolve_group_rhs(expr, member_rows, scope, params, time_field))
   end
 
   defp resolve_group_rhs({:when, clauses, else_expr}, member_rows, scope, params, time_field) do
@@ -2059,6 +2125,17 @@ defmodule Scry.Core.QueryOps do
     {left, acc} = rewrite_expr(left, acc)
     {right, acc} = rewrite_expr(right, acc)
     {{:arith, op, left, right}, acc}
+  end
+
+  defp rewrite_expr({:bitwise, op, left, right}, acc) do
+    {left, acc} = rewrite_expr(left, acc)
+    {right, acc} = rewrite_expr(right, acc)
+    {{:bitwise, op, left, right}, acc}
+  end
+
+  defp rewrite_expr({:unary, op, expr}, acc) do
+    {expr, acc} = rewrite_expr(expr, acc)
+    {{:unary, op, expr}, acc}
   end
 
   defp rewrite_expr({:when, clauses, else_expr}, acc) do

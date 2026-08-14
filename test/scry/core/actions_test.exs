@@ -763,6 +763,69 @@ line two""" { name }))
     assert q.select == [{:computed, "x", {:arith, :pow, 2, {:arith, :pow, 3, 2}}}]
   end
 
+  test "bitwise & and | parse, lang_spec §5.10", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: flags & mask }))
+
+    assert q.select == [
+             {:computed, "x", {:bitwise, :band, {:field, ["flags"]}, {:field, ["mask"]}}}
+           ]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT t { x: flags | mask }))
+
+    assert q2.select == [
+             {:computed, "x", {:bitwise, :bor, {:field, ["flags"]}, {:field, ["mask"]}}}
+           ]
+  end
+
+  test "bitwise operator precedence: & | bind looser than + -, tier 5 vs. tier 4", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: a + 1 & b }))
+
+    assert q.select == [
+             {:computed, "x",
+              {:bitwise, :band, {:arith, :add, {:field, ["a"]}, 1}, {:field, ["b"]}}}
+           ]
+  end
+
+  test "bitwise chains are left-associative", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: a & b | c }))
+
+    assert q.select == [
+             {:computed, "x",
+              {:bitwise, :bor, {:bitwise, :band, {:field, ["a"]}, {:field, ["b"]}},
+               {:field, ["c"]}}}
+           ]
+  end
+
+  test "parentheses work at the bitwise tier too", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~S[SELECT t { x: (a | b) & c }])
+
+    assert q.select == [
+             {:computed, "x",
+              {:bitwise, :band, {:bitwise, :bor, {:field, ["a"]}, {:field, ["b"]}},
+               {:field, ["c"]}}}
+           ]
+  end
+
+  test "unary minus and unary bitwise-not parse, lang_spec §5's own precedence-table tier 1", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: -price }))
+    assert q.select == [{:computed, "x", {:unary, :neg, {:field, ["price"]}}}]
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT t { x: !flags }))
+    assert q2.select == [{:computed, "x", {:unary, :bnot, {:field, ["flags"]}}}]
+  end
+
+  test "unary binds tighter than **, tier 1 vs. tier 2", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: -2 ** 2 }))
+    assert q.select == [{:computed, "x", {:arith, :pow, {:unary, :neg, 2}, 2}}]
+  end
+
+  test "a doubled unary prefix parses (unary recurses into itself)", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: --price }))
+    assert q.select == [{:computed, "x", {:unary, :neg, {:unary, :neg, {:field, ["price"]}}}}]
+  end
+
   test "an aliased plain field (no arithmetic) is still a valid expression", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders { total: price }))
     assert q.select == [{:computed, "total", {:field, ["price"]}}]

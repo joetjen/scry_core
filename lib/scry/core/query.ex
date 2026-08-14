@@ -402,6 +402,8 @@ defmodule Scry.Core.Query do
           | {:field, [String.t()]}
           | {:param, String.t()}
           | {:arith, :add | :sub | :mul | :div | :pow, expr(), expr()}
+          | {:bitwise, :band | :bor, expr(), expr()}
+          | {:unary, :neg | :bnot, expr()}
           | {:when, clauses :: [{predicate(), expr()}], else_expr :: expr()}
           | {:call, name :: String.t(), args :: [expr()]}
           | {:distinct, expr()}

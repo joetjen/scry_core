@@ -346,6 +346,17 @@ POW   := "**"
 LPAREN := "("
 RPAREN := ")"
 
+; Bitwise (lang_spec §5.10, precedence tier 5 for the binary forms,
+; tier 1 for unary `!`) -- `AMP`/`BANG` are new tokens; `PIPE` (above,
+; type-union `|`) is reused as-is for bitwise OR too, since it's the
+; identical character and the two uses never collide (a type position
+; and an expression position are never the same parse location). No
+; `&=`/`|=`/`!=` tokens exist anywhere in this grammar, so `&`/`|`/`!`
+; are unambiguous against `and`/`or`/`not`'s own keyword spellings and
+; against `NOT_EQ` ("not=") -- lang_spec's own stated reasoning.
+AMP  := "&"
+BANG := "!"
+
 ; Fragment spread (lang_spec §5.11/§9): `...<fragment-name>` inside a
 ; body list. Three literal dots, strictly longer than any single `DOT`
 ; match at the same position -- maximal munch prefers this token the
@@ -986,40 +997,66 @@ path := head:field_name (DOT tail:field_name)*
 
 field_name := IDENT | ESCAPED_IDENT
 
-; Arithmetic expressions (lang_spec §5.10, §9's "Computed fields") --
-; standard precedence climbing, low to high: additive (`+ -`) <
-; multiplicative (`* /`) < power (`**`, right-associative) < primary.
-; No function calls yet (`sum(...)` etc., §5.8) -- those are aggregate
-; functions tied to `group by`/`having`, neither executed anywhere in
-; this codebase yet either, so there's nothing real to call them
-; against; a separate, later increment.
+; Arithmetic/bitwise expressions (lang_spec §5.10, §9's "Computed
+; fields") -- standard precedence climbing, low to high, matching the
+; operator precedence table's own tiers 1-5 exactly: `expression`
+; (tier 5, `& |`) < `additive` (tier 4, `+ -`) < `multiplicative`
+; (tier 3, `* /`) < `power` (tier 2, `**`, right-associative) < `unary`
+; (tier 1, `!`/unary `-`) < `primary`. `sum(...)`/`count(...)`/etc.
+; (§5.8) reach this chain the ordinary way, through `primary`'s own
+; `call`/`call_with_path` alternatives below -- nothing about this
+; comment block gates them.
 ;
-; Each binary level uses a *dedicated* tail rule (`additive_tail`,
-; `mult_tail`), not an inline `(op:(...) right:...)*` group -- found
-; empirically to matter, not a style preference: naming a choice group
-; (`op:(PLUS | MINUS)`) directly inside an inline *repeated* group
-; scrambles the captures (the per-repetition `op`/`right` correlation
-; is lost entirely; `PLUS`/`MINUS` end up as separate, flat,
-; disconnected lists at the outer rule's own level instead). Wrapping
-; each repeated element in its own named rule sidesteps this
-; completely -- confirmed with a scratch grammar before committing to
-; either shape, the same discipline every other capture-shape finding
-; in this file already followed. `additive_tail*`/`mult_tail*` are
-; left unrenamed for the usual reason (`select_ep1a?`'s own comment):
-; renaming a repeated rule reference produces the same kind of spurious
-; extra capture a renamed *optional* one does, confirmed to extend to
-; `*` here too, not just `?`.
-expression := left:multiplicative additive_tail*
+; Each binary level uses a *dedicated* tail rule (`bitwise_tail`,
+; `additive_tail`, `mult_tail`), not an inline `(op:(...) right:...)*`
+; group -- found empirically to matter, not a style preference: naming
+; a choice group (`op:(PLUS | MINUS)`) directly inside an inline
+; *repeated* group scrambles the captures (the per-repetition
+; `op`/`right` correlation is lost entirely; `PLUS`/`MINUS` end up as
+; separate, flat, disconnected lists at the outer rule's own level
+; instead). Wrapping each repeated element in its own named rule
+; sidesteps this completely -- confirmed with a scratch grammar before
+; committing to either shape, the same discipline every other
+; capture-shape finding in this file already followed.
+; `bitwise_tail*`/`additive_tail*`/`mult_tail*` are left unrenamed for
+; the usual reason (`select_ep1a?`'s own comment): renaming a repeated
+; rule reference produces the same kind of spurious extra capture a
+; renamed *optional* one does, confirmed to extend to `*` here too, not
+; just `?`.
+;
+; `expression` itself is the one name every external call site already
+; references (`order_item`, `call_arg`, `when_expr`/`when_clause`,
+; `field_body_item`, `primary`'s own `LPAREN inner:expression RPAREN`
+; grouping) -- naming the *widest* tier `expression` and pushing the
+; former top-of-chain rule down to `additive` (unchanged body, new
+; name only) means every one of those call sites gains `&`/`|` for
+; free, with zero signature changes anywhere else in this file.
+expression := left:additive bitwise_tail*
+bitwise_tail := op:(AMP | PIPE) right:additive
+
+additive := left:multiplicative additive_tail*
 additive_tail := op:(PLUS | MINUS) right:multiplicative
 
 multiplicative := left:power mult_tail*
 mult_tail := op:(STAR | SLASH) right:power
 
 ; Right-associative by construction: `exp:power` recurses into another
-; `power`, not `primary`, so `2 ** 3 ** 2` parses as `2 ** (3 ** 2)`,
+; `power`, not `unary`, so `2 ** 3 ** 2` parses as `2 ** (3 ** 2)`,
 ; matching every other language's own `**`/`^` convention -- verified
 ; against a scratch grammar, not assumed from the shape alone.
-power := base:primary (POW exp:power)?
+power := base:unary (POW exp:power)?
+
+; Unary bitwise-NOT (`!`) / unary minus (`-`) -- lang_spec §5's own
+; precedence table lists both together as tier 1, the tightest-binding
+; tier, above `**` -- so `unary` sits directly below `power`'s own
+; `base:`, not above it, and recurses into itself (not `power`) so a
+; doubled prefix (`!!flag`, `--x`) parses too, the ordinary "unary
+; binds to another unary" shape every C-family precedence table uses.
+; Second alternative is a bare `primary` reference (the same
+; single-capture-passthrough idiom `primary`'s own alternatives already
+; use below) for the zero-prefix case -- most expressions never use
+; `!`/unary `-` at all, so this is the common path, not the exception.
+unary := op:(BANG | MINUS) operand:unary | primary
 
 ; `call_with_path` before `call` before `path` -- all three start with
 ; `IDENT`, so ordered-choice backtracking (the same convention

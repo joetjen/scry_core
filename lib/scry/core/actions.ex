@@ -508,14 +508,39 @@ defmodule Scry.Core.Actions do
   # passthrough doesn't apply here, since there are two).
   def handle_rule(:if_clause, %{param: param_cap}, ctx), do: param_cap.eval.(ctx)
 
-  # `additive_tail`/`mult_tail` (both `*`-repeated) always produce their
-  # own key, an empty list when there were zero repetitions -- unlike a
-  # `?`-optional *rule* reference, which produces no key at all when
-  # absent (confirmed empirically, priv/grammar.aether's own `power`
-  # comment has the fuller story). No `maybe_eval`/absence check needed
-  # here because of that: `eval_list` already handles "zero or more"
-  # uniformly, the same helper `path`'s own `tail` already relies on.
-  def handle_rule(:expression, %{left: left_cap, additive_tail: tail_caps}, ctx) do
+  # `bitwise_tail`/`additive_tail`/`mult_tail` (all `*`-repeated) always
+  # produce their own key, an empty list when there were zero
+  # repetitions -- unlike a `?`-optional *rule* reference, which
+  # produces no key at all when absent (confirmed empirically, priv/
+  # grammar.aether's own `power` comment has the fuller story). No
+  # `maybe_eval`/absence check needed here because of that: `eval_list`
+  # already handles "zero or more" uniformly, the same helper `path`'s
+  # own `tail` already relies on.
+  def handle_rule(:expression, %{left: left_cap, bitwise_tail: tail_caps}, ctx) do
+    with {:ok, left, ctx} <- left_cap.eval.(ctx),
+         {:ok, tails, ctx} <- eval_list(:bitwise_tail, tail_caps, ctx) do
+      {:ok, fold_bitwise(left, tails), ctx}
+    end
+  end
+
+  # Returns its own `{op, right}` piece, not a folded `{:bitwise, ...}`
+  # tuple -- `bitwise_tail` has no idea what `left`/the running
+  # accumulator is, only `expression`'s own handler (`fold_bitwise/2`)
+  # does, the same left-to-right fold shape `additive_tail`'s own
+  # `fold_arith/2` already uses one tier down.
+  def handle_rule(:bitwise_tail, %{op: op_cap, right: right_cap}, ctx) do
+    with {:ok, op_text, ctx} <- op_cap.eval.(ctx),
+         {:ok, right, ctx} <- right_cap.eval.(ctx) do
+      {:ok, {bitwise_op_from_text(op_text), right}, ctx}
+    end
+  end
+
+  # `additive` -- one precedence tier down from `expression`/`bitwise_tail`
+  # above (renamed from this module's own former `:expression` clause,
+  # priv/grammar.aether's own comment on the arithmetic/bitwise chain has
+  # the full "why `additive` now, not `expression`" reasoning; body
+  # unchanged).
+  def handle_rule(:additive, %{left: left_cap, additive_tail: tail_caps}, ctx) do
     with {:ok, left, ctx} <- left_cap.eval.(ctx),
          {:ok, tails, ctx} <- eval_list(:additive_tail, tail_caps, ctx) do
       {:ok, fold_arith(left, tails), ctx}
@@ -524,7 +549,7 @@ defmodule Scry.Core.Actions do
 
   # Returns its own `{op, right}` piece, not a folded `{:arith, ...}`
   # tuple -- `additive_tail` has no idea what `left`/the running
-  # accumulator is, only `expression`'s own handler (`fold_arith/2`)
+  # accumulator is, only `additive`'s own handler (`fold_arith/2`)
   # does, the same left-to-right fold shape `eval_chain/5` already uses
   # for `disjunction`/`conjunction`, just carrying its own operator per
   # repetition instead of one fixed one.
@@ -562,6 +587,20 @@ defmodule Scry.Core.Actions do
   end
 
   def handle_rule(:power, %{base: base_cap}, ctx), do: base_cap.eval.(ctx)
+
+  # Unary bitwise-NOT (`!`)/unary minus (`-`), lang_spec §5's own
+  # precedence-table tier 1 -- `op`/`operand` present vs. absent are two
+  # genuinely different capture sets (`%{op:, operand:}` vs. the bare
+  # `%{primary: cap}` passthrough just below), the same clause-order
+  # disambiguation `power`'s own two clauses just above already use.
+  def handle_rule(:unary, %{op: op_cap, operand: operand_cap}, ctx) do
+    with {:ok, op_text, ctx} <- op_cap.eval.(ctx),
+         {:ok, operand, ctx} <- operand_cap.eval.(ctx) do
+      {:ok, {:unary, unary_op_from_text(op_text), operand}, ctx}
+    end
+  end
+
+  def handle_rule(:unary, %{primary: cap}, ctx), do: cap.eval.(ctx)
 
   # `literal`'s own resolved value flows straight into the expression
   # AST unchanged (a plain value, or already one of `expr()`'s own
@@ -1062,12 +1101,28 @@ defmodule Scry.Core.Actions do
   defp arith_op_from_text("*"), do: :mul
   defp arith_op_from_text("/"), do: :div
 
+  defp bitwise_op_from_text("&"), do: :band
+  defp bitwise_op_from_text("|"), do: :bor
+
+  defp unary_op_from_text("-"), do: :neg
+  defp unary_op_from_text("!"), do: :bnot
+
   # Left-to-right fold over `{op, right}` pairs -- the same shape
   # `eval_chain/5` already folds for `disjunction`/`conjunction`, just
   # with a per-repetition operator instead of one fixed one, so it
   # can't reuse that helper directly.
   defp fold_arith(left, tails) do
     Enum.reduce(tails, left, fn {op, right}, acc -> {:arith, op, acc, right} end)
+  end
+
+  # Same fold shape as `fold_arith/2` just above, one precedence tier
+  # up -- `{:bitwise, op, left, right}` is `expr()`'s own AST tag for
+  # `&`/`|`, kept distinct from `{:arith, ...}` since bitwise operands
+  # are integer-only (Scry.Core.QueryOps's own `bitwise/3` raises for
+  # anything else), a real, checked constraint `{:arith, ...}` doesn't
+  # share.
+  defp fold_bitwise(left, tails) do
+    Enum.reduce(tails, left, fn {op, right}, acc -> {:bitwise, op, acc, right} end)
   end
 
   # Same left-to-right fold shape as `fold_arith/2` above, but building

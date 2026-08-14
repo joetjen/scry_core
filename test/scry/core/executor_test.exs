@@ -968,6 +968,71 @@ defmodule Scry.Core.ExecutorTest do
     assert_raise ArgumentError, ~r/exponent must be an integer/, fn -> run(query) end
   end
 
+  test "bitwise & and | on integer fields, lang_spec §5.10" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "masked", {:bitwise, :band, {:field, ["quantity"]}, 6}}]
+    }
+
+    # quantity 4 & 6 = 4; quantity 2 & 6 = 2
+    assert {:ok, [%{"masked" => 4}, %{"masked" => 2}]} = run(query)
+
+    query2 = %Query{
+      source: ["line_items"],
+      select: [{:computed, "flagged", {:bitwise, :bor, {:field, ["quantity"]}, 1}}]
+    }
+
+    # quantity 4 | 1 = 5; quantity 2 | 1 = 3
+    assert {:ok, [%{"flagged" => 5}, %{"flagged" => 3}]} = run(query2)
+  end
+
+  test "bitwise & against a non-integer operand raises a clear error, not a silent wrong answer" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "bad", {:bitwise, :band, {:field, ["price"]}, 1}}]
+    }
+
+    assert_raise ArgumentError, ~r/bitwise band requires two integer operands/, fn ->
+      run(query)
+    end
+  end
+
+  test "unary minus and unary bitwise-not, lang_spec §5's own precedence-table tier 1" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "negated", {:unary, :neg, {:field, ["quantity"]}}}]
+    }
+
+    assert {:ok, [%{"negated" => -4}, %{"negated" => -2}]} = run(query)
+
+    query2 = %Query{
+      source: ["line_items"],
+      select: [{:computed, "inverted", {:unary, :bnot, {:field, ["quantity"]}}}]
+    }
+
+    # bnot 4 = -5; bnot 2 = -3, ordinary two's-complement bitwise NOT
+    assert {:ok, [%{"inverted" => -5}, %{"inverted" => -3}]} = run(query2)
+  end
+
+  test "unary minus stays in the exact-rational tower, same as binary subtraction" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "negated", {:unary, :neg, {:field, ["price"]}}}]
+    }
+
+    assert {:ok, [%{"negated" => -3}, %{"negated" => negated2}]} = run(query)
+    assert negated2 == Rational.new(-3, 2)
+  end
+
+  test "unary bitwise-not against a non-integer operand raises a clear error" do
+    query = %Query{
+      source: ["line_items"],
+      select: [{:computed, "bad", {:unary, :bnot, {:field, ["price"]}}}]
+    }
+
+    assert_raise ArgumentError, ~r/bitwise ! requires an integer operand/, fn -> run(query) end
+  end
+
   test "WHEN/THEN/ELSE evaluates clauses in order, first match wins" do
     query = %Query{
       source: ["users"],
