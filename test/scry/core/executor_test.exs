@@ -110,6 +110,52 @@ defmodule Scry.Core.ExecutorTest do
     %{"id" => 2, "metadata" => ~s({"color":"blue","tags":["sale"]})}
   ]
 
+  # For dxn(<field>)/dxnb(<field>) (lang_spec.md §5.8/§7) -- `payload`
+  # is an ordinary String field, not declared `DXN`/`DXNB` at all, the
+  # identical "escape hatch" shape @tickets already establishes for
+  # `json(<field>)`, one row `.dxn` text, one `.dxnb` binary. Real
+  # `Dextrin.encode/1`/`encode_binary/1` output, not hand-written
+  # literals -- this fixture is only ever meant to round-trip through
+  # this same library's own `decode/2`/`decode_binary/2`, so nothing is
+  # gained by hand-transcribing the wire format and risking a fixture
+  # that silently drifts from whatever `Dextrin` itself actually
+  # produces.
+  #
+  # **String-keyed maps deliberately (`%{"color" => ...}`), not
+  # keyword-shaped (`%{color: ...}`)** -- a real, confirmed DXN
+  # semantic, found empirically while writing this fixture, not a
+  # style choice: DXN's own `keyword` type (`%{color: "red"}`'s own
+  # `color` key) is a genuinely distinct value from a plain string --
+  # `Dextrin.decode/2` brings a `keyword` key back as a real Elixir
+  # atom by default (`trusted: true`, `Scry.Core.QueryOps.cast_to_dxn/1`'s
+  # own moduledoc has the full reasoning for keeping that default), or
+  # a `%Dextrin.Keyword{}` wrapper under `trusted: false` -- neither is
+  # the plain `String.t()` key `Scry.Core.QueryOps.get_path_in/2`'s own
+  # dot-path resolution looks up. A DXN document's own author controls
+  # this the same way a JSON author controls their own key casing; this
+  # fixture uses genuine string keys specifically so the dot-path
+  # examples below are reachable, the same "ordinary dot-path already
+  # works" case lang_spec §7 itself describes for `JSON`.
+  @dxn_notes [
+    %{
+      "id" => 1,
+      "payload" => elem(Dextrin.encode(%{"color" => "red", "tags" => ["urgent", "new"]}), 1)
+    },
+    %{"id" => 2, "payload" => elem(Dextrin.encode(%{"color" => "blue", "tags" => ["sale"]}), 1)}
+  ]
+
+  @dxnb_notes [
+    %{
+      "id" => 1,
+      "payload" =>
+        elem(Dextrin.encode_binary(%{"color" => "red", "tags" => ["urgent", "new"]}), 1)
+    },
+    %{
+      "id" => 2,
+      "payload" => elem(Dextrin.encode_binary(%{"color" => "blue", "tags" => ["sale"]}), 1)
+    }
+  ]
+
   # For `in`-with-a-computed-list: `metadata` is a genuine nested map
   # here (unlike @tickets' own JSON-encoded *string*), the direct
   # lang_spec.md §7 shape -- `metadata.tags` is already a list-valued
@@ -194,7 +240,9 @@ defmodule Scry.Core.ExecutorTest do
     ["sales"] => @sales,
     ["rate_events"] => @rate_events,
     ["rate_events_naive"] => @rate_events_naive,
-    ["articles"] => @articles
+    ["articles"] => @articles,
+    ["dxn_notes"] => @dxn_notes,
+    ["dxnb_notes"] => @dxnb_notes
   }
 
   # `Executor.run/3,4` returns `{:ok, Cursor.t()}` now, not `{:ok, [row()]}`
@@ -2728,6 +2776,113 @@ defmodule Scry.Core.ExecutorTest do
       }
 
       assert_raise BadMapError, ~r/"145"/, fn -> run(query) end
+    end
+  end
+
+  describe "dxn(<field>)/dxnb(<field>) (lang_spec.md §5.8/§7) -- Dextrin's own escape hatches, symmetric with json(<field>)" do
+    test "WHERE dxn(<field>).path = ... -- the identical shape lang_spec.md §7's own json(<field>) worked example uses" do
+      query = %Query{
+        source: ["dxn_notes"],
+        wheres: [
+          {:cmp, :eq, {:dot, {:call, "dxn", [{:field, ["payload"]}]}, ["color"]}, "red"}
+        ],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, [%{"id" => 1}]} = run(query)
+    end
+
+    test "a computed field reading a nested .dxn path" do
+      query = %Query{
+        source: ["dxn_notes"],
+        select: [
+          {:field, ["id"]},
+          {:computed, "color", {:dot, {:call, "dxn", [{:field, ["payload"]}]}, ["color"]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"id" => 1, "color" => "red"}, %{"id" => 2, "color" => "blue"}]
+    end
+
+    test "dxn(...) used bare (no dot-path) returns the whole decoded value" do
+      query = %Query{
+        source: ["dxn_notes"],
+        limit: 1,
+        select: [{:computed, "m", {:call, "dxn", [{:field, ["payload"]}]}}]
+      }
+
+      assert {:ok, [%{"m" => %{"color" => "red", "tags" => ["urgent", "new"]}}]} = run(query)
+    end
+
+    test "dxn(...) on a non-string value raises a clear error" do
+      query = %Query{
+        source: ["dxn_notes"],
+        select: [{:computed, "m", {:call, "dxn", [{:field, ["id"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/dxn\(\.\.\.\) only applies to a String value/, fn ->
+        run(query)
+      end
+    end
+
+    test "malformed .dxn text raises a clear error, not a raw stdlib exception" do
+      bad_data = Map.put(@data, ["dxn_notes"], [%{"id" => 1, "payload" => "not dxn at all }{"}])
+
+      query = %Query{
+        source: ["dxn_notes"],
+        select: [{:computed, "m", {:call, "dxn", [{:field, ["payload"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/dxn\(\.\.\.\) could not decode this value/, fn ->
+        Executor.run(query, FakeEngine, bad_data) |> elem(1) |> Cursor.to_list()
+      end
+    end
+
+    test "WHERE dxnb(<field>).path = ... -- the binary-encoded sibling of the .dxn test above" do
+      query = %Query{
+        source: ["dxnb_notes"],
+        wheres: [
+          {:cmp, :eq, {:dot, {:call, "dxnb", [{:field, ["payload"]}]}, ["color"]}, "red"}
+        ],
+        select: [{:field, ["id"]}]
+      }
+
+      assert {:ok, [%{"id" => 1}]} = run(query)
+    end
+
+    test "dxnb(...) used bare (no dot-path) returns the whole decoded value" do
+      query = %Query{
+        source: ["dxnb_notes"],
+        limit: 1,
+        select: [{:computed, "m", {:call, "dxnb", [{:field, ["payload"]}]}}]
+      }
+
+      assert {:ok, [%{"m" => %{"color" => "red", "tags" => ["urgent", "new"]}}]} = run(query)
+    end
+
+    test "dxnb(...) on a non-string value raises a clear error" do
+      query = %Query{
+        source: ["dxnb_notes"],
+        select: [{:computed, "m", {:call, "dxnb", [{:field, ["id"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/dxnb\(\.\.\.\) only applies to a String value/, fn ->
+        run(query)
+      end
+    end
+
+    test "malformed .dxnb bytes raise a clear error, not a raw stdlib exception" do
+      bad_data = Map.put(@data, ["dxnb_notes"], [%{"id" => 1, "payload" => "not dxnb at all"}])
+
+      query = %Query{
+        source: ["dxnb_notes"],
+        select: [{:computed, "m", {:call, "dxnb", [{:field, ["payload"]}]}}]
+      }
+
+      assert_raise ArgumentError, ~r/dxnb\(\.\.\.\) could not decode this value/, fn ->
+        Executor.run(query, FakeEngine, bad_data) |> elem(1) |> Cursor.to_list()
+      end
     end
   end
 

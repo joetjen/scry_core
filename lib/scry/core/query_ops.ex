@@ -65,7 +65,7 @@ defmodule Scry.Core.QueryOps do
     "rate"
   ]
 
-  @cast_names ["string", "int", "exact", "inexact", "json"]
+  @cast_names ["string", "int", "exact", "inexact", "json", "dxn", "dxnb"]
 
   # Only these 5 (of `@aggregate_names`'s full 11) are computable one row
   # at a time as a running total per group -- `percentile` needs every
@@ -1980,6 +1980,8 @@ defmodule Scry.Core.QueryOps do
   defp apply_cast("exact", [value]), do: cast_to_exact(value)
   defp apply_cast("inexact", [value]), do: Rational.to_float(value)
   defp apply_cast("json", [value]), do: cast_to_json(value)
+  defp apply_cast("dxn", [value]), do: cast_to_dxn(value)
+  defp apply_cast("dxnb", [value]), do: cast_to_dxnb(value)
 
   defp apply_cast(name, args) when name in @cast_names do
     raise ArgumentError, "cast #{name}/1 expects exactly one argument, got #{length(args)}"
@@ -2036,6 +2038,62 @@ defmodule Scry.Core.QueryOps do
 
   defp cast_to_json(other) do
     raise ArgumentError, "json(...) only applies to a String value, got: #{inspect(other)}"
+  end
+
+  # `dxn(<field>)`/`dxnb(<field>)` -- lang_spec §7's own escape hatches
+  # for `DXN`/`DXNB`ish fields not declared that type at all, symmetric
+  # with `json(<field>)` in every respect above (real siblings of each
+  # other, not `json` with a different name bolted on): reinterprets a
+  # `String` field for one qualified use, same compile-time leniency,
+  # same "not this type at all" error shape. `Dextrin.decode/2` (`.dxn`
+  # text) and `Dextrin.decode_binary/2` (`.dxnb`, CBOR-based binary)
+  # are the one real difference between the two -- text vs. binary
+  # encoding of the identical value space, lang_spec's own stated "the
+  # *only* difference between the two type names."
+  #
+  # Both default to `Dextrin`'s own `trusted: true` (a DXN `keyword`
+  # value decodes to a real Elixir atom, not left as data) -- a
+  # deliberate choice, not an oversight, matching this whole function's
+  # own scope: a query author who writes `dxn(<field>)` is choosing to
+  # interpret already-*stored* data (the same trust level `json(<field>)`
+  # already extends to whatever `:json.decode/1` returns), not decoding
+  # arbitrary attacker-controlled network input at the query boundary.
+  # A real, confirmed consequence worth stating plainly: a DXN
+  # `keyword`-shaped map key (`%{color: "red"}`, DXN's own analogue of
+  # a Lisp/Clojure keyword) decodes to the atom `:color`, not the
+  # string `"color"` -- `get_path_in/2`'s own dot-path resolution only
+  # ever looks up string keys, so `dxn(<field>).color` can only ever
+  # reach a DXN document whose own author used a genuine string key
+  # (`%{"color" => "red"}`), the identical "the document's own author
+  # controls whether dot-path can reach a given key" property `JSON`
+  # already has, just surfaced through DXN's own richer type system
+  # here instead of a JSON object's own implicit all-string keys.
+  defp cast_to_dxn(s) when is_binary(s) do
+    case Dextrin.decode(s) do
+      {:ok, value} ->
+        value
+
+      {:error, reason} ->
+        raise ArgumentError, "dxn(...) could not decode this value: #{inspect(reason)}"
+    end
+  end
+
+  defp cast_to_dxn(other) do
+    raise ArgumentError, "dxn(...) only applies to a String value, got: #{inspect(other)}"
+  end
+
+  defp cast_to_dxnb(s) when is_binary(s) do
+    case Dextrin.decode_binary(s) do
+      {:ok, value} ->
+        value
+
+      {:error, reason} ->
+        raise ArgumentError, "dxnb(...) could not decode this value: #{inspect(reason)}"
+    end
+  end
+
+  defp cast_to_dxnb(other) do
+    raise ArgumentError, "dxnb(...) only applies to a String value, got: #{inspect(other)}"
   end
 
   # ---- Projection -----------------------------------------------------------

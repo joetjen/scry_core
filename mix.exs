@@ -92,6 +92,25 @@ defmodule Scry.Core.MixProject do
       {:ichor_runtime, "~> 0.2"},
       {:ichor, "~> 0.2", only: [:dev, :test], runtime: false},
 
+      # `DXN`/`DXNB` (lang_spec.md §7) name Dextrin's own Data eXchange
+      # Notation format -- a real, unscoped runtime dependency, not
+      # only: [:dev, :test], since `dxn(<field>)`/`dxnb(<field>)`
+      # (§5.8's own escape-hatch casts) call `Dextrin.decode/2`/
+      # `decode_binary/2` directly at query-execution time, the same
+      # relationship `json(<field>)` has to Erlang/OTP's own built-in
+      # `:json` module (no dependency needed there, since that one's
+      #
+      # `path:`, not a `~> 0.1` Hex requirement, temporarily: the
+      # published `dextrin` 0.1.2 still pulls in `decimal` 2.4.1, which
+      # carries a real, confirmed MEDIUM-severity DoS advisory (EEF-
+      # CVE-2026-32686, `mix hex.audit`) -- already fixed on `dextrin`'s
+      # own `develop` branch (`decimal` bumped to `~> 3.0`), just not
+      # released to Hex yet. Switch this back to a real `~> 0.1`
+      # version requirement once that release ships -- tracked here,
+      # not silently left as a permanent path dependency.
+      # in the standard library).
+      {:dextrin, path: "../dextrin"},
+
       # === CODE QUALITY & STATIC ANALYSIS ===
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
