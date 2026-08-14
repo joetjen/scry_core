@@ -9,15 +9,14 @@ composes against. No backend kind of its own — see `scry`'s
 and `impl_spec.md` §1–§2 for the full design.
 
 Source: <https://github.com/joetjen/scry_core>. Specs live in the separate
-[`scry`](https://github.com/joetjen/scry) repository. Implementation has not
-started yet.
+[`scry`](https://github.com/joetjen/scry) repository.
 
 ## Installation
 
 ```elixir
 def deps do
   [
-    {:scry_core, "~> 0.1.0"}
+    {:scry_core, "~> 1.0"}
   ]
 end
 ```
