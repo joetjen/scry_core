@@ -67,6 +67,23 @@ defmodule Scry.Core.QueryOps do
 
   @cast_names ["string", "int", "exact", "inexact", "json", "dxn", "dxnb"]
 
+  @doc """
+  Every core built-in function name (`@aggregate_names ++ @cast_names`)
+  -- the names lang_spec.md §2's own EP2 auto-import ordering means
+  when it says "core's own built-ins always win first, a variant can
+  never shadow a core name." Public specifically so a kind package that
+  needs this same list for its own, unrelated purpose (`scry_logic`'s
+  own wildcard-relation-call fallback, lang_spec.md §8.4: any bare
+  `name(args)` this list doesn't recognize is tried as a relation call)
+  can call this directly instead of hand-duplicating it -- found and
+  fixed the hard way, `scry_logic`'s own copy had already drifted stale
+  (missing `dxn`/`dxnb`, added to `@cast_names` after that copy was
+  written) before this function existed at all. See `scry_logic`'s own
+  `CHANGELOG.md` for that fix.
+  """
+  @spec core_builtin_call_names() :: [String.t()]
+  def core_builtin_call_names, do: @aggregate_names ++ @cast_names
+
   # Only these 5 (of `@aggregate_names`'s full 11) are computable one row
   # at a time as a running total per group -- `percentile` needs every
   # value, sorted; `stddev*`/`var*` would need Welford's algorithm to go

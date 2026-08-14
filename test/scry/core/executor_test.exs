@@ -2293,6 +2293,20 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
+  describe "QueryOps.core_builtin_call_names/0" do
+    alias Scry.Core.QueryOps
+
+    test "lists every core aggregate and cast name, for a kind package's own reuse" do
+      names = QueryOps.core_builtin_call_names()
+
+      assert "sum" in names
+      assert "rate" in names
+      assert "json" in names
+      assert "dxn" in names
+      assert "dxnb" in names
+    end
+  end
+
   describe "WITH RECURSIVE (SQL:1999 fixpoint semantics, lang_spec.md §5.4.1)" do
     # @org_chart's own manager_id is nullable (the CEO's is nil) --
     # lang_spec's own null-safety rule makes an unguarded `manager_id =
