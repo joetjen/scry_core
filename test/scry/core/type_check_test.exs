@@ -50,9 +50,88 @@ defmodule Scry.Core.TypeCheckTest do
       assert :ok = TypeCheck.check(query, type_decls)
     end
 
-    test "a non-degenerate kind with a non-empty variant is not (yet) caught" do
+    test "a cross-kind mismatch between two non-degenerate kinds is now caught" do
+      # time-series' own LAST (`variant.select_ep1a` = `{:last, ...}`,
+      # the real shape `Scry.TimeSeries.Actions` parses it into) used
+      # against a `graph`-tagged source.
       type_decls = %{"g" => %{name: "g", kind: "graph", fields: []}}
-      query = %Query{source: ["g"], select: [], variant: %{last: 1}}
+
+      query = %Query{
+        source: ["g"],
+        select: [],
+        variant: %{select_ep1a: {:last, {:duration, 300}, ["ts"]}}
+      }
+
+      assert {:error, {:kind_category_mismatch, "g", "graph", [:last]}} =
+               TypeCheck.check(query, type_decls)
+    end
+
+    test "document's own DEEP (a bare-atom select_ep1a) against a non-document kind is a hard error" do
+      type_decls = %{"g" => %{name: "g", kind: "graph", fields: []}}
+      query = %Query{source: ["g"], select: [], variant: %{select_ep1a: :deep}}
+
+      assert {:error, {:kind_category_mismatch, "g", "graph", [:deep]}} =
+               TypeCheck.check(query, type_decls)
+    end
+
+    test "document's own PARENT/SIBLINGS/ANCESTORS body items against a non-document kind are each a hard error" do
+      type_decls = %{"m" => %{name: "m", kind: "time-series", fields: []}}
+
+      for tag <- [:parent, :siblings, :ancestors] do
+        query = %Query{
+          source: ["m"],
+          select: [{:variant, {tag, [{:field, ["name"]}]}}]
+        }
+
+        assert {:error, {:kind_category_mismatch, "m", "time-series", [^tag]}} =
+                 TypeCheck.check(query, type_decls)
+      end
+    end
+
+    test "graph's own VIA body item against a non-graph kind is a hard error" do
+      type_decls = %{"e" => %{name: "e", kind: "document", fields: []}}
+
+      query = %Query{
+        source: ["e"],
+        select: [{:variant, {:via, "knows", [], [{:field, ["name"]}]}}]
+      }
+
+      assert {:error, {:kind_category_mismatch, "e", "document", [:via]}} =
+               TypeCheck.check(query, type_decls)
+    end
+
+    test "search's own SEARCH predicate leaf, nested inside AND/OR/NOT, against a non-search kind is a hard error" do
+      type_decls = %{"p" => %{name: "p", kind: "relational", fields: []}}
+
+      query = %Query{
+        source: ["p"],
+        select: [],
+        wheres: [
+          {:and, {:cmp, :gt, ["id"], 0}, {:not, {:variant, {:search, ["body"], "ml"}}}}
+        ]
+      }
+
+      assert {:error, {:kind_category_mismatch, "p", "relational", [:search]}} =
+               TypeCheck.check(query, type_decls)
+    end
+
+    test "a standard-variant tag used against its own matching kind is fine" do
+      type_decls = %{"m" => %{name: "m", kind: "time-series", fields: []}}
+      query = %Query{source: ["m"], select: [], variant: %{select_ep1a: {:last, 5, ["ts"]}}}
+
+      assert :ok = TypeCheck.check(query, type_decls)
+    end
+
+    test "a standard-variant tag is fine with no declared kind at all" do
+      type_decls = %{"m" => %{name: "m", kind: nil, fields: []}}
+      query = %Query{source: ["m"], select: [], variant: %{select_ep1a: {:last, 5, ["ts"]}}}
+
+      assert :ok = TypeCheck.check(query, type_decls)
+    end
+
+    test "an unrecognized/custom variant tag is silently unchecked" do
+      type_decls = %{"c" => %{name: "c", kind: "relational", fields: []}}
+      query = %Query{source: ["c"], select: [{:variant, {:some_custom_kind_tag, []}}]}
 
       assert :ok = TypeCheck.check(query, type_decls)
     end
@@ -572,10 +651,16 @@ defmodule Scry.Core.TypeCheckTest do
     end
 
     test "is inert even with a real TYPE declaration for the same source" do
+      # `kind: "search"`, not `"relational"` -- the point of this test
+      # is check 2's own inertness to an unresolved `{:variant, ...}}`
+      # predicate, isolated from check 1's own cross-kind category gate
+      # (`:search` genuinely belongs to `"search"`, per `@variant_tag_
+      # kinds` -- a `"relational"`-tagged source using it is now a real,
+      # correctly-flagged mismatch, covered by its own dedicated test).
       type_decls = %{
         "articles" => %{
           name: "articles",
-          kind: "relational",
+          kind: "search",
           fields: [{"title", {:named, "String", nil}}]
         }
       }

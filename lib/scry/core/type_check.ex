@@ -27,10 +27,34 @@ defmodule Scry.Core.TypeCheck do
      of the two kinds permanently documented as structurally incapable
      of ever having EP1/EP2 vocabulary (`"relational"`, `"olap"`,
      lang_spec.md §2/§7) but whose own `variant` map is non-empty is a
-     hard error. Cannot yet catch a mismatch between two *non-degenerate*
-     kinds (e.g. a `graph`-tagged source using time-series' `LAST`) --
-     that needs grammar-composition-level metadata this codebase doesn't
-     record anywhere yet, and is out of scope this round.
+     hard error. Also catches a mismatch between two *non-degenerate*
+     kinds now (e.g. a `graph`-tagged source using time-series' `LAST`,
+     or `document`'s own `PARENT`/`SIBLINGS`/`ANCESTORS` against
+     anything but a `document`-tagged source) -- `@variant_tag_kinds`
+     hardcodes which standard-variant tag (lang_spec.md §8's own closed
+     vocabulary: `select_ep1a`'s own `:last`/`:deep`, a `{:variant,
+     {tag, ...}}` body item's own `:parent`/`:siblings`/`:ancestors`/
+     `:via`, a `{:variant, {:search, ...}}` predicate leaf's own
+     `:search`) belongs to which kind, the same "this module's own
+     closed knowledge of lang_spec's own enumerated vocabulary, not a
+     generic pluggable registry" posture `@degenerate_kinds`/
+     `@known_scalars`/`@structured_type_names` already take -- grammar
+     composition itself genuinely has no notion of "which kind owns
+     this construct" anywhere (`Scry.Core.GrammarCompose`'s own
+     moduledoc), so there's no metadata to consult instead. A tag this
+     module doesn't recognize (a non-standard/custom kind's own
+     vocabulary) is silently unchecked, the same leniency an
+     unrecognized `TYPE`/scalar-type name already gets everywhere else
+     in this module. Deliberately scoped to `{:variant, ...}`-tagged
+     constructs only, not a bare EP2 call (`relevance()` used against a
+     non-`search` source parses and type-checks clean today -- a real,
+     separate, stated gap: an EP2 call is indistinguishable from an
+     ordinary cast/aggregate call at the `{:call, name, args}` AST level
+     alone, needing its own name-to-kind registry this round doesn't
+     build), and to `select`'s own *top-level* body items (a `PARENT`/
+     `SIBLINGS`/`ANCESTORS`/`VIA` nested inside another kind construct's
+     own body isn't walked, matching check 3's own identical "not
+     walked this round" scope limit just below).
   2. **Declared-field-type / union comparison check.** A literal
      compared against a field with a known declared scalar type
      (currently just `Int`/`String` -- the only two names lang_spec.md
@@ -86,6 +110,23 @@ defmodule Scry.Core.TypeCheck do
   @known_scalars %{
     "Int" => &is_integer/1,
     "String" => &is_binary/1
+  }
+
+  # lang_spec.md §8's own standard-variant vocabulary, each tag mapped
+  # to the one kind it belongs to -- `category_check/3`'s own moduledoc
+  # section has the full "why hardcoded, not a registry" reasoning.
+  # `select_ep1a`'s own tag is either a bare atom (`:deep`) or the first
+  # element of a tagged tuple (`{:last, bound, field}`); a `{:variant,
+  # {tag, ...}}` body item or predicate leaf's own tag is always the
+  # first element of the inner tuple.
+  @variant_tag_kinds %{
+    last: "time-series",
+    deep: "document",
+    parent: "document",
+    siblings: "document",
+    ancestors: "document",
+    via: "graph",
+    search: "search"
   }
 
   @doc """
@@ -151,7 +192,76 @@ defmodule Scry.Core.TypeCheck do
     {:error, {:kind_category_mismatch, source_name, kind, [:goal_args]}}
   end
 
+  # Cross-kind mismatch between two *non-degenerate* kinds (this
+  # module's own moduledoc, "Category check", has the full
+  # `@variant_tag_kinds`/"why hardcoded" reasoning) -- a source declared
+  # some real kind, and the query itself uses at least one standard-
+  # variant tag registered to a *different* kind. Checked only once
+  # every degenerate-kind/`goal_args`-specific clause above has already
+  # had its own turn at this same query node -- those catch strictly
+  # narrower instances of the identical underlying violation, not a
+  # competing rule.
+  defp category_check(%Query{} = query, %{kind: kind}, source_name)
+       when not is_nil(kind) do
+    case query |> query_variant_tags() |> Enum.find(&mismatched_tag_kind?(&1, kind)) do
+      nil -> :ok
+      tag -> {:error, {:kind_category_mismatch, source_name, kind, [tag]}}
+    end
+  end
+
   defp category_check(_query, _type_decl, _source_name), do: :ok
+
+  defp mismatched_tag_kind?(tag, kind), do: Map.get(@variant_tag_kinds, tag) not in [nil, kind]
+
+  defp query_variant_tags(%Query{
+         variant: variant,
+         select: select,
+         wheres: wheres,
+         havings: havings
+       }) do
+    select_ep1a_tags(Map.get(variant, :select_ep1a)) ++
+      body_item_variant_tags(select) ++
+      predicate_variant_tags(wheres) ++
+      predicate_variant_tags(havings)
+  end
+
+  defp select_ep1a_tags(nil), do: []
+  defp select_ep1a_tags(tag) when is_atom(tag), do: [tag]
+  defp select_ep1a_tags(tuple) when is_tuple(tuple), do: [elem(tuple, 0)]
+  defp select_ep1a_tags(_other), do: []
+
+  # Top-level `select` items only (`{:variant, {:parent, body}}`/
+  # `{:variant, {:via, ...}}`, a `body_item_ep1` contribution's own
+  # shape) -- one nested inside another kind construct's own body isn't
+  # walked, this module's own moduledoc has the "not walked this round"
+  # scope note.
+  defp body_item_variant_tags(select) do
+    Enum.flat_map(select, fn
+      {:variant, tagged} when is_tuple(tagged) -> [elem(tagged, 0)]
+      {:variant, tag} when is_atom(tag) -> [tag]
+      _other -> []
+    end)
+  end
+
+  # A `{:variant, {:search, left, right}}` predicate leaf (`search`'s
+  # own `comparison_ep1e` contribution) anywhere in `wheres`/`havings`,
+  # including nested inside `and`/`or`/`not` -- mirrors `walk_type_
+  # check/3`'s own identical recursion shape one section down, just
+  # collecting tags instead of checking a declared field type.
+  defp predicate_variant_tags(predicates),
+    do: Enum.flat_map(predicates, &predicate_variant_tag_walk/1)
+
+  defp predicate_variant_tag_walk({:and, l, r}),
+    do: predicate_variant_tag_walk(l) ++ predicate_variant_tag_walk(r)
+
+  defp predicate_variant_tag_walk({:or, l, r}),
+    do: predicate_variant_tag_walk(l) ++ predicate_variant_tag_walk(r)
+
+  defp predicate_variant_tag_walk({:not, p}), do: predicate_variant_tag_walk(p)
+
+  defp predicate_variant_tag_walk({:variant, tagged}) when is_tuple(tagged), do: [elem(tagged, 0)]
+  defp predicate_variant_tag_walk({:variant, tag}) when is_atom(tag), do: [tag]
+  defp predicate_variant_tag_walk(_other), do: []
 
   # ---- 2. Declared-field-type / union comparison check ---------------------
 
