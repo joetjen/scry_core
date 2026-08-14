@@ -1357,6 +1357,28 @@ defmodule Scry.Core.ExecutorTest do
       assert_raise ArgumentError, ~r/unknown or unsupported function/, fn -> run(query) end
     end
 
+    test "an EP2 namespaced call (lang_spec §2) with no real handler registered raises the identical clear error an unqualified unknown name already gets" do
+      # No tier-4 extension exists anywhere in this ecosystem yet
+      # (impl_spec.md §2's own "opt-in, most applications never need
+      # one") -- so every qualified name is, today, honestly
+      # unregistered, the same as a plain unknown one. `{:call, name,
+      # args}` doesn't distinguish a qualified name from an unqualified
+      # one at execution time at all (`Scry.Core.QueryOps.apply_cast/2`
+      # dispatches on the whole string); this is intentional, not a
+      # missing case -- see `priv/grammar.aether`'s own `qualified_call`
+      # comment for the full reasoning.
+      query = %Query{
+        source: ["customer_orders"],
+        select: [{:computed, "x", {:call, "time_series.smoothed", [{:field, ["id"]}]}}]
+      }
+
+      assert_raise ArgumentError,
+                   ~r/unknown or unsupported function: "time_series\.smoothed"/,
+                   fn ->
+                     run(query)
+                   end
+    end
+
     test "a known aggregate called with the wrong number of arguments raises" do
       query = %Query{
         source: ["customer_orders"],

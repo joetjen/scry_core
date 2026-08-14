@@ -976,9 +976,10 @@ comparison_ep1e := NEVER
 ; already states for `query.variant` and a `:variant` body item, now
 ; extended to cover this new leaf shape too.
 
-predicate_lhs := call_with_path | call | path
+predicate_lhs := qualified_call_with_path | qualified_call | call_with_path | call | path
 
-in_lhs := lhs_expr:call_with_path | lhs_expr:call | lhs_expr:path | lhs_literal:literal
+in_lhs := lhs_expr:qualified_call_with_path | lhs_expr:qualified_call
+        | lhs_expr:call_with_path | lhs_expr:call | lhs_expr:path | lhs_literal:literal
 
 ; Set comparison's own four operators (lang_spec §5.9) each have two
 ; spellings -- a symbol token (declared with the other operator tokens
@@ -1119,7 +1120,8 @@ unary := op:(BANG | MINUS) operand:unary | primary
 ; the call, never combined with a trailing `.path` -- lang_spec §5.5's
 ; own grammar row shows no such combination), so their relative order
 ; doesn't matter for correctness, only readability.
-primary := literal | window_call | call_with_path | call | path | when_expr
+primary := literal | window_call | qualified_call_with_path | qualified_call | call_with_path
+         | call | path | when_expr
          | LPAREN inner:expression RPAREN
 
 ; lang_spec §5.8's fixed built-in-function surface -- "anything else
@@ -1147,6 +1149,60 @@ primary := literal | window_call | call_with_path | call | path | when_expr
 ; `list`'s own handler already reads `:literal_list` (`Map.has_key?/2`,
 ; absent -> `[]`), not a value it happens to call `args`.
 call := name:IDENT LPAREN call_args? RPAREN
+
+; EP2 namespaced calls (lang_spec §2): `<namespace>.<name>(<args>)`,
+; the always-qualified spelling every EP2 call has, loaded variant or
+; not (§2's own "the qualified form always remains valid too, loaded
+; or not"). A real, confirmed grammar gap found by a spec-traceability
+; audit: this file's own `call`/`call_with_path` comments above already
+; *describe* EP2 calls in prose, but no rule ever actually accepted the
+; dotted spelling itself -- `call_with_path` looks similar (`IDENT DOT
+; path`) but needs its own leading `call` to already be a complete,
+; parenthesized call (`json(metadata).color`, parens right after the
+; *first* identifier); this rule needs the parens after the *second*
+; one instead (`graph.via(...)`), a genuinely different token sequence,
+; not a renaming of `call_with_path`. Tried before `call_with_path`/
+; `call`/`path` in every position all three already occupy (this
+; file's own "more specific first" convention, immediately above) --
+; the two can never actually collide on real input, confirmed by
+; tracing both token sequences directly: `qualified_call`'s own
+; `namespace:IDENT DOT` fails outright (expects `DOT`, sees `LPAREN`)
+; the moment it's tried against something `call`-shaped like
+; `json(...)`, backtracking cleanly to `call_with_path` with nothing
+; consumed.
+;
+; Deliberately scoped to *exactly* one namespace segment, not §2's own
+; further-mentioned `graph.<product>.foo` product-level sub-namespace
+; -- no real kind package registers anything under EP2 at all yet
+; (confirmed: `scry_graph`/`scry_time_series`/`scry_document`/
+; `scry_search` each fill their own kind's vocabulary via EP1 keyword
+; shapes instead), so a deeper chain has no real worked example to
+; validate against -- the same demand-driven default this whole
+; grammar already applies elsewhere, not an oversight. `Scry.Core.
+; Actions`' own handler folds `namespace`/`name` into the identical
+; `{:call, "namespace.name", args}` shape a plain `call` already
+; produces (impl_spec.md §4's own framing: "the same namespace... with
+; its own namespace stripped" for the auto-imported, unqualified
+; spelling -- a qualified name is the *same* construct, not a
+; structurally different one), so every existing `{:call, name, args}`
+; consumer (`expr_has_call?/1`, `resolve_rhs/4`, `apply_cast/2`, ...)
+; handles it already, with zero changes needed downstream: an
+; unregistered namespace/name (every one, today -- no tier-4 extension
+; exists yet either) surfaces as the identical "unknown or unsupported
+; function" error a bad unqualified name already gets, the honest
+; behavior for a mechanism with nothing real registered under it yet.
+qualified_call := namespace:IDENT DOT name:IDENT LPAREN call_args? RPAREN
+
+; The identical "call's own result narrowed by a dot-path" shape
+; `call_with_path` (below) already gives a plain call -- `ns.lookup(id)
+; .status` needs the equivalent for a *qualified* call, since
+; `qualified_call` above is bare (no trailing path of its own).
+; Separate rule, not a widening of `call_with_path` itself, for the
+; same reason `qualified_call` itself is separate from plain `call`:
+; the two have different leading token sequences, and `Scry.Core.
+; Actions`' own handler needs to know which of `call`/`qualified_call`
+; produced the base value it's wrapping.
+qualified_call_with_path := call:qualified_call DOT path:path
 
 ; `json(<field>)` (lang_spec §5.8/§7: "reinterprets a String field for
 ; one qualified use -- `WHERE json(metadata).color = "red"`") is the one

@@ -1106,6 +1106,59 @@ line two""" { name }))
     assert q.wheres == [{:cmp, :gt, {:call, "count", [{:field, ["id"]}]}, 1}]
   end
 
+  test "an EP2 namespaced call (lang_spec §2), qualified, as a computed field", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT metrics { v: time_series.smoothed(5) }])
+
+    assert q.select == [
+             {:computed, "v", {:call, "time_series.smoothed", [5]}}
+           ]
+  end
+
+  test "an EP2 namespaced call resolves to the same {:call, name, args} shape a plain call already produces, just with the namespace folded into name",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q1} = run(g, ~s[SELECT t { v: sum(price) }])
+    assert {:ok, %Query{} = q2} = run(g, ~s[SELECT t { v: ns.sum(price) }])
+
+    assert [{:computed, "v", {:call, "sum", args}}] = q1.select
+    assert [{:computed, "v", {:call, "ns.sum", ^args}}] = q2.select
+  end
+
+  test "an EP2 namespaced call, zero args (lang_spec §8.5's own relevance() shape, qualified)", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT articles { score: search.relevance() }])
+    assert q.select == [{:computed, "score", {:call, "search.relevance", []}}]
+  end
+
+  test "an EP2 namespaced call as a comparison's left-hand side", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT t WHERE graph.distance(a, b) > 5 { id }])
+
+    assert q.wheres == [
+             {:cmp, :gt, {:call, "graph.distance", [{:field, ["a"]}, {:field, ["b"]}]}, 5}
+           ]
+  end
+
+  test "an EP2 namespaced call's own result narrowed by a dot-path, same as json(<field>).path",
+       %{
+         grammar: g
+       } do
+    assert {:ok, %Query{} = q} =
+             run(g, ~s[SELECT t WHERE ns.lookup(id).status = "ok" { id }])
+
+    assert q.wheres == [
+             {:cmp, :eq, {:dot, {:call, "ns.lookup", [{:field, ["id"]}]}, ["status"]}, "ok"}
+           ]
+  end
+
+  test "a call with parens right after the first identifier is still call_with_path, not confused with a qualified call",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s[SELECT t WHERE json(metadata).color = "red" { id }])
+
+    assert q.wheres == [
+             {:cmp, :eq, {:dot, {:call, "json", [{:field, ["metadata"]}]}, ["color"]}, "red"}
+           ]
+  end
+
   test "a function call in an in [...] left-hand side", %{grammar: g} do
     assert {:ok, %Query{} = q} =
              run(g, ~s|SELECT orders GROUP BY id HAVING count(id) in [1, 2] { id }|)

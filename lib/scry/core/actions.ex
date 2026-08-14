@@ -644,6 +644,38 @@ defmodule Scry.Core.Actions do
     end
   end
 
+  # EP2 namespaced call (lang_spec §2, `priv/grammar.aether`'s own
+  # `qualified_call` comment has the full "why this needs its own rule,
+  # not a renaming of `call_with_path`" reasoning). Folds `namespace`/
+  # `name` into the identical `{:call, "namespace.name", args}` shape a
+  # plain `call` already produces, joined with a literal `.` -- the
+  # same string an *unqualified*, auto-imported spelling would resolve
+  # to once auto-import resolution is real (impl_spec.md §4's own "core
+  # built-ins first, then each loaded kind's own auto-imported names"),
+  # so a future auto-import pass has exactly one string shape to
+  # recognize either way, not two.
+  def handle_rule(
+        :qualified_call,
+        %{namespace: namespace_cap, name: name_cap} = captures,
+        ctx
+      ) do
+    with {:ok, namespace, ctx} <- namespace_cap.eval.(ctx),
+         {:ok, name, ctx} <- name_cap.eval.(ctx),
+         {:ok, args, ctx} <- maybe_eval(captures, :call_args, ctx) do
+      {:ok, {:call, "#{namespace}.#{name}", absent_to([], args)}, ctx}
+    end
+  end
+
+  # `ns.lookup(id).status` -- the qualified-call counterpart to `call_
+  # with_path`'s own handler just below (`json(metadata).color`),
+  # identical shape, different base.
+  def handle_rule(:qualified_call_with_path, %{call: call_cap, path: path_cap}, ctx) do
+    with {:ok, call, ctx} <- call_cap.eval.(ctx),
+         {:ok, path, ctx} <- path_cap.eval.(ctx) do
+      {:ok, {:dot, call, path}, ctx}
+    end
+  end
+
   def handle_rule(:call_args, %{head: head_cap, tail: tail_caps}, ctx) do
     with {:ok, head, ctx} <- head_cap.eval.(ctx),
          {:ok, tail, ctx} <- eval_list(:tail, tail_caps, ctx) do
