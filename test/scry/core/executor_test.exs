@@ -164,6 +164,17 @@ defmodule Scry.Core.ExecutorTest do
     %{"region" => "west", "quarter" => "q2", "amount" => 50}
   ]
 
+  # For set comparison (lang_spec §5.9, ⊂/⊆/⊃/⊇) -- `tags` is
+  # list-valued, the shape every set-comparison operator needs. `post_a`
+  # is a genuine proper subset of `["urgent", "new", "sale"]`; `post_b`
+  # ties it exactly (subset-or-equal only); `post_c` shares no elements
+  # at all.
+  @articles [
+    %{"id" => 1, "tags" => ["urgent", "new"]},
+    %{"id" => 2, "tags" => ["urgent", "new", "sale"]},
+    %{"id" => 3, "tags" => ["archived"]}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -182,7 +193,8 @@ defmodule Scry.Core.ExecutorTest do
     ["employees"] => @employees,
     ["sales"] => @sales,
     ["rate_events"] => @rate_events,
-    ["rate_events_naive"] => @rate_events_naive
+    ["rate_events_naive"] => @rate_events_naive,
+    ["articles"] => @articles
   }
 
   # `Executor.run/3,4` returns `{:ok, Cursor.t()}` now, not `{:ok, [row()]}`
@@ -601,6 +613,80 @@ defmodule Scry.Core.ExecutorTest do
     }
 
     assert_raise FunctionClauseError, fn -> run(query) end
+  end
+
+  test "⊂ is a proper subset -- a tied set doesn't count" do
+    query = %Query{
+      source: ["articles"],
+      wheres: [{:cmp, :subset, ["tags"], ["urgent", "new", "sale"]}],
+      select: [{:field, ["id"]}]
+    }
+
+    # article 1's tags are a genuine proper subset; article 2's are the
+    # identical set (tied, not proper); article 3 shares nothing.
+    assert {:ok, [%{"id" => 1}]} = run(query)
+  end
+
+  test "⊆ is subset-or-equal -- a tied set does count" do
+    query = %Query{
+      source: ["articles"],
+      wheres: [{:cmp, :subset_eq, ["tags"], ["urgent", "new", "sale"]}],
+      select: [{:field, ["id"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["id"]) |> Enum.sort() == [1, 2]
+  end
+
+  test "⊃/⊇ (superset) are the mirror image of ⊂/⊆" do
+    superset_query = %Query{
+      source: ["articles"],
+      wheres: [{:cmp, :superset, ["tags"], ["urgent"]}],
+      select: [{:field, ["id"]}]
+    }
+
+    assert {:ok, rows} = run(superset_query)
+    assert Enum.map(rows, & &1["id"]) |> Enum.sort() == [1, 2]
+
+    superset_eq_query = %Query{
+      source: ["articles"],
+      wheres: [{:cmp, :superset_eq, ["tags"], ["urgent", "new"]}],
+      select: [{:field, ["id"]}]
+    }
+
+    assert {:ok, rows2} = run(superset_eq_query)
+    assert Enum.map(rows2, & &1["id"]) |> Enum.sort() == [1, 2]
+  end
+
+  test "set comparison is structural -- duplicate/reordered elements don't affect the result" do
+    query = %Query{
+      source: ["articles"],
+      wheres: [{:cmp, :subset_eq, ["tags"], ["new", "urgent", "urgent", "sale", "new"]}],
+      select: [{:field, ["id"]}]
+    }
+
+    assert {:ok, rows} = run(query)
+    assert Enum.map(rows, & &1["id"]) |> Enum.sort() == [1, 2]
+  end
+
+  test "negating a set comparison via NOT (...), lang_spec §5.9's own stated idiom" do
+    query = %Query{
+      source: ["articles"],
+      wheres: [{:not, {:cmp, :subset_eq, ["tags"], ["urgent", "new", "sale"]}}],
+      select: [{:field, ["id"]}]
+    }
+
+    assert {:ok, [%{"id" => 3}]} = run(query)
+  end
+
+  test "a set comparison against a non-list operand raises a clear error, not a silent wrong answer" do
+    query = %Query{
+      source: ["articles"],
+      wheres: [{:cmp, :subset, ["id"], ["a", "b"]}],
+      select: [{:field, ["id"]}]
+    }
+
+    assert_raise ArgumentError, ~r/subset requires two list operands/, fn -> run(query) end
   end
 
   defp orders_for(customer_id_path) do

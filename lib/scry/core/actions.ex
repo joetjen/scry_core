@@ -908,6 +908,22 @@ defmodule Scry.Core.Actions do
     end
   end
 
+  # Set comparison's own word-form spellings (lang_spec §5.9: "subset
+  # of"/"subset or equal to"/"superset of"/"superset or equal to") --
+  # each rule ignores its own captured `marker` token (whichever of
+  # `KW_SUBSET`/`KW_SUPERSET` matched carries no information beyond
+  # "this rule matched at all") and returns the identical symbol text
+  # its own symbol-token sibling (`SUBSET`/`SUBSET_EQ`/`SUPERSET`/
+  # `SUPERSET_EQ`) already produces, so `comparison`'s own handlers
+  # (below) and `op_from_text/1` need no separate word-form branch --
+  # both spellings of a given operator are indistinguishable past this
+  # point, exactly as lang_spec intends ("⊆"/"subset or equal to" name
+  # the same operator, not two).
+  def handle_rule(:subset_of_op, %{marker: _marker}, ctx), do: {:ok, "⊂", ctx}
+  def handle_rule(:subset_or_eq_op, %{marker: _marker}, ctx), do: {:ok, "⊆", ctx}
+  def handle_rule(:superset_of_op, %{marker: _marker}, ctx), do: {:ok, "⊃", ctx}
+  def handle_rule(:superset_or_eq_op, %{marker: _marker}, ctx), do: {:ok, "⊇", ctx}
+
   def handle_rule(:comparison, %{left: left_cap, op: op_cap, right: right_cap}, ctx) do
     with {:ok, path, ctx} <- left_cap.eval.(ctx),
          {:ok, op_text, ctx} <- op_cap.eval.(ctx),
@@ -1095,6 +1111,10 @@ defmodule Scry.Core.Actions do
   defp op_from_text("<="), do: :le
   defp op_from_text(">="), do: :ge
   defp op_from_text("~"), do: :match
+  defp op_from_text("⊂"), do: :subset
+  defp op_from_text("⊆"), do: :subset_eq
+  defp op_from_text("⊃"), do: :superset
+  defp op_from_text("⊇"), do: :superset_eq
 
   defp arith_op_from_text("+"), do: :add
   defp arith_op_from_text("-"), do: :sub

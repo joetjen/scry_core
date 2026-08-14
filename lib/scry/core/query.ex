@@ -412,7 +412,18 @@ defmodule Scry.Core.Query do
              order_bys :: [{expr(), :asc | :desc}], frame :: {frame_bound(), frame_bound()} | nil}
 
   @type predicate ::
-          {:cmp, :eq | :not_eq | :lt | :gt | :le | :ge | :match,
+          {:cmp,
+           :eq
+           | :not_eq
+           | :lt
+           | :gt
+           | :le
+           | :ge
+           | :match
+           | :subset
+           | :subset_eq
+           | :superset
+           | :superset_eq,
            lhs :: [String.t()] | {:call, String.t(), [expr()]} | {:dot, expr(), [String.t()]},
            rhs :: term() | {:field, [String.t()]} | {:param, String.t()}}
           | {:in,

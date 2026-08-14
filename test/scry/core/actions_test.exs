@@ -687,6 +687,51 @@ line two""" { name }))
     assert [{:cmp, :match, ["path"], %Regex{source: "a|b"}}] = q.wheres
   end
 
+  test "set comparison, symbol spellings, lang_spec §5.9 (ISO 80000-2)", %{grammar: g} do
+    assert {:ok, %Query{} = q1} = run(g, ~s(SELECT t WHERE tags ⊂ allowed { id }))
+    assert [{:cmp, :subset, ["tags"], {:field, ["allowed"]}}] = q1.wheres
+
+    assert {:ok, %Query{} = q2} = run(g, ~s(SELECT t WHERE tags ⊆ allowed { id }))
+    assert [{:cmp, :subset_eq, ["tags"], {:field, ["allowed"]}}] = q2.wheres
+
+    assert {:ok, %Query{} = q3} = run(g, ~s(SELECT t WHERE tags ⊃ allowed { id }))
+    assert [{:cmp, :superset, ["tags"], {:field, ["allowed"]}}] = q3.wheres
+
+    assert {:ok, %Query{} = q4} = run(g, ~s(SELECT t WHERE tags ⊇ allowed { id }))
+    assert [{:cmp, :superset_eq, ["tags"], {:field, ["allowed"]}}] = q4.wheres
+  end
+
+  test "set comparison, word-form spellings resolve to the identical op atom as their symbol siblings",
+       %{grammar: g} do
+    assert {:ok, %Query{} = q1} = run(g, ~s(SELECT t WHERE tags subset of allowed { id }))
+    assert [{:cmp, :subset, ["tags"], {:field, ["allowed"]}}] = q1.wheres
+
+    assert {:ok, %Query{} = q2} =
+             run(g, ~s(SELECT t WHERE tags subset or equal to allowed { id }))
+
+    assert [{:cmp, :subset_eq, ["tags"], {:field, ["allowed"]}}] = q2.wheres
+
+    assert {:ok, %Query{} = q3} = run(g, ~s(SELECT t WHERE tags superset of allowed { id }))
+    assert [{:cmp, :superset, ["tags"], {:field, ["allowed"]}}] = q3.wheres
+
+    assert {:ok, %Query{} = q4} =
+             run(g, ~s(SELECT t WHERE tags superset or equal to allowed { id }))
+
+    assert [{:cmp, :superset_eq, ["tags"], {:field, ["allowed"]}}] = q4.wheres
+  end
+
+  test "set comparison against a literal list on the right", %{grammar: g} do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t WHERE tags ⊆ ["a", "b", "c"] { id }))
+    assert [{:cmp, :subset_eq, ["tags"], ["a", "b", "c"]}] = q.wheres
+  end
+
+  test "negating a set comparison via not (...), lang_spec §5.9's own stated idiom", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{} = q} = run(g, ~s(SELECT t WHERE NOT tags ⊆ allowed { id }))
+    assert [{:not, {:cmp, :subset_eq, ["tags"], {:field, ["allowed"]}}}] = q.wheres
+  end
+
   test "an unterminated sigil with a non-/ delimiter is still a parse error, not a raise", %{
     grammar: g
   } do

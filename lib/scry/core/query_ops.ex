@@ -1456,6 +1456,40 @@ defmodule Scry.Core.QueryOps do
 
   defp resolve_predicate_lhs({:literal, value}, _row, _scope, _params), do: value
 
+  # Set comparison (lang_spec §5.9, ISO 80000-2): `⊂`/`⊃` are *proper*
+  # subset/superset (the analogous relationship `<` has to `<=`, applied
+  # one level up) -- a set compared against itself is neither its own
+  # proper subset nor its own proper superset, only its own subset-or-
+  # equal/superset-or-equal. Structural, the same "compound values
+  # compare by content, not identity" rule lang_spec §3's own `=`
+  # already states for lists -- `MapSet.new/1` before comparing means
+  # duplicate/reordered elements on either side never affect the
+  # result, matching a genuine mathematical set's own semantics rather
+  # than a literal list-equality check.
+  defp compare(:subset, a, b) when is_list(a) and is_list(b) do
+    left = MapSet.new(a)
+    right = MapSet.new(b)
+    MapSet.subset?(left, right) and left != right
+  end
+
+  defp compare(:subset_eq, a, b) when is_list(a) and is_list(b),
+    do: MapSet.subset?(MapSet.new(a), MapSet.new(b))
+
+  defp compare(:superset, a, b) when is_list(a) and is_list(b) do
+    left = MapSet.new(a)
+    right = MapSet.new(b)
+    MapSet.subset?(right, left) and left != right
+  end
+
+  defp compare(:superset_eq, a, b) when is_list(a) and is_list(b),
+    do: MapSet.subset?(MapSet.new(b), MapSet.new(a))
+
+  defp compare(op, a, b) when op in [:subset, :subset_eq, :superset, :superset_eq] do
+    raise ArgumentError,
+          "#{op} requires two list operands (lang_spec.md §5.9's own set-comparison " <>
+            "operators) -- got #{inspect(a)} and #{inspect(b)}"
+  end
+
   defp compare(op, a, b), do: ordering_result(op, term_order(a, b))
 
   defp raise_null_safety_error do

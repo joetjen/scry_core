@@ -140,7 +140,8 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_UNION, KW_ALL, KW_INTERSECT, KW_EXCEPT,
           KW_OVER, KW_PARTITION, KW_ROWS, KW_BETWEEN, KW_PRECEDING,
           KW_FOLLOWING, KW_CURRENT, KW_ROW, KW_UNBOUNDED, KW_TYPE,
-          KW_ROLLUP, KW_CUBE)
+          KW_ROLLUP, KW_CUBE,
+          KW_SUBSET, KW_SUPERSET, KW_OF, KW_EQUAL, KW_TO)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -320,6 +321,17 @@ EQ     := "="
 LT     := "<"
 GT     := ">"
 MATCH  := "~"
+
+; Set comparison (lang_spec §5.9, ISO 80000-2) -- the symbol spelling.
+; Each also has a word-form alternative (`subset_of_op` etc., near
+; `comp_op` below) built from ordinary keyword tokens, not a second
+; token here; none of these four characters is used anywhere else in
+; this grammar, so no maximal-munch/ordering conflict either way.
+SUBSET      := "⊂"
+SUBSET_EQ   := "⊆"
+SUPERSET    := "⊃"
+SUPERSET_EQ := "⊇"
+
 LBRACE := "{"
 RBRACE := "}"
 LBRACK := "["
@@ -968,7 +980,30 @@ predicate_lhs := call_with_path | call | path
 
 in_lhs := lhs_expr:call_with_path | lhs_expr:call | lhs_expr:path | lhs_literal:literal
 
+; Set comparison's own four operators (lang_spec §5.9) each have two
+; spellings -- a symbol token (declared with the other operator tokens
+; above) and a word-form phrase built from ordinary keyword tokens.
+; `subset_or_eq_op`/`superset_or_eq_op` are tried before the shorter
+; `subset_of_op`/`superset_of_op` per this file's own "more specific
+; first" convention (`call_with_path` before `call`, elsewhere in this
+; file), though there's no real overlap to resolve here -- the two
+; phrases diverge at their own second token (`KW_OF` vs `KW_OR`).
 comp_op := LE | GE | NOT_EQ | EQ | LT | GT | MATCH
+         | SUBSET_EQ | subset_or_eq_op | SUBSET | subset_of_op
+         | SUPERSET_EQ | superset_or_eq_op | SUPERSET | superset_of_op
+
+; `marker:KW_SUBSET`/`marker:KW_SUPERSET` -- named so this rule's own
+; capture map is non-empty (a bare, fully-unnamed keyword sequence
+; produces no capture key at all, confirmed against this file's own
+; `group_by_clause := KW_GROUP KW_BY (...)`, whose handler never sees
+; either token) -- `Scry.Core.Actions`' own handler for each of these
+; four rules ignores the captured token's own text and returns the
+; matching symbol directly, since a match here can only ever mean one
+; thing regardless of which of the two spellings was actually used.
+subset_of_op       := marker:KW_SUBSET KW_OF
+subset_or_eq_op    := marker:KW_SUBSET KW_OR KW_EQUAL KW_TO
+superset_of_op     := marker:KW_SUPERSET KW_OF
+superset_or_eq_op  := marker:KW_SUPERSET KW_OR KW_EQUAL KW_TO
 
 literal_list := head:literal (COMMA tail:literal)*
 

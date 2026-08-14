@@ -74,7 +74,12 @@ defmodule Scry.Core.Grammar.KeywordRefiner do
     "unbounded" => :KW_UNBOUNDED,
     "type" => :KW_TYPE,
     "rollup" => :KW_ROLLUP,
-    "cube" => :KW_CUBE
+    "cube" => :KW_CUBE,
+    "subset" => :KW_SUBSET,
+    "superset" => :KW_SUPERSET,
+    "of" => :KW_OF,
+    "equal" => :KW_EQUAL,
+    "to" => :KW_TO
   }
 
   if @ichor_token_refiner_loaded? do
