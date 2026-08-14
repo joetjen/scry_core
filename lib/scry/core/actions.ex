@@ -493,10 +493,14 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  def handle_rule(:field_body_item, %{alias: alias_cap, expr: expr_cap}, ctx) do
+  def handle_rule(:field_body_item, %{alias: alias_cap, expr: expr_cap} = captures, ctx) do
     with {:ok, alias_name, ctx} <- alias_cap.eval.(ctx),
-         {:ok, expr, ctx} <- expr_cap.eval.(ctx) do
-      {:ok, {:computed, alias_name, expr}, ctx}
+         {:ok, expr, ctx} <- expr_cap.eval.(ctx),
+         {:ok, scoping_where, ctx} <- maybe_eval(captures, :where_clause, ctx) do
+      case scoping_where do
+        :absent -> {:ok, {:computed, alias_name, expr}, ctx}
+        predicate -> {:ok, {:computed, alias_name, expr, predicate}, ctx}
+      end
     end
   end
 

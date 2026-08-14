@@ -1409,6 +1409,108 @@ defmodule Scry.Core.ExecutorTest do
       assert rows == [%{"name" => "Widget"}]
     end
 
+    test "a computed field's own trailing WHERE scopes only that item's own aggregate" do
+      # error_sum sees only the rows where status >= 500; total_sum
+      # (no trailing WHERE of its own) sees every row in the group --
+      # proves the scoping is genuinely per-item, not query-wide.
+      requests =
+        Map.put(@data, ["requests"], [
+          %{"service" => "a", "status" => 200, "errors" => 0},
+          %{"service" => "a", "status" => 500, "errors" => 5},
+          %{"service" => "a", "status" => 200, "errors" => 0}
+        ])
+
+      query = %Query{
+        source: ["requests"],
+        group_bys: [["service"]],
+        select: [
+          {:field, ["service"]},
+          {:computed, "error_sum", {:call, "sum", [{:field, ["errors"]}]},
+           {:cmp, :ge, ["status"], 500}},
+          {:computed, "total_sum", {:call, "sum", [{:field, ["errors"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = query |> Executor.run(FakeEngine, requests) |> materialize()
+      assert rows == [%{"service" => "a", "error_sum" => 5, "total_sum" => 5}]
+    end
+
+    test "a scoping WHERE that excludes every row still yields a well-defined (zero-row) aggregate" do
+      requests =
+        Map.put(@data, ["requests"], [
+          %{"service" => "a", "status" => 200, "errors" => 0},
+          %{"service" => "a", "status" => 200, "errors" => 0}
+        ])
+
+      query = %Query{
+        source: ["requests"],
+        group_bys: [["service"]],
+        select: [
+          {:field, ["service"]},
+          {:computed, "error_sum", {:call, "sum", [{:field, ["errors"]}]},
+           {:cmp, :ge, ["status"], 500}}
+        ]
+      }
+
+      # sum() over zero rows is nil (an empty-aggregate result), the
+      # same well-defined "empty, not an error" shape a zero-row flat
+      # aggregate already has, just reached via row-scoping instead of
+      # an empty source.
+      assert {:ok, rows} = query |> Executor.run(FakeEngine, requests) |> materialize()
+      assert rows == [%{"service" => "a", "error_sum" => nil}]
+    end
+
+    test "lang_spec.md §8.2's own worked shape: HAVING references a scoped alias combined with arithmetic" do
+      # error_rate is scoped to 5xx rows via its own trailing WHERE;
+      # total_rate is unscoped -- HAVING's own "error_rate / total_rate"
+      # must see the *same* scoping the SELECT projection uses for
+      # "error_rate", not silently recompute it unscoped.
+      requests =
+        Map.put(@data, ["requests"], [
+          %{"service" => "a", "status" => 200, "errors" => 0},
+          %{"service" => "a", "status" => 500, "errors" => 5},
+          %{"service" => "a", "status" => 200, "errors" => 0},
+          %{"service" => "a", "status" => 200, "errors" => 0},
+          %{"service" => "b", "status" => 500, "errors" => 1},
+          %{"service" => "b", "status" => 200, "errors" => 0}
+        ])
+
+      query = %Query{
+        source: ["requests"],
+        group_bys: [["service"]],
+        havings: [
+          {:cmp, :gt, {:arith, :div, ["error_rate"], ["total_rate"]}, Rational.new(1, 20)},
+          {:cmp, :gt, ["total_rate"], 3}
+        ],
+        select: [
+          {:field, ["service"]},
+          {:computed, "error_rate", {:call, "sum", [{:field, ["errors"]}]},
+           {:cmp, :ge, ["status"], 500}},
+          {:computed, "total_rate", {:call, "count", [{:field, ["status"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = query |> Executor.run(FakeEngine, requests) |> materialize()
+
+      # a: error_rate=5, total_rate=4, 5/4=1.25 > 0.05 and 4 > 3 -- kept.
+      # b: error_rate=1, total_rate=2, 1/2=0.5 > 0.05 but 2 is not > 3 --
+      # dropped by the second HAVING clause alone, proving both clauses
+      # (and the alias's own scoping) are genuinely evaluated.
+      assert rows == [%{"service" => "a", "error_rate" => 5, "total_rate" => 4}]
+    end
+
+    test "a trailing WHERE on a computed field outside any aggregate context is a clean error" do
+      query = %Query{
+        source: ["products"],
+        select: [
+          {:field, ["name"]},
+          {:computed, "bad", {:field, ["price"]}, {:cmp, :gt, ["price"], 0}}
+        ]
+      }
+
+      assert {:error, {:body_item_where_requires_aggregate, "bad"}} = run(query)
+    end
+
     test "a zero-row flat aggregate is still one well-defined output row" do
       query = %Query{
         source: ["customer_orders"],

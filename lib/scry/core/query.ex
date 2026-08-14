@@ -152,6 +152,23 @@ defmodule Scry.Core.Query do
   type; every other numeric shape (`integer()`/`Scry.Core.Rational.t()`)
   stays exact.
 
+  `{:computed, alias, expr, predicate}` is the same shape with a
+  trailing, per-item `WHERE` attached (lang_spec.md §8.2's own worked
+  example: `error_rate: rate(30s) WHERE status ~ @r/^5/`) -- scopes
+  which rows contribute to *this one* item's own aggregate, distinct
+  from the query's top-level `where` (filters every row/aggregate
+  alike) and `having` (filters *after* aggregation, on already-grouped
+  results). Meaningful only where an aggregate call is actually being
+  computed across a group's own member rows (`Scry.Core.QueryOps.
+  project_group_item/6` filters `member_rows` through `predicate`
+  before resolving `expr` against what survives) -- a flat, non-
+  aggregate `SELECT` has no group of rows to scope in the first place,
+  so a computed field written with a trailing `WHERE` there is a clear
+  *execution*-time error instead (nothing about the shape is invalid
+  grammar, only meaningless outside an aggregate context -- the
+  identical "legal to parse, an error to run" posture `WITH RECURSIVE`'s
+  own `recursive_with_requires_union` already takes).
+
   A body item may also be written `...<fragment-name>` in query text
   (lang_spec.md §5.11/§9, GraphQL-style reusable shape) -- but that never
   appears as a shape in `body_item()` itself. `Scry.Core.Actions` parses
@@ -470,6 +487,7 @@ defmodule Scry.Core.Query do
           {:field, [String.t()]}
           | {:field, [String.t()], {:param, String.t()}}
           | {:computed, String.t(), expr()}
+          | {:computed, String.t(), expr(), predicate()}
           | t()
           | {:variant, term()}
 

@@ -1067,6 +1067,59 @@ line two""" { name }))
     assert q.select == [{:computed, "total", {:call, "sum", [{:field, ["price"]}]}}]
   end
 
+  describe "a computed field's own trailing WHERE (lang_spec.md §8.2)" do
+    test "a trailing WHERE widens {:computed, alias, expr} to a 4-tuple", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT metrics { error_sum: sum(errors) WHERE status > 4 }]
+               )
+
+      assert q.select == [
+               {:computed, "error_sum", {:call, "sum", [{:field, ["errors"]}]},
+                {:cmp, :gt, ["status"], 4}}
+             ]
+    end
+
+    test "a computed field with no trailing WHERE keeps the plain 3-tuple shape", %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { total: sum(price) }])
+      assert q.select == [{:computed, "total", {:call, "sum", [{:field, ["price"]}]}}]
+    end
+
+    test "a plain field body item is unaffected -- where_clause? is on the aliased alternative only",
+         %{grammar: g} do
+      assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { name }])
+      assert q.select == [{:field, ["name"]}]
+    end
+
+    test "the trailing WHERE's own predicate can be arbitrarily complex", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT metrics { errs: sum(errors) WHERE status >= 500 AND region not= "test" }]
+               )
+
+      assert [{:computed, "errs", {:call, "sum", _}, predicate}] = q.select
+
+      assert predicate ==
+               {:and, {:cmp, :ge, ["status"], 500}, {:cmp, :not_eq, ["region"], "test"}}
+    end
+
+    test "lang_spec.md §8.2's own worked shape parses in full", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT metrics GROUP BY service HAVING error_rate / total_rate > 0.05 AND total_rate > 10 { service, error_rate: rate(30) WHERE status > 4, total_rate: rate(30) }]
+               )
+
+      assert q.select == [
+               {:field, ["service"]},
+               {:computed, "error_rate", {:call, "rate", [30]}, {:cmp, :gt, ["status"], 4}},
+               {:computed, "total_rate", {:call, "rate", [30]}}
+             ]
+    end
+  end
+
   test "a function call as a comparison's left-hand side, inside HAVING", %{grammar: g} do
     assert {:ok, %Query{} = q} =
              run(g, ~s[SELECT orders GROUP BY id HAVING sum(total) > 200 { id }])

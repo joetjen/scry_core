@@ -1428,7 +1428,21 @@ spread := SPREAD name:field_name
 ; (the worked example's own spacing, lang_spec §9) parses correctly.
 ; Not something fixable at the grammar level -- it's the lexer having
 ; already committed to the wrong token before the parser ever runs.
-field_body_item := alias:field_name COLON expr:expression
+; `where_clause?` on the *aliased/computed* alternative only, not the
+; plain-field one below it -- lang_spec §8.2's own worked example
+; (`error_rate: rate(30s) WHERE status ~ @r/^5/`, the "honest flag"
+; caveat's second half) scopes which rows contribute to *this one*
+; computed field's own aggregate, a concept a bare `<field>` (no
+; aggregate of its own to scope) has no use for. Reuses `where_clause`
+; verbatim -- the identical rule `select`'s own top-level `WHERE`
+; already uses, same predicate grammar, just a different attachment
+; point. `Scry.Core.Actions`' own handler produces `{:computed, alias,
+; expr}` when absent (zero shape change for every existing computed
+; field) or `{:computed, alias, expr, predicate}` when present -- the
+; same "widen the tuple's own arity only when the modifier is actually
+; there" idiom `field:path if_clause?`'s own `{:field, path, param}`
+; already established one line down.
+field_body_item := alias:field_name COLON expr:expression where_clause?
                   | field:path if_clause?
 
 ; Always `$<param>` specifically (lang_spec §5.3: "`<field> IF

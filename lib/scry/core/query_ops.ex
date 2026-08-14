@@ -582,6 +582,7 @@ defmodule Scry.Core.QueryOps do
       MapSet.new(shell_select, fn
         {:field, path} -> List.last(path)
         {:computed, alias_name, _expr} -> alias_name
+        {:computed, alias_name, _expr, _predicate} -> alias_name
       end)
 
     nested_items
@@ -742,6 +743,7 @@ defmodule Scry.Core.QueryOps do
   defp select_has_call?(select), do: Enum.any?(select, &body_item_has_call?/1)
 
   defp body_item_has_call?({:computed, _alias, expr}), do: expr_has_call?(expr)
+  defp body_item_has_call?({:computed, _alias, expr, _predicate}), do: expr_has_call?(expr)
   defp body_item_has_call?(_other), do: false
 
   defp expr_has_call?({:call, _name, _args}), do: true
@@ -946,6 +948,15 @@ defmodule Scry.Core.QueryOps do
     if expr_has_aggregate_call?(expr), do: :not_streamable, else: {:ok, []}
   end
 
+  # Covers `{:computed, alias, expr, predicate}` (a per-item scoping
+  # `WHERE`, lang_spec.md §8.2) too, via simple arity mismatch against
+  # the two 3-tuple clauses above -- no clause of its own needed. The
+  # streaming/incremental fold (`accumulate_chunk/5`, `update_agg/6`)
+  # has no way to apply a *per-body-item* filter before folding a row
+  # into its running accumulator, only the query's own top-level
+  # `where`; forcing the eager path here (`project_group_item/6`
+  # already handles this shape for real) is simpler and safer than
+  # teaching the incremental fold a second, item-scoped filter.
   defp streaming_body_item_calls(_other), do: :not_streamable
 
   defp streaming_having_calls(havings) do
@@ -1442,6 +1453,20 @@ defmodule Scry.Core.QueryOps do
   defp body_item_has_aggregate_call?({:computed, _alias, expr}),
     do: expr_has_aggregate_call?(expr)
 
+  # A 4-tuple computed item (a per-item scoping `WHERE` attached,
+  # lang_spec.md §8.2) is routed to the aggregate path exactly when its
+  # own `expr` genuinely has an aggregate call, the identical rule the
+  # 3-tuple clause just above already applies -- *not* unconditionally
+  # true just because a trailing `WHERE` is present. A trailing `WHERE`
+  # with no aggregate inside `expr` at all, and nothing else in the
+  # query forcing the aggregate path either, correctly falls through to
+  # the flat path instead, where `project_item/3`'s own matching clause
+  # raises a clear `body_item_where_requires_aggregate` error -- the
+  # right outcome either way, since a trailing `WHERE` scoping nothing
+  # is exactly as meaningless as scoping an aggregate that doesn't run.
+  defp body_item_has_aggregate_call?({:computed, _alias, expr, _predicate}),
+    do: expr_has_aggregate_call?(expr)
+
   defp body_item_has_aggregate_call?(_other), do: false
 
   defp havings_have_aggregate_call?(havings),
@@ -1912,6 +1937,15 @@ defmodule Scry.Core.QueryOps do
   defp resolve_group_lhs({:unary, _op, _e} = expr, member_rows, scope, params, time_field),
     do: resolve_group_rhs(expr, member_rows, scope, params, time_field)
 
+  defp resolve_group_lhs(
+         {:scoped, _predicate, _expr} = scoped,
+         member_rows,
+         scope,
+         params,
+         time_field
+       ),
+       do: resolve_group_rhs(scoped, member_rows, scope, params, time_field)
+
   defp resolve_group_lhs(path, member_rows, scope, _params, _time_field) when is_list(path),
     do: get_path(representative(member_rows), scope, path)
 
@@ -1985,6 +2019,19 @@ defmodule Scry.Core.QueryOps do
 
   defp resolve_group_rhs({:dot, base, path}, member_rows, scope, params, time_field) do
     get_path_in(resolve_group_rhs(base, member_rows, scope, params, time_field), path)
+  end
+
+  # Internal-only marker `rewrite_having_aliases/2`'s own comment
+  # introduces -- never produced by the parser, only by substituting a
+  # 4-tuple `{:computed, alias, expr, predicate}` `SELECT` item's own
+  # value into a `HAVING` reference to that same alias. Filters
+  # `member_rows` through `predicate` first, exactly like `project_
+  # group_item/6`'s own matching clause does for the `SELECT`
+  # projection itself -- the two stay consistent about what the alias
+  # actually means, same scoped row set either way.
+  defp resolve_group_rhs({:scoped, predicate, expr}, member_rows, scope, params, time_field) do
+    scoped_rows = Enum.filter(member_rows, &eval_predicate(predicate, &1, scope, params))
+    resolve_group_rhs(expr, scoped_rows, scope, params, time_field)
   end
 
   defp resolve_group_rhs(literal, _member_rows, _scope, _params, _time_field), do: literal
@@ -2341,6 +2388,18 @@ defmodule Scry.Core.QueryOps do
   defp project_item({:computed, alias_name, expr}, row, params),
     do: {:ok, alias_name, resolve_rhs(expr, row, [], params)}
 
+  # A computed field's own trailing `WHERE` (lang_spec.md §8.2's own
+  # worked example, `Scry.Core.Query`'s own moduledoc has the full
+  # "why this shape" reasoning) scopes which rows contribute to *this
+  # one item's own aggregate* -- meaningless in a flat, non-aggregate
+  # `SELECT`, since there's no group of member rows here to scope at
+  # all, just the one `row` already being projected. A clear, tagged
+  # error value (the same "structural failure raised as a value, not a
+  # crash" posture `{:variant, item}` just below already takes), not a
+  # silent ignore of the WHERE and not a raw `FunctionClauseError`.
+  defp project_item({:computed, alias_name, _expr, _predicate}, _row, _params),
+    do: {:error, {:body_item_where_requires_aggregate, alias_name}}
+
   defp project_item({:field, path, {:param, _} = condition}, row, params) do
     case resolve_rhs(condition, row, [], params) do
       falsy when falsy in [nil, false] -> :omit
@@ -2410,8 +2469,24 @@ defmodule Scry.Core.QueryOps do
     alias_exprs =
       select_items
       |> Enum.flat_map(fn
-        {:computed, alias_name, expr} -> [{alias_name, expr}]
-        _other -> []
+        {:computed, alias_name, expr} ->
+          [{alias_name, expr}]
+
+        # A 4-tuple alias (its own per-item scoping `WHERE`, lang_spec.md
+        # §8.2) substitutes to a `{:scoped, predicate, expr}` marker, not
+        # `expr` alone -- `HAVING error_rate > 0.05` referencing an
+        # `error_rate: rate(30s) WHERE status ~ @r/^5/` alias must see
+        # the *same* row-scoping the `SELECT` projection of `error_rate`
+        # itself uses, or the two would silently disagree about what
+        # "error_rate" even means. `resolve_group_lhs/rhs`'s own new
+        # `{:scoped, ...}` clause (below) is the only place this
+        # internal-only tag is ever produced or consumed -- never
+        # something the parser itself writes.
+        {:computed, alias_name, expr, predicate} ->
+          [{alias_name, {:scoped, predicate, expr}}]
+
+        _other ->
+          []
       end)
       |> Map.new()
 
@@ -2518,6 +2593,29 @@ defmodule Scry.Core.QueryOps do
     {:ok, alias_name, resolve_group_rhs(expr, member_rows, scope, params, time_field)}
   end
 
+  # A computed field's own trailing `WHERE` (lang_spec.md §8.2, `Scry.
+  # Core.Query`'s own moduledoc) -- filters `member_rows` down to only
+  # the ones satisfying `predicate` *before* resolving `expr` against
+  # what survives, scoping an aggregate call inside `expr` to just
+  # those rows, independent of the group's own `having`/other computed
+  # items, each of which still sees the *full*, unfiltered
+  # `member_rows` of its own. Reuses `eval_predicate/4` (the ordinary
+  # per-row `WHERE` evaluator) directly -- a per-item scoping predicate
+  # is evaluated exactly the same way the query's own top-level `where`
+  # already is, just applied to one group's own member rows instead of
+  # the whole source.
+  defp project_group_item(
+         {:computed, alias_name, expr, predicate},
+         member_rows,
+         _rolled_up,
+         scope,
+         params,
+         time_field
+       ) do
+    scoped_rows = Enum.filter(member_rows, &eval_predicate(predicate, &1, scope, params))
+    {:ok, alias_name, resolve_group_rhs(expr, scoped_rows, scope, params, time_field)}
+  end
+
   defp project_group_item(item, _member_rows, _rolled_up, _scope, _params, _time_field),
     do: {:error, {:unsupported_grouped_body_item, item}}
 
@@ -2531,6 +2629,32 @@ defmodule Scry.Core.QueryOps do
   defp rewrite_body_item({:computed, alias_name, expr}, acc) do
     {rewritten_expr, acc} = rewrite_expr(expr, acc)
     {{:computed, alias_name, rewritten_expr}, acc}
+  end
+
+  # A 4-tuple computed item (its own per-item scoping `WHERE`,
+  # lang_spec.md §8.2) is deliberately *not* threaded through
+  # `rewrite_expr/2` the way a 3-tuple item is just above -- combining
+  # a window function's own `OVER (...)` row-ordering/framing with a
+  # *second*, independent row-scoping mechanism on the same item would
+  # need the whole windowed-aggregation pipeline (`run_grouped_with_
+  # windows/4`, `augment_with_window_values/5`) taught about scoping
+  # too, real, untested surface area no worked example asks for. Left
+  # unrewritten, a genuine `{:window, ...}` node buried inside would
+  # otherwise leak straight through to `resolve_group_rhs/5`'s own
+  # catch-all as if it were a plain literal -- a silently wrong result,
+  # not an error -- so this checks for one first (via a throwaway,
+  # zero-side-effect `rewrite_expr/2` call, its own accumulator
+  # discarded either way) and raises a clear, named error instead.
+  defp rewrite_body_item({:computed, alias_name, expr, _predicate} = item, acc) do
+    case rewrite_expr(expr, {0, []}) do
+      {_rewritten, {_next_index, []}} ->
+        {item, acc}
+
+      {_rewritten, {_next_index, [_ | _]}} ->
+        raise ArgumentError,
+              "a window function (OVER (...)) combined with a per-item scoping WHERE, " <>
+                "on computed field #{inspect(alias_name)}, isn't supported yet"
+    end
   end
 
   defp rewrite_body_item(other, acc), do: {other, acc}
