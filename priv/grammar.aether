@@ -985,7 +985,70 @@ comparison_ep1e := NEVER
 ; already states for `query.variant` and a `:variant` body item, now
 ; extended to cover this new leaf shape too.
 
-predicate_lhs := qualified_call_with_path | qualified_call | call_with_path | call | path
+; Arithmetic/bitwise on a comparison's own left-hand side (lang_spec
+; §8.2's own worked `HAVING` example, `error_rate / total_rate > 0.05`)
+; -- a real gap `qualified_call_with_path | ... | path` alone can never
+; close, none of those five alternatives ever consume an operator.
+; Deliberately NOT `predicate_lhs := expression` outright (the widest
+; existing arithmetic rule): a bare field through `expression ->
+; primary` reduces to a wrapped `{:field, path}` tuple, not the plain
+; `[String.t()]` list every `{:cmp, op, lhs, rhs}` consumer already
+; expects from a bare-field `predicate_lhs` today (`order_item`'s own
+; `key:expression` widening took exactly this shape change once
+; already, marked `**Breaking**` in the changelog for it) -- repeating
+; that here would ripple through every `WHERE`/`HAVING` comparison in
+; this whole ecosystem for a need that's genuinely arithmetic-only.
+;
+; `bitwise_lhs | additive_lhs | mult_lhs`, each requiring at least one
+; *real* operator application of its own tier (`head:*_tail`, not
+; `*_tail*`) -- structurally unable to match a bare field/call with
+; zero operators, so ordering relative to the five narrow alternatives
+; below genuinely doesn't matter for correctness (unlike this file's
+; usual "more specific first" convention, which exists to resolve a
+; *prefix* collision between two alternatives that could both match
+; the same short input -- there is no such collision here, since these
+; three can never successfully match on their own what the narrow ones
+; already fully consume). Three tiers, not one `predicate_lhs_arith :=
+; expression`-shaped rule, so each can carry its own tail's own capture
+; keys through to a distinct `Scry.Core.Actions` handler (`fold_arith`/
+; `fold_bitwise`, the exact same folds `:additive`/`:multiplicative`/
+; `:expression` already use) -- reusing `expression`'s own top rule
+; directly here would hit the identical bare-field wrapping problem
+; just discussed, one tier up.
+;
+; A leading unary (`HAVING -count(id) > 0`, no operator *after* it)
+; still doesn't parse -- `head:mult_tail` etc. all require a tail
+; *following* the base, and a bare unary-prefixed primary has none;
+; deliberately left unsupported (not lang_spec's own worked example,
+; no concrete need found), same "stated, demand-driven scope limit,
+; not an oversight" posture EP2's own named-argument gap already took.
+;
+; Reachable from `WHERE` too, not gated to `HAVING` alone --
+; `predicate_lhs` is the one rule both share via `comparison` above,
+; and nothing about a `WHERE price * quantity > 100`-shaped comparison
+; needs disallowing once the machinery exists; the same "falls out for
+; free, not a kind-specific carve-out" framing `order_item`'s own
+; widening already used.
+; `(rest:X)*` -- a *parenthesized* single named reference under a star,
+; not a bare `rest:X*` -- confirmed the hard way (a scratch probe): the
+; latter compiles, but the generated parser treats a name attached
+; directly to a starred *rule* reference as if it were a *token*
+; capture instead (`rest: {:text, <the whole matched span's own raw
+; text>}`), alongside -- not instead of -- the real per-repetition list
+; still keyed under the referenced rule's own name (`mult_tail`, here),
+; the same "spurious second capture" class of finding `order_item`'s
+; own `dir:(KW_DESC | KW_ASC)?` comment already documents for a named
+; optional *token* choice. Wrapping the named reference in its own
+; group before starring it (`field_list`'s own `(COMMA tail:path)*`,
+; just without a separator token to match here) is the proven-working
+; shape every other "one required, rest repeated" rule in this file
+; already uses.
+bitwise_lhs  := left:additive       head:bitwise_tail  (rest:bitwise_tail)*
+additive_lhs := left:multiplicative head:additive_tail (rest:additive_tail)*
+mult_lhs     := left:power          head:mult_tail     (rest:mult_tail)*
+
+predicate_lhs := bitwise_lhs | additive_lhs | mult_lhs
+               | qualified_call_with_path | qualified_call | call_with_path | call | path
 
 in_lhs := lhs_expr:qualified_call_with_path | lhs_expr:qualified_call
         | lhs_expr:call_with_path | lhs_expr:call | lhs_expr:path | lhs_literal:literal

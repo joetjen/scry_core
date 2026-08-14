@@ -1074,6 +1074,66 @@ line two""" { name }))
     assert q.havings == [{:cmp, :gt, {:call, "sum", [{:field, ["total"]}]}, 200}]
   end
 
+  describe "arithmetic on a comparison's own left-hand side (lang_spec.md §8.2)" do
+    test "a mult-tier expression (a / b) as HAVING's own left-hand side", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(
+                 g,
+                 ~s[SELECT metrics GROUP BY service HAVING error_rate / total_rate > 0.05 { service }]
+               )
+
+      assert q.havings == [
+               {:cmp, :gt, {:arith, :div, {:field, ["error_rate"]}, {:field, ["total_rate"]}},
+                Rational.new(1, 20)}
+             ]
+    end
+
+    test "an additive-tier expression (a + b) as HAVING's own left-hand side", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s[SELECT orders GROUP BY id HAVING a + b > 10 { id }])
+
+      assert q.havings == [{:cmp, :gt, {:arith, :add, {:field, ["a"]}, {:field, ["b"]}}, 10}]
+    end
+
+    test "a bitwise-tier expression (a & b) as HAVING's own left-hand side", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s[SELECT orders GROUP BY id HAVING flags & 1 > 0 { id }])
+
+      assert q.havings == [{:cmp, :gt, {:bitwise, :band, {:field, ["flags"]}, 1}, 0}]
+    end
+
+    test "arithmetic-LHS respects ordinary precedence, a + b * c", %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s[SELECT orders GROUP BY id HAVING a + b * c > 10 { id }])
+
+      assert q.havings == [
+               {:cmp, :gt,
+                {:arith, :add, {:field, ["a"]}, {:arith, :mul, {:field, ["b"]}, {:field, ["c"]}}},
+                10}
+             ]
+    end
+
+    test "arithmetic on a comparison's own left-hand side also parses in WHERE, not just HAVING",
+         %{grammar: g} do
+      assert {:ok, %Query{} = q} =
+               run(g, ~s[SELECT orders WHERE price * quantity > 100 { id }])
+
+      assert q.wheres == [
+               {:cmp, :gt, {:arith, :mul, {:field, ["price"]}, {:field, ["quantity"]}}, 100}
+             ]
+    end
+
+    test "a bare field/call comparison LHS is completely unaffected", %{grammar: g} do
+      assert {:ok, %Query{} = q1} = run(g, ~s[SELECT orders WHERE price > 10 { id }])
+      assert q1.wheres == [{:cmp, :gt, ["price"], 10}]
+
+      assert {:ok, %Query{} = q2} =
+               run(g, ~s[SELECT orders GROUP BY id HAVING sum(total) > 200 { id }])
+
+      assert q2.havings == [{:cmp, :gt, {:call, "sum", [{:field, ["total"]}]}, 200}]
+    end
+  end
+
   test "a bare identifier with no parens still parses as a plain field path, not a call", %{
     grammar: g
   } do

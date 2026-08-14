@@ -583,6 +583,38 @@ defmodule Scry.Core.Actions do
     end
   end
 
+  # `predicate_lhs`'s own three arithmetic/bitwise alternatives
+  # (`priv/grammar.aether`'s own comment on `bitwise_lhs`/`additive_lhs`/
+  # `mult_lhs` has the full "why three tiers, not one `expression`
+  # reference" reasoning) -- each folds `[head | rest]` onto `left` via
+  # the exact same `fold_bitwise`/`fold_arith` helpers `:expression`/
+  # `:additive`/`:multiplicative` already use above, just seeded from a
+  # `head` + `rest` pair (always at least one tail) instead of a
+  # possibly-empty `*`-repeated list.
+  def handle_rule(:bitwise_lhs, %{left: left_cap, head: head_cap, rest: rest_caps}, ctx) do
+    with {:ok, left, ctx} <- left_cap.eval.(ctx),
+         {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, rest, ctx} <- eval_list(:rest, rest_caps, ctx) do
+      {:ok, fold_bitwise(left, [head | rest]), ctx}
+    end
+  end
+
+  def handle_rule(:additive_lhs, %{left: left_cap, head: head_cap, rest: rest_caps}, ctx) do
+    with {:ok, left, ctx} <- left_cap.eval.(ctx),
+         {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, rest, ctx} <- eval_list(:rest, rest_caps, ctx) do
+      {:ok, fold_arith(left, [head | rest]), ctx}
+    end
+  end
+
+  def handle_rule(:mult_lhs, %{left: left_cap, head: head_cap, rest: rest_caps}, ctx) do
+    with {:ok, left, ctx} <- left_cap.eval.(ctx),
+         {:ok, head, ctx} <- head_cap.eval.(ctx),
+         {:ok, rest, ctx} <- eval_list(:rest, rest_caps, ctx) do
+      {:ok, fold_arith(left, [head | rest]), ctx}
+    end
+  end
+
   # `exp` present vs. absent are two genuinely different capture sets
   # (`%{base:, exp:}` vs. just `%{base:}`), the same clause-order
   # disambiguation `comparison`'s own alternatives already use below --

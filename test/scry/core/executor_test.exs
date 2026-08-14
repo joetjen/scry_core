@@ -1324,6 +1324,91 @@ defmodule Scry.Core.ExecutorTest do
       assert rows == [%{"customer_id" => 1, "total" => 125}]
     end
 
+    test "HAVING can reference a computed field's own alias, not just a literal call" do
+      # customer 1: sum(total) = 125; customer 3: sum(total) = 20 --
+      # HAVING references the *alias* "total", never repeating the
+      # sum(...) call itself, unlike every HAVING test above it.
+      query = %Query{
+        source: ["customer_orders"],
+        group_bys: [["customer_id"]],
+        havings: [{:cmp, :gt, ["total"], 100}],
+        select: [
+          {:field, ["customer_id"]},
+          {:computed, "total", {:call, "sum", [{:field, ["total"]}]}}
+        ]
+      }
+
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"customer_id" => 1, "total" => 125}]
+    end
+
+    test "HAVING supports arithmetic on the comparison's own left-hand side" do
+      query = %Query{
+        source: ["customer_orders"],
+        group_bys: [["customer_id"]],
+        havings: [{:cmp, :gt, {:arith, :mul, {:call, "count", [{:field, ["id"]}]}, 100}, 150}],
+        select: [
+          {:field, ["customer_id"]},
+          {:computed, "count", {:call, "count", [{:field, ["id"]}]}}
+        ]
+      }
+
+      # customer 1 has 2 orders (2 * 100 = 200 > 150, kept); customer 3
+      # has 1 (1 * 100 = 100, not > 150, dropped).
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"customer_id" => 1, "count" => 2}]
+    end
+
+    test "HAVING alias + arithmetic together -- lang_spec.md §8.2's own worked shape" do
+      # error_rate/total_rate, both computed aliases, combined via
+      # division on HAVING's own left-hand side -- the exact combination
+      # the worked example's own "error_rate / total_rate > 0.05" needs,
+      # modeled here with sum(...) in place of rate(...) (core has no
+      # time-series `LAST`/`time_field` of its own to drive a real
+      # rate() with).
+      query = %Query{
+        source: ["orders"],
+        group_bys: [["service"]],
+        havings: [
+          {:cmp, :gt, {:arith, :div, {:field, ["error_sum"]}, {:field, ["total_sum"]}},
+           Rational.new(3, 10)}
+        ],
+        select: [
+          {:field, ["service"]},
+          {:computed, "error_sum", {:call, "sum", [{:field, ["errors"]}]}},
+          {:computed, "total_sum", {:call, "sum", [{:field, ["total"]}]}}
+        ]
+      }
+
+      data =
+        Map.put(@data, ["orders"], [
+          %{"service" => "a", "total" => 10, "errors" => 1},
+          %{"service" => "a", "total" => 20, "errors" => 3},
+          %{"service" => "b", "total" => 5, "errors" => 4}
+        ])
+
+      assert {:ok, rows} =
+               query |> Executor.run(FakeEngine, data) |> materialize()
+
+      # a: 4/30 = 0.1333.. (not > 0.3, dropped); b: 4/5 = 0.8 (> 0.3, kept).
+      assert rows == [%{"service" => "b", "error_sum" => 4, "total_sum" => 5}]
+    end
+
+    test "WHERE also accepts arithmetic on a comparison's own left-hand side" do
+      # `predicate_lhs` is shared between WHERE and HAVING via the same
+      # `comparison` rule -- falls out for free, not gated to HAVING.
+      query = %Query{
+        source: ["products"],
+        wheres: [{:cmp, :gt, {:arith, :mul, {:field, ["price"]}, {:field, ["cost"]}}, 10}],
+        select: [{:field, ["name"]}]
+      }
+
+      # Widget: price 3 * cost 4 = 12 (> 10, kept); Gadget: price 4 *
+      # cost 2 = 8 (not > 10, dropped).
+      assert {:ok, rows} = run(query)
+      assert rows == [%{"name" => "Widget"}]
+    end
+
     test "a zero-row flat aggregate is still one well-defined output row" do
       query = %Query{
         source: ["customer_orders"],

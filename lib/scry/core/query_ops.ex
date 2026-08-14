@@ -100,6 +100,7 @@ defmodule Scry.Core.QueryOps do
   """
   @spec run_flat(Enumerable.t(), Query.t(), params()) :: {:ok, Enumerable.t()} | {:error, term()}
   def run_flat(rows, %Query{} = query, params) do
+    query = %{query | havings: rewrite_having_aliases(query.havings, query.select)}
     scope = []
     {windows, _rewritten} = collect_and_rewrite_window_calls(query.select)
 
@@ -1631,6 +1632,23 @@ defmodule Scry.Core.QueryOps do
     get_path_in(resolve_rhs(base, row, scope, params), path)
   end
 
+  # `predicate_lhs`'s own `bitwise_lhs`/`additive_lhs`/`mult_lhs`
+  # alternatives (`priv/grammar.aether`'s own comment has the full
+  # "why arithmetic on a comparison's own left-hand side" reasoning) --
+  # `resolve_rhs/4` already fully resolves an `{:arith,...}`/
+  # `{:bitwise,...}`/`{:unary,...}` tree (an ordinary computed `SELECT`
+  # field already needs that), so the top node of a comparison's own
+  # LHS just delegates to it wholesale rather than duplicating that
+  # recursion here.
+  defp resolve_predicate_lhs({:arith, _op, _l, _r} = expr, row, scope, params),
+    do: resolve_rhs(expr, row, scope, params)
+
+  defp resolve_predicate_lhs({:bitwise, _op, _l, _r} = expr, row, scope, params),
+    do: resolve_rhs(expr, row, scope, params)
+
+  defp resolve_predicate_lhs({:unary, _op, _e} = expr, row, scope, params),
+    do: resolve_rhs(expr, row, scope, params)
+
   defp resolve_predicate_lhs(path, row, scope, _params) when is_list(path),
     do: get_path(row, scope, path)
 
@@ -1877,6 +1895,22 @@ defmodule Scry.Core.QueryOps do
   defp resolve_group_lhs({:dot, base, path}, member_rows, scope, params, time_field) do
     get_path_in(resolve_group_rhs(base, member_rows, scope, params, time_field), path)
   end
+
+  # Same delegation `resolve_predicate_lhs/4`'s own matching clauses
+  # take, one level up (grouped/`HAVING` path, not flat `WHERE`) --
+  # `resolve_group_rhs/5` already fully resolves an `{:arith,...}`/
+  # `{:bitwise,...}`/`{:unary,...}` tree, aggregate calls inside it
+  # included (its own `{:call, name, args}` clause is aggregate-aware),
+  # so `error_rate / total_rate`'s own top `{:arith, :div, ...}` node
+  # just delegates wholesale.
+  defp resolve_group_lhs({:arith, _op, _l, _r} = expr, member_rows, scope, params, time_field),
+    do: resolve_group_rhs(expr, member_rows, scope, params, time_field)
+
+  defp resolve_group_lhs({:bitwise, _op, _l, _r} = expr, member_rows, scope, params, time_field),
+    do: resolve_group_rhs(expr, member_rows, scope, params, time_field)
+
+  defp resolve_group_lhs({:unary, _op, _e} = expr, member_rows, scope, params, time_field),
+    do: resolve_group_rhs(expr, member_rows, scope, params, time_field)
 
   defp resolve_group_lhs(path, member_rows, scope, _params, _time_field) when is_list(path),
     do: get_path(representative(member_rows), scope, path)
@@ -2337,6 +2371,121 @@ defmodule Scry.Core.QueryOps do
       err -> err
     end
   end
+
+  # `HAVING` referencing a computed field's own alias (lang_spec.md
+  # §8.2's own worked example, `HAVING error_rate / total_rate > 0.05`
+  # against a `SELECT` body that itself defines `error_rate`/
+  # `total_rate` as `{:computed, ...}` items) -- a real gap `resolve_
+  # group_lhs/rhs`'s existing `{:field, path}`/bare-`path` clauses can
+  # never close on their own, since both look a name up as a literal
+  # row/group field, never as another body item's own alias.
+  #
+  # A single, non-transitive AST rewrite pass over `havings` alone
+  # (called once, at the very top of `run_flat/3`, before *any* eager-
+  # vs-streaming/`aggregate_query?` decision reads `query.havings`) --
+  # not a change to `resolve_group_lhs/rhs`'s own general resolution
+  # semantics, deliberately: those two are also what `project_group_
+  # item/6` uses to compute a `SELECT` body item's own value, and
+  # threading alias-lookup in there too would let one `SELECT` alias
+  # silently reference *another*, a genuinely different, bigger feature
+  # nothing here asks for (and a real infinite-recursion risk for a
+  # self-referencing alias, `x: x + 1`, that this narrower, HAVING-only,
+  # one-pass-only rewrite can't hit at all -- the substituted-in `expr`
+  # is never itself re-scanned for further alias references). Every
+  # downstream consumer of `query.havings` -- `aggregate_query?/1`
+  # (so `HAVING error_rate > 0` alone now correctly registers as
+  # needing the aggregate path, transitively through the alias, not
+  # just when `GROUP BY`/an explicit `SELECT` aggregate is *also*
+  # present), `streaming_aggregate_plan/1` and friends, `eval_group_
+  # predicate/5`, `eval_having_streaming?/5` -- sees only the fully
+  # substituted form (e.g. `{:call, "rate", [...]}}` in place of
+  # `error_rate`), so none of them need their own alias-awareness: an
+  # aliased aggregate that isn't `@streaming_capable_aggregate_names`
+  # (`rate`, here) is already, correctly, forced onto the eager path by
+  # the existing `expr_has_aggregate_call?`-based detection, same as an
+  # aggregate call written out directly always has been.
+  defp rewrite_having_aliases([], _select_items), do: []
+
+  defp rewrite_having_aliases(havings, select_items) do
+    alias_exprs =
+      select_items
+      |> Enum.flat_map(fn
+        {:computed, alias_name, expr} -> [{alias_name, expr}]
+        _other -> []
+      end)
+      |> Map.new()
+
+    if alias_exprs == %{} do
+      havings
+    else
+      Enum.map(havings, &rewrite_having_predicate(&1, alias_exprs))
+    end
+  end
+
+  defp rewrite_having_predicate({:cmp, op, lhs, rhs}, alias_exprs),
+    do: {:cmp, op, rewrite_having_expr(lhs, alias_exprs), rewrite_having_expr(rhs, alias_exprs)}
+
+  defp rewrite_having_predicate({:in, lhs, values}, alias_exprs) when is_list(values),
+    do:
+      {:in, rewrite_having_expr(lhs, alias_exprs),
+       Enum.map(values, &rewrite_having_expr(&1, alias_exprs))}
+
+  defp rewrite_having_predicate({:in, lhs, list_expr}, alias_exprs),
+    do: {:in, rewrite_having_expr(lhs, alias_exprs), rewrite_having_expr(list_expr, alias_exprs)}
+
+  defp rewrite_having_predicate({:and, l, r}, alias_exprs),
+    do: {:and, rewrite_having_predicate(l, alias_exprs), rewrite_having_predicate(r, alias_exprs)}
+
+  defp rewrite_having_predicate({:or, l, r}, alias_exprs),
+    do: {:or, rewrite_having_predicate(l, alias_exprs), rewrite_having_predicate(r, alias_exprs)}
+
+  defp rewrite_having_predicate({:not, p}, alias_exprs),
+    do: {:not, rewrite_having_predicate(p, alias_exprs)}
+
+  # `{:variant, ...}` (an unresolved EP1(e) predicate leaf) and any
+  # other shape this rewrite doesn't specifically recognize pass
+  # through unchanged -- alias substitution has nothing to contribute
+  # there, and it's not this pass's job to validate predicate shapes at
+  # all (`eval_group_predicate/5`/`eval_having_streaming?/5` already do
+  # that, downstream).
+  defp rewrite_having_predicate(other, _alias_exprs), do: other
+
+  defp rewrite_having_expr(nil, _alias_exprs), do: nil
+
+  defp rewrite_having_expr({:field, [name]}, alias_exprs),
+    do: Map.get(alias_exprs, name, {:field, [name]})
+
+  defp rewrite_having_expr([name], alias_exprs) when is_binary(name),
+    do: Map.get(alias_exprs, name, [name])
+
+  defp rewrite_having_expr({:arith, op, l, r}, alias_exprs),
+    do: {:arith, op, rewrite_having_expr(l, alias_exprs), rewrite_having_expr(r, alias_exprs)}
+
+  defp rewrite_having_expr({:bitwise, op, l, r}, alias_exprs),
+    do: {:bitwise, op, rewrite_having_expr(l, alias_exprs), rewrite_having_expr(r, alias_exprs)}
+
+  defp rewrite_having_expr({:unary, op, e}, alias_exprs),
+    do: {:unary, op, rewrite_having_expr(e, alias_exprs)}
+
+  # Deliberately *not* recursing into `{:call, name, args}`'s own
+  # `args` -- found the hard way (a real, pre-existing test regressed):
+  # an aggregate call's own argument is always a literal per-row field,
+  # never another alias's own post-aggregation value (`HAVING sum(total)
+  # > 100` alongside a `total: sum(total)` `SELECT` alias -- the *same*
+  # name "total" is simultaneously a real row field, `sum`'s own
+  # argument, *and* a computed alias; naive recursion here rewrote
+  # `sum(total)`'s own inner field reference into `sum(sum(total))`).
+  # A call left entirely untouched, args included, is the correct,
+  # conservative behavior regardless of whether it's an aggregate or an
+  # ordinary cast -- lang_spec's own worked example never needs an
+  # alias resolved *inside* a call's own arguments, only as a bare
+  # comparison/arithmetic operand.
+  defp rewrite_having_expr({:call, _name, _args} = call, _alias_exprs), do: call
+
+  defp rewrite_having_expr({:dot, base, path}, alias_exprs),
+    do: {:dot, rewrite_having_expr(base, alias_exprs), path}
+
+  defp rewrite_having_expr(other, _alias_exprs), do: other
 
   defp having_matches?(havings, member_rows, scope, params, time_field),
     do: Enum.all?(havings, &eval_group_predicate(&1, member_rows, scope, params, time_field))
