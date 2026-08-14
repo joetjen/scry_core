@@ -81,6 +81,14 @@ defmodule Scry.Core.Grammar.KeywordRefiner do
     @impl true
   end
 
+  @doc """
+  `Ichor.TokenRefiner`'s own callback shape (`@impl true` above only
+  when `ichor` is actually loaded, see this module's own moduledoc) --
+  reclassifies `raw_name` to whatever `@keywords` maps the *downcased*
+  `raw_text` to, or leaves it as `raw_name` unchanged when no entry
+  matches. `raw_text` itself always passes through unchanged either
+  way, preserving the token's original casing in the parsed output.
+  """
   def refine(raw_name, raw_text, _pos, _preceding) do
     # Unlike @keywords' own table-lookup path (which can short-circuit to
     # a bare `nil` capture meaning "no override"), Grammar.Lexer always
