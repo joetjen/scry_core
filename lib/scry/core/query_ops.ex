@@ -320,8 +320,39 @@ defmodule Scry.Core.QueryOps do
   # rest of `query` to once its source is already-materialized rows).
   # Any other source is a real one -- handed to `engine_module.
   # execute/3` whole, unmodified.
+  #
+  # `{:recursive, combined}` (lang_spec §5.4.1's own `WITH RECURSIVE`)
+  # and `{:materialized, rows}` (a transient, iteration-local override
+  # `run_recursive_fixpoint/6` installs while evaluating a recursive
+  # term against the *previous* step's own rows, never present in a
+  # freshly-parsed query) are the two shapes ordinary `WITH` bindings
+  # never produce -- see `Scry.Core.Query`'s own moduledoc for the full
+  # "why this shape, not a second `with_bindings`-adjacent field"
+  # reasoning.
   defp resolve_source(conn, %Query{source: [name]} = query, params, engine_module, with_bindings) do
     case Map.fetch(with_bindings, name) do
+      {:ok, {:recursive, %CombinedQuery{op: op, left: base, right: recursive_term}}}
+      when op in [:union, :union_all] ->
+        with {:ok, rows} <-
+               run_recursive_fixpoint(
+                 conn,
+                 name,
+                 op,
+                 base,
+                 recursive_term,
+                 params,
+                 engine_module,
+                 with_bindings
+               ) do
+          run_flat(rows, query, params)
+        end
+
+      {:ok, {:recursive, _not_a_union}} ->
+        {:error, {:query_error, {:recursive_with_requires_union, name}}}
+
+      {:ok, {:materialized, rows}} ->
+        run_flat(rows, query, params)
+
       {:ok, bound_query} ->
         with {:ok, rows} <-
                drain_document(conn, bound_query, params, engine_module, with_bindings) do
@@ -335,6 +366,155 @@ defmodule Scry.Core.QueryOps do
 
   defp resolve_source(conn, query, params, engine_module, _with_bindings),
     do: engine_module.execute(conn, query, params)
+
+  # `WITH RECURSIVE name = base UNION[ ALL] recursive_term` (lang_spec
+  # §5.4.1) -- real SQL:1999 fixpoint iteration, not a bounded
+  # approximation. `base` runs exactly once; `recursive_term` then
+  # re-runs repeatedly, each time against only the *previous* step's
+  # own newly-produced rows (semi-naive evaluation -- re-checking
+  # already-accumulated rows every step would be correct but
+  # needlessly quadratic), until a step contributes nothing.
+  #
+  # `union`'s own dedup is what makes this terminate over cyclic data
+  # at all (lang_spec's own stated reasoning) -- `new_rows` is always
+  # `next_rows` minus whatever's already in the running accumulator.
+  # `union_all` never dedupes, matching `combine_rows/3`'s own existing
+  # semantics -- termination there is entirely the query author's own
+  # responsibility (lang_spec: "use union all only if termination is
+  # otherwise guaranteed, e.g. a hops bound"), so `@max_recursive_with_iterations`
+  # below exists purely as an engineering safety net against a genuine
+  # runaway, not as part of lang_spec's own semantics.
+  @max_recursive_with_iterations 10_000
+
+  defp run_recursive_fixpoint(
+         conn,
+         name,
+         op,
+         base,
+         recursive_term,
+         params,
+         engine_module,
+         with_bindings
+       ) do
+    with {:ok, base_rows} <- drain_document(conn, base, params, engine_module, with_bindings) do
+      base_rows = Enum.map(base_rows, &to_plain_row/1)
+      accumulated = if op == :union, do: Enum.uniq(base_rows), else: base_rows
+
+      iterate_recursive_fixpoint(
+        conn,
+        name,
+        op,
+        recursive_term,
+        params,
+        engine_module,
+        with_bindings,
+        accumulated,
+        base_rows,
+        0
+      )
+    end
+  end
+
+  defp iterate_recursive_fixpoint(
+         _conn,
+         name,
+         _op,
+         _recursive_term,
+         _params,
+         _engine_module,
+         _with_bindings,
+         _accumulated,
+         _current,
+         iteration
+       )
+       when iteration >= @max_recursive_with_iterations do
+    {:error,
+     {:query_error, {:recursive_with_iteration_limit, name, @max_recursive_with_iterations}}}
+  end
+
+  defp iterate_recursive_fixpoint(
+         conn,
+         name,
+         op,
+         recursive_term,
+         params,
+         engine_module,
+         with_bindings,
+         accumulated,
+         current,
+         iteration
+       ) do
+    # Two ways the recursive term reaches the previous step's own rows
+    # (`Scry.Core.Query`'s own moduledoc has the full "why both, not
+    # just one" reasoning): (1) the recursive term's own top-level
+    # `source` may literally be `name` -- resolved via the same
+    # `resolve_source/5` this function is itself called from, just with
+    # `with_bindings[name]` overridden to `{:materialized, current}` for
+    # the duration of this one iteration; (2) an ordinary `field in
+    # name.subfield` predicate anywhere in its own `wheres`, rewritten
+    # fresh below into a literal `field in [...]` list, letting the
+    # recursive term correlate against a genuinely *different* real
+    # source instead (the canonical hierarchical-walk shape).
+    overridden = Map.put(with_bindings, name, {:materialized, current})
+    rewritten = rewrite_recursive_term(recursive_term, name, current)
+
+    with {:ok, next_rows} <- drain_document(conn, rewritten, params, engine_module, overridden) do
+      next_rows = Enum.map(next_rows, &to_plain_row/1)
+      new_rows = next_step_new_rows(op, accumulated, next_rows)
+
+      case new_rows do
+        [] ->
+          {:ok, accumulated}
+
+        _ ->
+          iterate_recursive_fixpoint(
+            conn,
+            name,
+            op,
+            recursive_term,
+            params,
+            engine_module,
+            with_bindings,
+            accumulated ++ new_rows,
+            new_rows,
+            iteration + 1
+          )
+      end
+    end
+  end
+
+  defp next_step_new_rows(:union, accumulated, next_rows) do
+    accumulated_set = MapSet.new(accumulated)
+    next_rows |> Enum.uniq() |> Enum.reject(&MapSet.member?(accumulated_set, &1))
+  end
+
+  defp next_step_new_rows(:union_all, _accumulated, next_rows), do: next_rows
+
+  defp rewrite_recursive_term(%Query{} = query, name, current_rows),
+    do: %{
+      query
+      | wheres: Enum.map(query.wheres, &rewrite_recursive_predicate(&1, name, current_rows))
+    }
+
+  defp rewrite_recursive_predicate({:in, lhs, {:field, [ref_name, field]}}, name, current_rows)
+       when ref_name == name do
+    {:in, lhs, Enum.map(current_rows, &Map.get(&1, field))}
+  end
+
+  defp rewrite_recursive_predicate({:and, l, r}, name, current_rows),
+    do:
+      {:and, rewrite_recursive_predicate(l, name, current_rows),
+       rewrite_recursive_predicate(r, name, current_rows)}
+
+  defp rewrite_recursive_predicate({:or, l, r}, name, current_rows),
+    do:
+      {:or, rewrite_recursive_predicate(l, name, current_rows),
+       rewrite_recursive_predicate(r, name, current_rows)}
+
+  defp rewrite_recursive_predicate({:not, p}, name, current_rows),
+    do: {:not, rewrite_recursive_predicate(p, name, current_rows)}
+
+  defp rewrite_recursive_predicate(other, _name, _current_rows), do: other
 
   # The shell query gets `distinct`/`limit`/`offset` stripped and any
   # column a nested item's own correlation needs appended to `select`

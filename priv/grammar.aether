@@ -141,7 +141,7 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_OVER, KW_PARTITION, KW_ROWS, KW_BETWEEN, KW_PRECEDING,
           KW_FOLLOWING, KW_CURRENT, KW_ROW, KW_UNBOUNDED, KW_TYPE,
           KW_ROLLUP, KW_CUBE,
-          KW_SUBSET, KW_SUPERSET, KW_OF, KW_EQUAL, KW_TO)
+          KW_SUBSET, KW_SUPERSET, KW_OF, KW_EQUAL, KW_TO, KW_RECURSIVE)
 
 ; A field name that happens to collide with a keyword (lang_spec §3:
 ; "Escaped with backtick only on keyword collision") -- a wholly
@@ -630,17 +630,26 @@ fragment_decl := KW_FRAGMENT name:field_name LBRACE body:body_list RBRACE
 
 ; `WITH <name> = SELECT ...` (lang_spec §9: "named reusable sub-query,
 ; SQL CTE equivalent" -- vs. `FRAGMENT`'s reusable *shape*, this is
-; reusable *data*). Reuses the `select` rule directly for the bound
-; value, not a copy of it -- a `WITH` binding is a real, fully-formed
-; query (its own `where`/`group by`/`having`/etc. all apply exactly as
-; they would standalone), lang_spec's own grammar block confirms this
-; (`WITH <name> = SELECT <source> [modifiers] { <body-item> ... }`).
-; `WITH RECURSIVE` (lang_spec §5.4.1) is deliberately not this rule's
-; concern -- it needs `UNION`/`UNION ALL` (§5.4) to mean anything at
-; all (the recursive case is defined *as* a union with a base case), and
-; neither combinator exists in this grammar yet; a real, separate,
-; later increment once they do.
-with_decl := KW_WITH name:field_name EQ select:select
+; reusable *data*). Reuses `combined_select` for the bound value (not
+; plain `select`) -- a `WITH` binding is a real, fully-formed query
+; (its own `where`/`group by`/`having`/etc. all apply exactly as they
+; would standalone), and `WITH RECURSIVE` (lang_spec §5.4.1) needs
+; `UNION`/`UNION ALL` to mean anything at all, the recursive case being
+; defined *as* a union with a base case -- an ordinary, non-recursive
+; `WITH` binding may use a combinator too now, for the identical reason
+; the document-level `combined_select` already can (nothing in lang_spec
+; restricts combinators to top-level document position specifically;
+; `combined_select`'s own single-operand collapse means every existing
+; `WITH x = SELECT ...` binding, no combinator used, is entirely
+; unaffected either way).
+;
+; `recursive:KW_RECURSIVE?` -- bare optional token, checked by value the
+; same way `combinator_tail`'s own `all:KW_ALL?` already is: `Scry.Core.
+; Actions`' own handler tags a present `RECURSIVE` binding's value as
+; `{:recursive, query}`, letting `Scry.Core.QueryOps.resolve_source/5`
+; and `Scry.Core.WithCycleCheck` each recognize it without a second
+; `with_bindings` field to keep in sync.
+with_decl := KW_WITH recursive:KW_RECURSIVE? name:field_name EQ query:combined_select
 
 ; `TYPE <name> [: <kind>] { <field>: <type> ... }` (lang_spec §7). Field
 ; separator is unconditionally `COMMA` -- the same pre-existing,

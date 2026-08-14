@@ -25,19 +25,21 @@ defmodule Scry.Core.CombinedQuery do
   applies identically here, since `Scry.Core.TypeCheck.Nodes` walks both
   sides of `t()` the same way it walks a nested `Query.t()`).
 
-  Deliberately scoped narrower than lang_spec's own grammar might allow
-  in principle: a combinator only ever appears at the very top of a
-  document (`priv/grammar.aether`'s own `document`/`combined_select`
-  rules) -- never inside a `WITH` binding's own value (`with_decl` still
-  references plain `select`) and never inside a nested `SELECT` body
-  item (`body_item` still references plain `select` too). `WITH
-  RECURSIVE` (lang_spec.md §5.4.1) is the one concrete case where a
-  `WITH` binding *would* need to be combinable, and it's an explicitly
-  separate, later increment (its own fixpoint-iteration executor logic,
-  plus the graph variant's own `VIA`, per its own worked example) --
-  revisit this boundary specifically then, not before. Keeping it this
-  narrow for now is what lets `Scry.Core.WithCycleCheck` stay completely
-  untouched: every `with_bindings` value is still exactly `Query.t()`.
+  A combinator appears at the very top of a document (`priv/
+  grammar.aether`'s own `document`/`combined_select` rules), and now
+  also as a `WITH`/`WITH RECURSIVE` binding's own value (`with_decl`
+  references `combined_select` too, not plain `select`) -- never inside
+  a nested `SELECT` body item (`body_item` still references plain
+  `select`). `WITH RECURSIVE` (lang_spec.md §5.4.1) is the one real
+  reason a `WITH` binding needed to be combinable at all: the recursive
+  case is defined *as* a `UNION`/`UNION ALL` of a base case and a
+  recursive case referencing the binding's own name, so `with_bindings`'
+  own value type widened to match -- `Scry.Core.QueryOps`' own
+  `resolve_source/5` (the `WITH`-binding resolution path) and
+  `Scry.Core.WithCycleCheck` (updated to exempt a `{:recursive, ...}`-
+  tagged binding's own direct self-reference, and to walk a
+  `CombinedQuery.t()` binding value's own `left`/`right` sides for
+  ordinary, non-recursive cycle detection) both handle this now.
   """
 
   alias Scry.Core.Query
@@ -48,7 +50,9 @@ defmodule Scry.Core.CombinedQuery do
           op: op(),
           left: Query.t() | t(),
           right: Query.t() | t(),
-          with_bindings: %{optional(String.t()) => Query.t()},
+          with_bindings: %{
+            optional(String.t()) => Query.t() | t() | {:recursive, Query.t() | t()}
+          },
           type_decls: %{optional(String.t()) => Query.type_decl()}
         }
 

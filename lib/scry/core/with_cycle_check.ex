@@ -22,9 +22,19 @@ defmodule Scry.Core.WithCycleCheck do
   same "fail fast, at compile time, with a clear message" posture
   `Scry.Core.FragmentResolver`'s own cycle check already established for
   fragment spreads.
+
+  **`WITH RECURSIVE` (lang_spec.md §5.4.1) is the one deliberate
+  exception**: a binding whose own value is `{:recursive, query}` is
+  allowed to reference *itself* directly (that's the entire point --
+  `Scry.Core.QueryOps.resolve_source/5` runs a real, terminating
+  fixpoint loop for it, not an infinite one) -- excluded from its own
+  dependency list before the ordinary walk below ever sees it, so a
+  recursive binding referencing *itself* is not flagged, but one
+  participating in a longer cycle through some *other* binding still is,
+  exactly as strictly as before.
   """
 
-  alias Scry.Core.Query
+  alias Scry.Core.{CombinedQuery, Query}
 
   @doc """
   Checks every declared binding in `with_bindings` for a cycle (through
@@ -33,7 +43,10 @@ defmodule Scry.Core.WithCycleCheck do
   item, counts as a reference. Returns `:ok`, or `{:error, {:with_cycle,
   names}}` with the cycle spelled out in the order it was found.
   """
-  @spec check(%{String.t() => Query.t()}) :: :ok | {:error, {:with_cycle, [String.t()]}}
+  @spec check(%{
+          String.t() =>
+            Query.t() | CombinedQuery.t() | {:recursive, Query.t() | CombinedQuery.t()}
+        }) :: :ok | {:error, {:with_cycle, [String.t()]}}
   def check(with_bindings) do
     Enum.reduce_while(Map.keys(with_bindings), :ok, fn name, :ok ->
       case visit(name, with_bindings, []) do
@@ -47,9 +60,11 @@ defmodule Scry.Core.WithCycleCheck do
     if name in stack do
       {:error, {:with_cycle, Enum.reverse([name | stack])}}
     else
-      with_bindings
-      |> Map.fetch!(name)
+      {recursive?, query_or_combined} = unwrap(Map.fetch!(with_bindings, name))
+
+      query_or_combined
       |> referenced_bindings(with_bindings)
+      |> Enum.reject(&(recursive? and &1 == name))
       |> Enum.reduce_while(:ok, fn dep, :ok ->
         case visit(dep, with_bindings, [name | stack]) do
           :ok -> {:cont, :ok}
@@ -59,12 +74,15 @@ defmodule Scry.Core.WithCycleCheck do
     end
   end
 
+  defp unwrap({:recursive, value}), do: {true, value}
+  defp unwrap(value), do: {false, value}
+
   # Every source name this query references, at any nesting depth,
   # filtered down to only the ones that are themselves `WITH` bindings --
   # an ordinary real-source reference isn't a dependency for cycle
   # detection at all.
-  defp referenced_bindings(query, with_bindings) do
-    query
+  defp referenced_bindings(query_or_combined, with_bindings) do
+    query_or_combined
     |> all_source_names()
     |> Enum.filter(&Map.has_key?(with_bindings, &1))
   end
@@ -73,6 +91,9 @@ defmodule Scry.Core.WithCycleCheck do
     do: [name | nested_source_names(items)]
 
   defp all_source_names(%Query{select: items}), do: nested_source_names(items)
+
+  defp all_source_names(%CombinedQuery{left: left, right: right}),
+    do: all_source_names(left) ++ all_source_names(right)
 
   defp nested_source_names(items) do
     Enum.flat_map(items, fn

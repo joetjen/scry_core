@@ -79,7 +79,8 @@ defmodule Scry.Core.Grammar.KeywordRefiner do
     "superset" => :KW_SUPERSET,
     "of" => :KW_OF,
     "equal" => :KW_EQUAL,
-    "to" => :KW_TO
+    "to" => :KW_TO,
+    "recursive" => :KW_RECURSIVE
   }
 
   if @ichor_token_refiner_loaded? do

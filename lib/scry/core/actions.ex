@@ -280,15 +280,24 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # `select_cap`'s own handler already returns a real %Scry.Core.Query{}
-  # -- a WITH-bound value is a full query, not a special restricted
-  # shape (Scry.Core.Query's own moduledoc), so no extra wrapping is
-  # needed here, the same reasoning body_item's own `select` clause
-  # already relies on.
-  def handle_rule(:with_decl, %{name: name_cap, select: select_cap}, ctx) do
-    with {:ok, name, ctx} <- name_cap.eval.(ctx),
-         {:ok, query, ctx} <- select_cap.eval.(ctx) do
-      {:ok, {name, query}, ctx}
+  # `query_cap`'s own handler already returns a real `%Scry.Core.
+  # Query{}`/`%Scry.Core.CombinedQuery{}` -- a WITH-bound value is a
+  # full query, not a special restricted shape (Scry.Core.Query's own
+  # moduledoc), so no extra wrapping is needed here, the same reasoning
+  # body_item's own `select` clause already relies on. `recursive_cap`
+  # is a bare optional *token* (always produces a capture, empty text
+  # when absent), checked by value the same way `combinator_tail`'s own
+  # `all:KW_ALL?` already is -- a present `RECURSIVE` marker tags the
+  # value `{:recursive, query}` so `Scry.Core.QueryOps.resolve_source/5`/
+  # `Scry.Core.WithCycleCheck` can each recognize it without a second
+  # `with_bindings` field to keep in sync (`priv/grammar.aether`'s own
+  # `with_decl` comment has the fuller reasoning).
+  def handle_rule(:with_decl, %{recursive: recursive_cap, name: name_cap, query: query_cap}, ctx) do
+    with {:ok, recursive_text, ctx} <- recursive_cap.eval.(ctx),
+         {:ok, name, ctx} <- name_cap.eval.(ctx),
+         {:ok, query, ctx} <- query_cap.eval.(ctx) do
+      value = if recursive_text == "", do: query, else: {:recursive, query}
+      {:ok, {name, value}, ctx}
     end
   end
 

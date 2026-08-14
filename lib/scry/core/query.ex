@@ -195,15 +195,39 @@ defmodule Scry.Core.Query do
   binding or a real engine source is resolved at *execution* time, not
   parse time -- there's no distinguishing sigil the way `FRAGMENT`'s own
   `...` spread has, so a name with no matching `WITH` binding is simply
-  assumed to be a real source, not a compile error. `WITH RECURSIVE`
-  (lang_spec.md §5.4.1) isn't part of this -- `UNION`/`UNION ALL` (§5.4)
-  are implemented, but lang_spec's own worked example for the recursive
-  case uses the graph variant's own `VIA` (§8.1, not implemented in this
-  codebase), and the "relational hierarchical walk" alternative it
-  mentions in prose has no concrete Scry syntax shown anywhere for how a
-  recursive term would reference its own binding's prior-step rows --
-  genuinely blocked on new correlation syntax that doesn't exist yet,
-  not merely on the combinators it also needs.
+  assumed to be a real source, not a compile error.
+
+  **`WITH RECURSIVE` (lang_spec.md §5.4.1), now real** -- a binding
+  declared `WITH RECURSIVE name = base UNION[ ALL] recursive_term`
+  stores `{:recursive, %CombinedQuery{}}` in `with_bindings` instead of
+  a bare query, and `Scry.Core.QueryOps.resolve_source/5` runs a real
+  fixpoint loop for it: the base case runs once; the recursive case
+  then re-runs repeatedly, each time against only the *previous* step's
+  own new rows, until a step adds nothing (SQL:1999 semantics, exactly
+  as specified). Two concrete correlation mechanisms exist for the
+  recursive term to reach the accumulated rows -- lang_spec itself
+  doesn't nail down a single canonical syntax here (its own worked
+  example's recursive case, `VIA reports`, reuses the binding's own
+  name as a graph edge name too, which this codebase doesn't attempt to
+  replicate literally): (1) the recursive term's own top-level `source`
+  may *be* the binding's own name, resolving to the previous step's
+  rows directly (the standard SQL `FROM cte` pattern); (2) an ordinary
+  `field in name.subfield` predicate (already valid `in`-clause syntax,
+  lang_spec §5.9/§7 -- no new grammar needed) is rewritten, fresh each
+  iteration, into a literal `field in [...]` list extracted from the
+  previous step's rows, letting the recursive term correlate against a
+  *different* real source (the canonical hierarchical-walk shape,
+  `WHERE manager_id in reports.id` re-selecting from `employees`, not
+  from `reports` itself). A `{:recursive, ...}` value that isn't a
+  `%CombinedQuery{}` (no real base case to union against) is a clear
+  `{:query_error, {:recursive_with_requires_union, name}}` -- lang_spec's
+  own "the recursive case is defined *as* a union with a base case" is
+  a real structural requirement here, not just descriptive prose. A
+  hard, generous iteration cap (`Scry.Core.QueryOps`'s own module
+  attribute) guards against a `UNION ALL` recursion with no other
+  bound (lang_spec's own stated caller responsibility, "use `union all`
+  only if termination is otherwise guaranteed") running away forever --
+  an engineering safety net, not part of lang_spec's own semantics.
 
   `type_decls` (lang_spec.md §7: `TYPE <name> [: <kind>] { <field>:
   <type> ... }`, "standalone artifacts, closer to DDL, never inline in a
@@ -475,7 +499,10 @@ defmodule Scry.Core.Query do
           required: boolean(),
           select: [body_item()],
           variant: %{optional(atom()) => term()},
-          with_bindings: %{optional(String.t()) => t()},
+          with_bindings: %{
+            optional(String.t()) =>
+              t() | Scry.Core.CombinedQuery.t() | {:recursive, t() | Scry.Core.CombinedQuery.t()}
+          },
           type_decls: %{optional(String.t()) => type_decl()},
           time_field: [String.t()] | nil,
           goal_args: [expr()] | nil

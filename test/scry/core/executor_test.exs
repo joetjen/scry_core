@@ -221,6 +221,23 @@ defmodule Scry.Core.ExecutorTest do
     %{"id" => 3, "tags" => ["archived"]}
   ]
 
+  # For `WITH RECURSIVE` (lang_spec.md §5.4.1) -- the canonical
+  # hierarchical-walk shape: a self-referencing tree via `manager_id`,
+  # deep enough (3 levels below the CEO) that a fixpoint stopping after
+  # only one recursive step would still visibly under-count. The CEO's
+  # own `manager_id` is `nil` -- deliberately, so every recursive-WITH
+  # test below must guard nullable comparisons itself, same as any
+  # other query would have to (lang_spec's own null-safety rule).
+  @org_chart [
+    %{"id" => 1, "name" => "CEO", "manager_id" => nil},
+    %{"id" => 2, "name" => "VP Eng", "manager_id" => 1},
+    %{"id" => 3, "name" => "VP Sales", "manager_id" => 1},
+    %{"id" => 4, "name" => "Eng Manager", "manager_id" => 2},
+    %{"id" => 5, "name" => "Engineer A", "manager_id" => 4},
+    %{"id" => 6, "name" => "Engineer B", "manager_id" => 4},
+    %{"id" => 7, "name" => "Sales Rep", "manager_id" => 3}
+  ]
+
   @data %{
     ["users"] => @users,
     ["orders"] => @orders,
@@ -242,7 +259,8 @@ defmodule Scry.Core.ExecutorTest do
     ["rate_events_naive"] => @rate_events_naive,
     ["articles"] => @articles,
     ["dxn_notes"] => @dxn_notes,
-    ["dxnb_notes"] => @dxnb_notes
+    ["dxnb_notes"] => @dxnb_notes,
+    ["org_chart"] => @org_chart
   }
 
   # `Executor.run/3,4` returns `{:ok, Cursor.t()}` now, not `{:ok, [row()]}`
@@ -2070,11 +2088,13 @@ defmodule Scry.Core.ExecutorTest do
     end
 
     test "a WITH binding whose own value is a %CombinedQuery{} still resolves via run_any/6" do
-      # Not reachable through the parser today (WITH's own grammar
-      # rule stays plain `select`, Scry.Core.CombinedQuery's own
-      # moduledoc has the reasoning) -- this constructs the shape by
-      # hand to verify Scry.Core.Executor's own dispatch stays generic
-      # regardless, not just by inspection of the code.
+      # Reachable through the real parser too now (`with_decl`
+      # references `combined_select`, not plain `select` --
+      # `Scry.Core.CombinedQuery`'s own moduledoc has the reasoning,
+      # `Scry.Core.ActionsTest` has real parser-level coverage) -- this
+      # constructs the shape by hand anyway, to verify
+      # `Scry.Core.Executor`'s own dispatch stays generic on its own
+      # terms, independent of the parser.
       query = %Query{
         source: ["merged"],
         select: [{:field, ["name"]}],
@@ -2083,6 +2103,161 @@ defmodule Scry.Core.ExecutorTest do
 
       assert {:ok, rows} = run(query)
       assert rows == [%{"name" => "Alice"}, %{"name" => "Bob"}, %{"name" => "Carol"}]
+    end
+  end
+
+  describe "WITH RECURSIVE (SQL:1999 fixpoint semantics, lang_spec.md §5.4.1)" do
+    # @org_chart's own manager_id is nullable (the CEO's is nil) --
+    # lang_spec's own null-safety rule makes an unguarded `manager_id =
+    # 1` a hard error the moment *any* row in the source has a nil
+    # there, not just the matching rows, so every base case below
+    # guards it explicitly first.
+    defp direct_reports_of(manager_id) do
+      %Query{
+        source: ["org_chart"],
+        wheres: [
+          {:and, {:not, {:cmp, :eq, ["manager_id"], nil}},
+           {:cmp, :eq, ["manager_id"], manager_id}}
+        ],
+        select: [{:field, ["id"]}, {:field, ["name"]}, {:field, ["manager_id"]}]
+      }
+    end
+
+    defp reports_of_previous_step(binding_name) do
+      %Query{
+        source: ["org_chart"],
+        wheres: [{:in, ["manager_id"], {:field, [binding_name, "id"]}}],
+        select: [{:field, ["id"]}, {:field, ["name"]}, {:field, ["manager_id"]}]
+      }
+    end
+
+    test "the canonical hierarchical walk: every employee under the CEO, transitively" do
+      query = %Query{
+        source: ["org"],
+        order_bys: [{["id"], :asc}],
+        select: [{:field, ["id"]}, {:field, ["name"]}],
+        with_bindings: %{
+          "org" =>
+            {:recursive, combined(:union, direct_reports_of(1), reports_of_previous_step("org"))}
+        }
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"id" => 2, "name" => "VP Eng"},
+               %{"id" => 3, "name" => "VP Sales"},
+               %{"id" => 4, "name" => "Eng Manager"},
+               %{"id" => 5, "name" => "Engineer A"},
+               %{"id" => 6, "name" => "Engineer B"},
+               %{"id" => 7, "name" => "Sales Rep"}
+             ]
+    end
+
+    test "a narrower base case walks only its own subtree" do
+      query = %Query{
+        source: ["org"],
+        order_bys: [{["id"], :asc}],
+        select: [{:field, ["id"]}, {:field, ["name"]}],
+        with_bindings: %{
+          "org" =>
+            {:recursive, combined(:union, direct_reports_of(2), reports_of_previous_step("org"))}
+        }
+      }
+
+      assert {:ok, rows} = run(query)
+
+      assert rows == [
+               %{"id" => 4, "name" => "Eng Manager"},
+               %{"id" => 5, "name" => "Engineer A"},
+               %{"id" => 6, "name" => "Engineer B"}
+             ]
+    end
+
+    test "UNION's own dedup is what makes a cyclic-shaped graph terminate" do
+      # A 2-node cycle (1 <-> 2), reusing `manager_id` as a generic
+      # "edge" column -- base case starts at node 1, the recursive term
+      # walks the same edge back and forth forever; only UNION's dedup
+      # stops it (proving termination isn't coming from anywhere else,
+      # e.g. the data simply running out).
+      cyclic = [
+        %{"id" => 1, "name" => "A", "manager_id" => 2},
+        %{"id" => 2, "name" => "B", "manager_id" => 1}
+      ]
+
+      query = %Query{
+        source: ["cycle"],
+        order_bys: [{["id"], :asc}],
+        select: [{:field, ["id"]}, {:field, ["name"]}],
+        with_bindings: %{
+          "cycle" =>
+            {:recursive,
+             combined(
+               :union,
+               %Query{
+                 source: ["edges"],
+                 wheres: [{:cmp, :eq, ["id"], 1}],
+                 select: [{:field, ["id"]}, {:field, ["name"]}, {:field, ["manager_id"]}]
+               },
+               %Query{
+                 source: ["edges"],
+                 wheres: [{:in, ["id"], {:field, ["cycle", "manager_id"]}}],
+                 select: [{:field, ["id"]}, {:field, ["name"]}, {:field, ["manager_id"]}]
+               }
+             )}
+        }
+      }
+
+      assert {:ok, rows} =
+               query
+               |> Executor.run(FakeEngine, Map.put(@data, ["edges"], cyclic))
+               |> materialize()
+
+      assert rows == [%{"id" => 1, "name" => "A"}, %{"id" => 2, "name" => "B"}]
+    end
+
+    test "UNION ALL over the same cyclic graph never dedupes and hits the iteration cap" do
+      cyclic = [
+        %{"id" => 1, "name" => "A", "manager_id" => 2},
+        %{"id" => 2, "name" => "B", "manager_id" => 1}
+      ]
+
+      query = %Query{
+        source: ["cycle"],
+        select: [{:field, ["id"]}],
+        with_bindings: %{
+          "cycle" =>
+            {:recursive,
+             combined(
+               :union_all,
+               %Query{
+                 source: ["edges"],
+                 wheres: [{:cmp, :eq, ["id"], 1}],
+                 select: [{:field, ["id"]}, {:field, ["manager_id"]}]
+               },
+               %Query{
+                 source: ["edges"],
+                 wheres: [{:in, ["id"], {:field, ["cycle", "manager_id"]}}],
+                 select: [{:field, ["id"]}, {:field, ["manager_id"]}]
+               }
+             )}
+        }
+      }
+
+      assert {:error, {:query_error, {:recursive_with_iteration_limit, "cycle", 10_000}}} =
+               query
+               |> Executor.run(FakeEngine, Map.put(@data, ["edges"], cyclic))
+               |> materialize()
+    end
+
+    test "a RECURSIVE binding whose own value isn't a combinator is a clean execution-time error" do
+      query = %Query{
+        source: ["a"],
+        select: [{:field, ["id"]}],
+        with_bindings: %{"a" => {:recursive, direct_reports_of(1)}}
+      }
+
+      assert {:error, {:query_error, {:recursive_with_requires_union, "a"}}} = run(query)
     end
   end
 

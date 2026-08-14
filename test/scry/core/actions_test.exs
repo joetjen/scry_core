@@ -1236,6 +1236,45 @@ line two""" { name }))
            } = q.with_bindings["top"]
   end
 
+  test "WITH RECURSIVE tags its binding's value as {:recursive, ...}", %{grammar: g} do
+    assert {:ok, %Query{} = q} =
+             run(
+               g,
+               ~s[WITH RECURSIVE a = SELECT base { id } UNION SELECT a { id } SELECT a { id }]
+             )
+
+    assert {:recursive, %CombinedQuery{op: :union, left: left, right: right}} =
+             q.with_bindings["a"]
+
+    assert %Query{source: ["base"]} = left
+    assert %Query{source: ["a"]} = right
+  end
+
+  test "WITH RECURSIVE's own binding may reference itself without tripping the cycle check", %{
+    grammar: g
+  } do
+    assert {:ok, %Query{}} =
+             run(
+               g,
+               ~s[WITH RECURSIVE a = SELECT base { id } UNION SELECT a { id } SELECT a { id }]
+             )
+  end
+
+  test "a WITH RECURSIVE binding still participates in a longer cycle through another binding",
+       %{grammar: g} do
+    assert {:error, {:with_cycle, ["a", "b", "a"]}} =
+             run(
+               g,
+               ~s[WITH RECURSIVE a = SELECT b { id } UNION SELECT a { id } WITH b = SELECT a { id } SELECT a { id }]
+             )
+  end
+
+  test "a WITH RECURSIVE binding's own value need not be a combinator at parse time -- checked only at execution",
+       %{grammar: g} do
+    assert {:ok, %Query{with_bindings: %{"a" => {:recursive, %Query{source: ["base"]}}}}} =
+             run(g, ~s[WITH RECURSIVE a = SELECT base { id } SELECT a { id }])
+  end
+
   test "a query with no combinator still parses as a plain %Query{}, not wrapped", %{grammar: g} do
     assert {:ok, %Query{}} = run(g, ~s[SELECT users { name }])
   end
@@ -1288,10 +1327,17 @@ line two""" { name }))
     assert right.select == [{:field, ["id"]}, {:field, ["name"]}]
   end
 
-  test "a WITH binding's own value cannot itself use a combinator (scope boundary)", %{
+  test "a plain (non-recursive) WITH binding's own value can itself use a combinator", %{
     grammar: g
   } do
-    assert {:error, _} =
+    # `with_decl` references `combined_select`, not plain `select`, so
+    # this is no longer a scope-boundary error -- `WITH RECURSIVE`
+    # (lang_spec.md §5.4.1) is the reason a `WITH` binding needed to be
+    # combinable at all, but nothing restricts an *ordinary* `WITH` from
+    # using the same grammar position now that it exists. A nested
+    # `SELECT` body item is still restricted (`body_item` still
+    # references plain `select`) -- see the next test.
+    assert {:ok, %Query{with_bindings: %{"x" => %CombinedQuery{op: :union}}}} =
              run(
                g,
                ~s[WITH x = SELECT a { name } UNION SELECT b { name } SELECT x { name }]

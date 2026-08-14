@@ -7,10 +7,13 @@ defmodule Scry.Core.TypeCheck.Nodes do
   Executor.rewrite/2` already use for an analogous whole-document walk:
   the top-level result itself, every nested `%Scry.Core.Query{}` body
   item inside `select` (recursively -- a nested query may itself nest
-  further), every `with_bindings` value (always a plain `Query.t()`,
-  never a `%Scry.Core.CombinedQuery{}` itself -- `CombinedQuery`'s own
-  moduledoc guarantees this), and both sides of a `%CombinedQuery{}`
-  (each independently either shape).
+  further), every `with_bindings` value (a `Query.t()`, a
+  `CombinedQuery.t()` now that `WITH`/`WITH RECURSIVE` may bind a
+  combinator too, or `{:recursive, Query.t() | CombinedQuery.t()}` --
+  unwrapped before walking, same as an ordinary binding either way,
+  since a `WITH RECURSIVE` binding's own base/recursive cases still
+  deserve the identical compile-time checks any other query gets), and
+  both sides of a `%CombinedQuery{}` (each independently either shape).
 
   `with_bindings`/`type_decls` are only ever populated on the document's
   own top-level result (`Scry.Core.Actions`' own `handle_rule(:document,
@@ -46,7 +49,7 @@ defmodule Scry.Core.TypeCheck.Nodes do
       |> top_with_bindings()
       |> Map.values()
       |> Enum.reduce_while(:ok, fn bound, :ok ->
-        case visit_each(bound, check_fun) do
+        case visit_each(unwrap_binding(bound), check_fun) do
           :ok -> {:cont, :ok}
           err -> {:halt, err}
         end
@@ -89,7 +92,7 @@ defmodule Scry.Core.TypeCheck.Nodes do
     query_or_combined
     |> top_with_bindings()
     |> Map.values()
-    |> Enum.reduce(acc, &visit_collect(&1, &2, collect_fun))
+    |> Enum.reduce(acc, &visit_collect(unwrap_binding(&1), &2, collect_fun))
   end
 
   defp visit_collect(%Query{select: items} = query, acc, collect_fun) do
@@ -109,4 +112,7 @@ defmodule Scry.Core.TypeCheck.Nodes do
 
   defp top_with_bindings(%Query{with_bindings: wb}), do: wb
   defp top_with_bindings(%CombinedQuery{with_bindings: wb}), do: wb
+
+  defp unwrap_binding({:recursive, value}), do: value
+  defp unwrap_binding(value), do: value
 end
