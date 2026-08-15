@@ -108,7 +108,7 @@ defmodule Scry.Core.Query.EscapeTest do
                {:call, "sum", [{:arith, :mul, {:field, ["price"]}, {:field, ["quantity"]}}]}
     end
 
-    test "rate/1 (lang_spec.md §5.8/§8.2) -- a plain number of seconds, no 5s-shaped literal" do
+    test "rate/1 -- a plain number of seconds, no 5s-shaped literal" do
       # No `5s`-style duration literal exists in Elixir -- a builder
       # caller passes a plain number of seconds directly, the same way
       # percentile(x, 0.5)'s own `p` argument already does.
@@ -200,7 +200,7 @@ defmodule Scry.Core.Query.EscapeTest do
   end
 
   describe "over/2 (window functions)" do
-    test "row_number() OVER PARTITION BY ... ORDER BY ..., lang_spec §11's own worked example" do
+    test "row_number() OVER PARTITION BY ... ORDER BY ..., a worked example" do
       ast =
         quote do
           over(row_number(), partition_by: [u.department], order_by: [desc: u.salary])

@@ -39,7 +39,7 @@ defmodule Scry.Core.GrammarParityTest do
     {"a trailing comma before the closing brace", "SELECT users { name, email, }"},
     {"an IF-clause field followed by a newline separator (the leak-regression case)",
      "SELECT users {\n  name\n  email IF $inc\n}"},
-    {"a call-shaped source (lang_spec.md §8.4's logic variant worked example)",
+    {"a call-shaped source (the logic variant worked example)",
      "SELECT ancestor(X, \"bob\") WHERE age(X) > 30 { X }"},
     {"a zero-arity call-shaped source", "SELECT flag() { ok }"}
   ]

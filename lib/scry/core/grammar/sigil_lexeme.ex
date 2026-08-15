@@ -1,7 +1,7 @@
 defmodule Scry.Core.Grammar.SigilLexeme do
   @moduledoc """
-  Arbitrary-delimiter regex-sigil scanning (lang_spec.md §3/§4:
-  `@tag<delim>...<delim>`, "any delimiter") -- Aether's `@native`/
+  Arbitrary-delimiter regex-sigil scanning (`@tag<delim>...<delim>`,
+  "any delimiter") -- Aether's `@native`/
   `Ichor.CustomLexeme` escape hatch (`priv/grammar.aether`'s own
   `SIGIL` comment has the "why a plain token pattern can't do this"
   reasoning: requiring the *same* character back at the close is a
@@ -26,8 +26,8 @@ defmodule Scry.Core.Grammar.SigilLexeme do
   a multi-byte UTF-8 character's own bytes can never collide with a
   single ASCII delimiter byte, by UTF-8's own design, so scanning
   byte-by-byte for the delimiter byte alone is safe over UTF-8 content.
-  Not restricted to non-alphanumeric delimiters -- lang_spec doesn't
-  call for that restriction, and the grammar-stays-permissive posture
+  Not restricted to non-alphanumeric delimiters -- nothing
+  calls for that restriction, and the grammar-stays-permissive posture
   this codebase uses throughout doesn't add one speculatively.
   """
 
@@ -53,8 +53,8 @@ defmodule Scry.Core.Grammar.SigilLexeme do
     end
   end
 
-  # Single-letter tag only, not `[[:alpha:]]+` -- lang_spec gives
-  # exactly one concrete tag (`r`); an arbitrary-length tag name ahead
+  # Single-letter tag only, not `[[:alpha:]]+` -- only one
+  # concrete tag exists (`r`); an arbitrary-length tag name ahead
   # of a second real one existing is exactly the kind of "design for a
   # hypothetical future requirement" this codebase otherwise avoids
   # (the same reasoning the token this replaces already had).

@@ -1,6 +1,6 @@
 defmodule Scry.Core.TypeCheck do
   @moduledoc """
-  The inline half of lang_spec.md §7's compile-time type system: reads
+  The inline half of the compile-time type system: reads
   `type_decls` straight off a parsed `Query.t()`/`CombinedQuery.t()` and
   runs four checks against every query node in the document (walked via
   `Scry.Core.TypeCheck.Nodes.each/2`), no connection or engine involved
@@ -15,28 +15,28 @@ defmodule Scry.Core.TypeCheck do
   codebase. A node with no matching `TYPE`, or a multi-segment/absent
   `source`, simply isn't checked here -- an unmatched `TYPE` is not an
   error, mirroring this codebase's existing "unmatched name is just not
-  a match" leniency (fragments, `WITH`). Note lang_spec.md's own §7
+  a match" leniency (fragments, `WITH`). Note the
   worked example (`TYPE User` next to `SELECT users`) doesn't actually
   satisfy this rule as written -- a documentation slip there, not
   evidence against the rule.
 
-  The four checks, each deliberately narrower than lang_spec §7's full
+  The four checks, each deliberately narrower than the full
   ambition but real:
 
   1. **Category check.** A node whose resolved `type_decl.kind` is one
      of the two kinds permanently documented as structurally incapable
-     of ever having EP1/EP2 vocabulary (`"relational"`, `"olap"`,
-     lang_spec.md §2/§7) but whose own `variant` map is non-empty is a
+     of ever having EP1/EP2 vocabulary (`"relational"`, `"olap"`)
+     but whose own `variant` map is non-empty is a
      hard error. Also catches a mismatch between two *non-degenerate*
      kinds now (e.g. a `graph`-tagged source using time-series' `LAST`,
      or `document`'s own `PARENT`/`SIBLINGS`/`ANCESTORS` against
      anything but a `document`-tagged source) -- `@variant_tag_kinds`
-     hardcodes which standard-variant tag (lang_spec.md §8's own closed
+     hardcodes which standard-variant tag (a closed
      vocabulary: `select_ep1a`'s own `:last`/`:deep`, a `{:variant,
      {tag, ...}}` body item's own `:parent`/`:siblings`/`:ancestors`/
      `:via`, a `{:variant, {:search, ...}}` predicate leaf's own
      `:search`) belongs to which kind, the same "this module's own
-     closed knowledge of lang_spec's own enumerated vocabulary, not a
+     closed knowledge of an enumerated vocabulary, not a
      generic pluggable registry" posture `@degenerate_kinds`/
      `@known_scalars`/`@structured_type_names` already take -- grammar
      composition itself genuinely has no notion of "which kind owns
@@ -57,8 +57,8 @@ defmodule Scry.Core.TypeCheck do
      walked this round" scope limit just below).
   2. **Declared-field-type / union comparison check.** A literal
      compared against a field with a known declared scalar type
-     (currently just `Int`/`String` -- the only two names lang_spec.md
-     ever actually specifies) must be accepted by at least one union
+     (currently just `Int`/`String` -- the only two names
+     ever actually specified) must be accepted by at least one union
      member. An unrecognized type name (another `TYPE`, `JSON`/`DXN`/
      `DXNB`, a generic) is a silent no-op -- existence-checking an
      undeclared field is the adapter's own backend-side job, not this
@@ -74,7 +74,7 @@ defmodule Scry.Core.TypeCheck do
      beyond recognizing both names; decoding either one is an
      execution-layer concern, out of scope here). The explicit
      `json(field)`/`dxn(field)`/`dxnb(field)` escape hatches are never
-     validated, matching lang_spec's own stated leniency for `json(...)`.
+     validated, matching the stated leniency for `json(...)`.
      Checked against `select`'s own bare field items and `wheres`/
      `havings`' own predicate field references; a field path buried
      inside a computed expression, `GROUP BY`, or `ORDER BY` is not
@@ -95,7 +95,7 @@ defmodule Scry.Core.TypeCheck do
 
   Explicitly out of scope this round (see the approved plan for the
   full reasoning): cross-side type-consistency checking for a
-  `CombinedQuery` (lang_spec.md never specifies this as a requirement),
+  `CombinedQuery` (never specified as a requirement),
   null-safety narrowing reaching into a structured field's own nested
   nullable markers, and resolving `DXN<Type>`/`DXNB<Type>` against a
   real, externally-registered `.dxns` schema (this round's shapes are
@@ -112,7 +112,7 @@ defmodule Scry.Core.TypeCheck do
     "String" => &is_binary/1
   }
 
-  # lang_spec.md §8's own standard-variant vocabulary, each tag mapped
+  # The standard-variant vocabulary, each tag mapped
   # to the one kind it belongs to -- `category_check/3`'s own moduledoc
   # section has the full "why hardcoded, not a registry" reasoning.
   # `select_ep1a`'s own tag is either a bare atom (`:deep`) or the first
@@ -177,7 +177,7 @@ defmodule Scry.Core.TypeCheck do
     {:error, {:kind_category_mismatch, source_name, kind, Map.keys(variant)}}
   end
 
-  # `goal_args` (a call-shaped source, lang_spec §8.4's `logic` variant)
+  # `goal_args` (a call-shaped source, the `logic` variant)
   # is plain core grammar, not gated to `logic` at parse time at all
   # (`Scry.Core.Query`'s own moduledoc has the "grammar exists, category
   # check decides legality" reasoning) -- this is where that legality

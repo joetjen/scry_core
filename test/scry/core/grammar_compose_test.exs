@@ -10,7 +10,7 @@ defmodule Scry.Core.GrammarComposeTest do
   @core_source File.read!("priv/grammar.aether")
 
   # A fragment standing in for a real kind library's own grammar file
-  # (impl_spec.md §4) -- deliberately not scry_time_series, which
+  # -- deliberately not scry_time_series, which
   # doesn't exist yet, but shaped the same way: fills core's EP1(a)
   # extension point (`select_ep1a`) with a `LAST <duration>`-style
   # header modifier, contributing its own keyword token directly
@@ -36,7 +36,7 @@ defmodule Scry.Core.GrammarComposeTest do
 
   # A second, independent fragment contributing a *different*
   # alternative to the same extension point -- standing in for
-  # scry_document's `deep` (lang_spec §5.2), which nominates the exact
+  # scry_document's `deep`, which nominates the exact
   # same "before WHERE" position `last` does. Proves the real
   # requirement: more than one kind can load simultaneously and each
   # still gets its own working alternative there.
@@ -55,7 +55,7 @@ defmodule Scry.Core.GrammarComposeTest do
   """
 
   # An EP1(b) block-opening construct, standing in for scry_graph's
-  # `VIA edge { body }` (lang_spec §8.1) -- fills body_item_ep1, not
+  # `VIA edge { body }` -- fills body_item_ep1, not
   # select_ep1a, and its own body recurses straight back into core's
   # body_list (an ordinary dangling reference, exactly like referencing
   # KW_WHERE above -- resolved once merged, not before). This is the
@@ -78,7 +78,7 @@ defmodule Scry.Core.GrammarComposeTest do
   """
 
   # An EP1(e) infix comparison-tier operator, standing in for
-  # scry_search's `<field> SEARCH <string>` (lang_spec §8.5) -- fills
+  # scry_search's `<field> SEARCH <string>` -- fills
   # `comparison_ep1e`, the third extension point, in `comparison`'s own
   # top-level alternation, not a nested position the way `body_item_ep1`
   # reuses `body_list` recursively. Unlike either EP1(a) fragment above,

@@ -1,6 +1,6 @@
 defmodule Scry.Core.Query.FromTest do
   @moduledoc """
-  `Scry.Core.Query.from/2` (impl_spec.md §7 Layer 2) -- confirms a
+  `Scry.Core.Query.from/2` (its own Layer 2) -- confirms a
   macro-built query executes identically to the equivalent text query,
   the same "both front ends converge on one struct" property `query_
   test.exs` already confirms for Layer 1.
@@ -143,7 +143,7 @@ defmodule Scry.Core.Query.FromTest do
   end
 
   describe "nested from (correlation)" do
-    test "impl_spec.md §7's own worked example, executed end to end", %{conn: conn} do
+    test "a worked example, executed end to end", %{conn: conn} do
       query =
         from(u in "users",
           where: u.age > 18,

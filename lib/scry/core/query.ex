@@ -2,22 +2,22 @@ defmodule Scry.Core.Query do
   @moduledoc """
   The shared target both Scry front ends converge on -- the text grammar
   (`priv/grammar.aether` + `Scry.Core.Actions`) and the Elixir-native
-  builder (impl_spec.md §7: `from/2`, a macro DSL sugaring over the
+  builder (`from/2`, a macro DSL sugaring over the
   composable functional API below it). Adapters and tier-4 extensions
   only ever see this struct; neither knows or needs to know which front
   end produced it.
 
-  Field shapes here match the full design in impl_spec.md §7, not just
+  Field shapes here match the full design, not just
   what `priv/grammar.aether`'s current Phase 1 subset can populate.
   `group_bys`/`group_mode`/`havings`/`distinct`/`order_bys`/`limit`/
-  `offset` are all populated now -- the full lang_spec.md §5.2 header-
+  `offset` are all populated now -- the full header-
   modifier chain, `GROUP BY ... ROLLUP`/`... CUBE` (`group_mode`)
   included: text (`group_by_clause`'s own three alternatives, `priv/
   grammar.aether`) and the composable builder's `group_by_rollup/2`/
   `group_by_cube/2` below both set it, and `Scry.Core.QueryOps` runs it
   for real (that module's own moduledoc has the hierarchical-subtotal-
   row mechanics). `variant` is the extension slot an EP1(b)/(c)/(d)-
-  shaped construct from a loaded kind populates (impl_spec.md §2); core
+  shaped construct from a loaded kind populates; core
   itself never writes to it.
 
   `time_field` is a different kind of extension slot than `variant`:
@@ -32,7 +32,7 @@ defmodule Scry.Core.Query do
   it to `[field]` (the same path already used to build the `LAST`
   predicate itself) when it turns `LAST` into an ordinary `WHERE`
   filter, and `Scry.Core.QueryOps`'s own `rate(<duration>)` aggregate
-  (lang_spec.md §5.8) is the only thing that ever reads it -- to know
+  is the only thing that ever reads it -- to know
   which field to measure elapsed time against, since `rate`'s own
   duration argument is deliberately independent of `LAST`'s (see that
   aggregate's own comment in `query_ops.ex` for why). Kept generic
@@ -44,8 +44,8 @@ defmodule Scry.Core.Query do
   `goal_args` is the same kind of extension slot as `time_field` --
   a genuine top-level field, not `variant`, defaulting to `nil` with
   zero behavior change for every query that never sets it. Text
-  `SELECT <name>(<args>) { ... }` (a call-shaped source, lang_spec.md
-  §8.4's Datalog/Prolog-flavored `logic` variant: `SELECT ancestor(X,
+  `SELECT <name>(<args>) { ... }` (a call-shaped source, the
+  Datalog/Prolog-flavored `logic` variant: `SELECT ancestor(X,
   "bob") WHERE age(X) > 30 { X }`) parses `<name>` into the ordinary
   `source` field exactly as any other bare source name would, and
   `(<args>)` into this field -- reusing `call`'s own `call_args`
@@ -53,17 +53,17 @@ defmodule Scry.Core.Query do
   new grammar for "this one is a logic variable" (`scry_logic`'s own
   executor decides that at *execution* time: a bare, unqualified
   `{:field, [name]}` argument is a variable keyed by `name`, repeated
-  names within one query unify, per lang_spec.md §8.4's own "every
+  names within one query unify, per its own "every
   Scry constant already carries a distinct marker" reasoning -- nothing
   else needs to). Deliberately a plain core grammar addition, not
   gated to `logic` at the grammar level -- `Scry.Core.TypeCheck`'s own
   compile-time category check is what rejects a non-nil `goal_args`
   against a non-`logic` source, the same "grammar answers whether a
   construct exists, the category check answers whether it's legal
-  here" split lang_spec.md §2 already draws for `via`/`last`/`deep`.
+  here" split already drawn for `via`/`last`/`deep`.
 
-  `new/1` through `select/2`, below the struct definition, are impl_spec
-  .md §7's own Layer 1 -- the composable functional API, "the one that
+  `new/1` through `select/2`, below the struct definition, are its
+  own Layer 1 -- the composable functional API, "the one that
   matters most for dynamic query building" per that section's own
   framing. Every function operates on this module's own field shapes
   directly (a predicate is the exact `predicate()` shape `Scry.Core.
@@ -74,9 +74,9 @@ defmodule Scry.Core.Query do
 
   `wheres` is a list, combined with `and`, even though the current
   grammar only ever produces zero or one entry (one `WHERE` clause per
-  `select`, lang_spec.md §5.2) -- matching the composable builder API's
-  eventual ability to push more than one (`Scry.Core.Query.where/2`,
-  impl_spec.md §7), not a speculative field with nothing behind it.
+  `select`) -- matching the composable builder API's
+  eventual ability to push more than one (`Scry.Core.Query.where/2`),
+  not a speculative field with nothing behind it.
 
   A `select` entry is one of three shapes -- a plain field path, a
   nested query (`priv/grammar.aether`'s `body_item := select | ...`,
@@ -89,7 +89,7 @@ defmodule Scry.Core.Query do
   `predicate()`'s own `{:variant, term()}` is `body_item()`'s own
   `{:variant, term()}` idiom's counterpart one level down, for core's
   third extension point (EP1(e), `priv/grammar.aether`'s own
-  `comparison_ep1e`, lang_spec.md §2/§8.5's `SEARCH`) -- an infix
+  `comparison_ep1e`, `SEARCH`) -- an infix
   comparison-tier operator a kind's own fragment contributes, producing
   a `predicate()` core has no way to evaluate on its own. Unlike
   `select`'s own `:variant` (which only ever appears as a whole body
@@ -105,7 +105,7 @@ defmodule Scry.Core.Query do
   fully lower every `{:variant, ...}` predicate leaf it finds, not just
   check the top level.
 
-  `predicate()`'s own `{:field, path}` (lang_spec.md §5.9: a
+  `predicate()`'s own `{:field, path}` (a
   comparison's right-hand side may be another field path, not just a
   literal) reuses the exact same tag `body_item()` uses above --
   structurally identical in both places (a path naming a field), just
@@ -113,7 +113,7 @@ defmodule Scry.Core.Query do
   Worth knowing they're the same tag in two conceptually distinct
   positions, not two coincidentally-identical ones.
 
-  `required` (lang_spec.md §6, "Correlation and joins") is meaningful
+  `required` ("Correlation and joins") is meaningful
   only when this query is itself a nested body item -- it's read
   entirely by the *enclosing* query's own projection step (whether to
   drop the outer row when this one comes back empty), never by
@@ -122,24 +122,24 @@ defmodule Scry.Core.Query do
   where `Scry.Core.Executor.run/3` checks its own flag, because it
   doesn't -- only a parent's view of a child's `required` matters.
 
-  `rhs`/`values`'s own `{:param, name}` (lang_spec.md §5.7/§9) is a
+  `rhs`/`values`'s own `{:param, name}` is a
   placeholder, not a value -- parsing never resolves it, since the real
   value is supplied separately, at execution time, via
   `Scry.Core.Executor.run/4`'s own `params` argument.
 
   A `{:field, path}` body item's own optional third element
-  (lang_spec.md §5.3/§9: `<field> IF $<param>`) is that same `{:param,
+  (`<field> IF $<param>`) is that same `{:param,
   name}` placeholder -- present only when the field was written with an
   `IF` suffix; `Scry.Core.QueryOps` omits the field from the projected
   row entirely (not a `nil`-filled key) when the resolved parameter is
   falsy (`nil`/`false` -- nothing else is), the GraphQL `@include`/
   `@skip` equivalent this construct is modeled on.
 
-  `{:computed, alias, expr}` (lang_spec.md §9: `<alias>: <expression>`,
+  `{:computed, alias, expr}` (`<alias>: <expression>`,
   e.g. `subtotal: price * quantity`) is a body item computed from an
-  `expr()` -- a small arithmetic AST (`+ - * ** /`, lang_spec.md §5.10)
+  `expr()` -- a small arithmetic AST (`+ - * ** /`)
   over literals, `{:field, path}`, `{:param, name}`, and `{:call, name,
-  args}` (lang_spec.md §5.8's built-in functions), evaluated by
+  args}` (built-in functions), evaluated by
   `Scry.Core.QueryOps` against the current row (and, via `{:field,
   ...}`, an enclosing row too, the same scope-chain correlation a
   `where` predicate already gets). `{:call, ...}` splits two ways there:
@@ -153,7 +153,7 @@ defmodule Scry.Core.Query do
   stays exact.
 
   `{:computed, alias, expr, predicate}` is the same shape with a
-  trailing, per-item `WHERE` attached (lang_spec.md §8.2's own worked
+  trailing, per-item `WHERE` attached (a worked
   example: `error_rate: rate(30s) WHERE status ~ @r/^5/`) -- scopes
   which rows contribute to *this one* item's own aggregate, distinct
   from the query's top-level `where` (filters every row/aggregate
@@ -170,7 +170,7 @@ defmodule Scry.Core.Query do
   own `recursive_with_requires_union` already takes).
 
   A body item may also be written `...<fragment-name>` in query text
-  (lang_spec.md §5.11/§9, GraphQL-style reusable shape) -- but that never
+  (GraphQL-style reusable shape) -- but that never
   appears as a shape in `body_item()` itself. `Scry.Core.Actions` parses
   it to a transient `{:spread, name}` placeholder that
   `Scry.Core.FragmentResolver` (invoked from `handle_rule(:document,
@@ -180,8 +180,7 @@ defmodule Scry.Core.Query do
   has no notion of fragments at all, only the real body items a spread's
   own target fragment expanded into.
 
-  `expr()`'s own `{:when, clauses, else_expr}` (lang_spec.md §5.6/§9:
-  `WHEN <predicate> THEN <expr> [...] ELSE <expr>`, "inline, not a
+  `expr()`'s own `{:when, clauses, else_expr}` (`WHEN <predicate> THEN <expr> [...] ELSE <expr>`, "inline, not a
   block") reuses `predicate()` directly for each clause's own
   condition -- the exact same AST a `where` clause already produces, so
   a `WHEN` can already do anything `WHERE` can. `Scry.Core.QueryOps`
@@ -190,7 +189,7 @@ defmodule Scry.Core.Query do
   is mandatory at the grammar level (no default, no implicit `nil`),
   not just a documented expectation.
 
-  `with_bindings` (lang_spec.md §9: `WITH <name> = SELECT ... { ... }`,
+  `with_bindings` (`WITH <name> = SELECT ... { ... }`,
   "named reusable sub-query, SQL CTE equivalent" -- vs. `FRAGMENT`'s
   reusable *shape*, this is reusable *data*) is meaningful only on the
   *top-level* query `Scry.Core.parse/1` hands back, the mirror image of
@@ -214,7 +213,7 @@ defmodule Scry.Core.Query do
   `...` spread has, so a name with no matching `WITH` binding is simply
   assumed to be a real source, not a compile error.
 
-  **`WITH RECURSIVE` (lang_spec.md §5.4.1), now real** -- a binding
+  **`WITH RECURSIVE`, now real** -- a binding
   declared `WITH RECURSIVE name = base UNION[ ALL] recursive_term`
   stores `{:recursive, %CombinedQuery{}}` in `with_bindings` instead of
   a bare query, and `Scry.Core.QueryOps.resolve_source/5` runs a real
@@ -222,31 +221,31 @@ defmodule Scry.Core.Query do
   then re-runs repeatedly, each time against only the *previous* step's
   own new rows, until a step adds nothing (SQL:1999 semantics, exactly
   as specified). Two concrete correlation mechanisms exist for the
-  recursive term to reach the accumulated rows -- lang_spec itself
-  doesn't nail down a single canonical syntax here (its own worked
+  recursive term to reach the accumulated rows -- nothing
+  nails down a single canonical syntax here (its own worked
   example's recursive case, `VIA reports`, reuses the binding's own
   name as a graph edge name too, which this codebase doesn't attempt to
   replicate literally): (1) the recursive term's own top-level `source`
   may *be* the binding's own name, resolving to the previous step's
   rows directly (the standard SQL `FROM cte` pattern); (2) an ordinary
-  `field in name.subfield` predicate (already valid `in`-clause syntax,
-  lang_spec §5.9/§7 -- no new grammar needed) is rewritten, fresh each
+  `field in name.subfield` predicate (already valid `in`-clause syntax
+  -- no new grammar needed) is rewritten, fresh each
   iteration, into a literal `field in [...]` list extracted from the
   previous step's rows, letting the recursive term correlate against a
   *different* real source (the canonical hierarchical-walk shape,
   `WHERE manager_id in reports.id` re-selecting from `employees`, not
   from `reports` itself). A `{:recursive, ...}` value that isn't a
   `%CombinedQuery{}` (no real base case to union against) is a clear
-  `{:query_error, {:recursive_with_requires_union, name}}` -- lang_spec's
-  own "the recursive case is defined *as* a union with a base case" is
+  `{:query_error, {:recursive_with_requires_union, name}}` --
+  "the recursive case is defined *as* a union with a base case" is
   a real structural requirement here, not just descriptive prose. A
   hard, generous iteration cap (`Scry.Core.QueryOps`'s own module
   attribute) guards against a `UNION ALL` recursion with no other
-  bound (lang_spec's own stated caller responsibility, "use `union all`
+  bound (a stated caller responsibility, "use `union all`
   only if termination is otherwise guaranteed") running away forever --
-  an engineering safety net, not part of lang_spec's own semantics.
+  an engineering safety net, not part of the construct's own defined semantics.
 
-  `type_decls` (lang_spec.md §7: `TYPE <name> [: <kind>] { <field>:
+  `type_decls` (`TYPE <name> [: <kind>] { <field>:
   <type> ... }`, "standalone artifacts, closer to DDL, never inline in a
   query") mirrors `with_bindings`' own shape and top-level-only scope --
   a `name => type_decl()` map, populated once by `document`'s own
@@ -254,7 +253,7 @@ defmodule Scry.Core.Query do
   hands back. `Scry.Core.TypeCheck.check/1` now reads it -- run
   unconditionally, right after `type_decls` itself is attached, inside
   the same `handle_rule(:document, ...)` that builds it
-  (`Scry.Core.Actions`) -- for lang_spec §7's compile-time category
+  (`Scry.Core.Actions`) -- for its own compile-time category
   check, declared-field-type/union comparison check, `JSON`/`DXN`/
   `DXNB<Type>` field-access validation, and flow-sensitive null-safety
   narrowing, matched against whichever query node's own single-segment
@@ -277,13 +276,13 @@ defmodule Scry.Core.Query do
   hard-error the moment either side of an ordinary comparison resolves
   to `nil`, with one explicit exemption: `field = nil`/`field != nil`
   (a literal `nil` on the right, exactly the shape `KW_NIL` always
-  produces) is lang_spec's own null-check idiom, never hard-erroring
+  produces) is the established null-check idiom, never hard-erroring
   regardless of what the field's own value is -- the mechanism §7's
   worked examples (`WHERE NOT (age = nil) AND age > 30`, `WHERE age =
   nil OR age > 30`) rely on, and Elixir's own short-circuiting `and`/
   `or` (already how `eval_predicate/4`'s own `{:and, ...}`/`{:or, ...}`
   clauses are implemented) makes both flow-sensitive at runtime for
-  free, no extra narrowing logic needed on top. `type_expr()` mirrors lang_spec's own EBNF verbatim (`<type> ::=
+  free, no extra narrowing logic needed on top. `type_expr()` mirrors the EBNF verbatim (`<type> ::=
   <base-type> | ?<base-type> | <type> | <type>`) -- `{:named, name,
   param}` covers every bare type name (`Int`, `String`, a reference to
   another declared `TYPE`, and `Json`/`Json<...>` uniformly, *not*
@@ -297,7 +296,7 @@ defmodule Scry.Core.Query do
   not restricted to appearing only inside a `Json<...>` parameter at
   this type's own level, same permissive posture.
 
-  `expr()`'s own `{:call, name, args}` (lang_spec.md §5.8, the fixed
+  `expr()`'s own `{:call, name, args}` (the fixed
   built-in-function surface -- `sum`/`avg`/`count`/`min`/`max`/
   `stddev_samp`/`stddev_pop`/`var_samp`/`var_pop`/`percentile`/`rate`,
   `string`/`int`/`exact`/`inexact`, `json`, and (only meaningful wrapped
@@ -305,8 +304,8 @@ defmodule Scry.Core.Query do
   `last_value` are the 20 names actually executable today) is
   deliberately not restricted to a known `name` at this type's own
   level, the same way `:variant` isn't restricted to a known kind -- the
-  grammar (and this type) accept any `identifier(args)` call (lang_spec
-  §5.8's own framing: "anything else ... is either an EP2 namespaced
+  grammar (and this type) accept any `identifier(args)` call (the
+  framing: "anything else ... is either an EP2 namespaced
   extension call, or ... `logic`'s EP2 bare call"), and it's
   `Scry.Core.QueryOps` that decides, at execution time, which names it
   actually knows how to run (`eval_aggregate/6` for the 11 aggregates,
@@ -319,20 +318,20 @@ defmodule Scry.Core.Query do
   entirely and is computed directly inside `eval_aggregate/6`.
 
   `expr()`'s own `{:window, call, partition_by, order_bys, frame}`
-  (lang_spec.md §5.5: "`<fn>() OVER [PARTITION BY <field>,...] [ORDER BY
+  ("`<fn>() OVER [PARTITION BY <field>,...] [ORDER BY
   <field> [desc|asc],...] [ROWS BETWEEN <bound> AND <bound>]`") marks a
   call as a window function -- unlike every other `expr()` tag, its
   value depends on more than the current row: `partition_by` groups the
   query's own filtered row set (`[[String.t()]]`, the exact same shape
   `Query.t()`'s own `group_bys` field already has -- an empty list means
-  "whole result as one partition," lang_spec's own default), `order_bys`
+  "whole result as one partition," the default), `order_bys`
   sequences each partition (`[{[String.t()], :asc | :desc}]`, again the
   exact same shape `Query.t()`'s own `order_bys` field has, reused
   verbatim rather than inventing a parallel type), and `frame` (`nil` or
   a `{frame_bound(), frame_bound()}` pair) optionally restricts an
   aggregate-as-window-function to a sliding window within its own
   partition -- `nil` means "the whole partition, regardless of whether
-  `order_bys` is present" (lang_spec's own explicit "deliberately not
+  `order_bys` is present" (an explicit "deliberately not
   SQL's behavior" rule). `call` is `{:call, name, args}}` as always;
   `name` is either one of `@aggregate_names` (reused as a window
   function, e.g. a running `sum`) or one of the 4 window-only names
@@ -352,13 +351,13 @@ defmodule Scry.Core.Query do
   `HAVING`, over the already-grouped/aggregated output rows -- real SQL
   semantics, and `Scry.Core.QueryOps.run_grouped_with_windows/7`'s own
   moduledoc has the full reasoning. `frame_bound()` (below) mirrors
-  lang_spec's own 5-shape enumeration exactly (`UNBOUNDED PRECEDING`,
+  the 5-shape enumeration exactly (`UNBOUNDED PRECEDING`,
   `<n> PRECEDING`, `CURRENT ROW`, `<n> FOLLOWING`, `UNBOUNDED
   FOLLOWING`) -- a plain tagged value, not a struct, matching this
   module's own general preference for the lightest shape that carries
   the necessary data.
 
-  `expr()`'s own `{:distinct, expr}` (lang_spec.md §5.8: `count(distinct
+  `expr()`'s own `{:distinct, expr}` (`count(distinct
   …)`, "Distinct-value count") is meaningful only as `count`'s own
   single argument (`Scry.Core.QueryOps.eval_aggregate/6` dedupes the
   resolved per-member-row values before counting) -- syntactically
@@ -368,7 +367,7 @@ defmodule Scry.Core.Query do
   already has), but a real, clear error anywhere else (`sum(distinct
   x)`, or nested inside arithmetic).
 
-  `expr()`'s own `{:dot, base, path}` (lang_spec.md §5.8/§7: `json(
+  `expr()`'s own `{:dot, base, path}` (`json(
   <field>)`, "reinterprets a String field for one qualified use" --
   `WHERE json(metadata).color = "red"`) is a call's own *result*
   narrowed by an ordinary dot-path afterward -- `base` is any `expr()`
@@ -386,7 +385,7 @@ defmodule Scry.Core.Query do
   `predicate()`'s own left-hand side (`{:cmp, op, lhs, rhs}`/`{:in, lhs,
   values}`) widens from a bare `path :: [String.t()]` to `[String.t()]
   | {:call, String.t(), [expr()]} | {:dot, expr(), [String.t()]}` for
-  the same reason -- lang_spec §11's own worked example needs `HAVING
+  the same reason -- a worked example needs `HAVING
   sum(total) > 200` (a function call on a comparison's *left* side) and
   §7's own needs `WHERE json(metadata).color = "red"` (a call's result,
   further narrowed by a dot-path, on that same left side), neither of
@@ -405,7 +404,7 @@ defmodule Scry.Core.Query do
   accept a single `{:field, [String.t()]} | {:call, String.t(),
   [expr()]} | {:dot, expr(), [String.t()]}` -- one expr() expected to
   resolve, as a whole, to the list to check membership against. Found
-  while testing `json(<field>).path`: lang_spec §7's own worked example,
+  while testing `json(<field>).path`: the worked example,
   `WHERE "urgent" in metadata.tags`, never parsed before this, since
   `in`'s own grammar alternative only ever matched a bracketed `[...]`
   literal. `Scry.Core.QueryOps.eval_predicate/4`'s own `{:in, ...}`
@@ -418,7 +417,7 @@ defmodule Scry.Core.Query do
   `:in` alone (not shared with `:cmp`'s own `lhs`): it also accepts
   `{:literal, term()}`, a bare literal value wrapped for the same
   disambiguation reason `values`' own computed-list case needed
-  wrapping. lang_spec §7's own worked example quoted above has a
+  wrapping. The worked example quoted above has a
   *literal* on `in`'s own left, `"urgent" in metadata.tags`, not a
   field -- `[String.t()] | {:call, ...} | {:dot, ...}` alone can never
   produce that. Not shared with `:cmp` (`"x" = status` has no worked
@@ -544,7 +543,7 @@ defmodule Scry.Core.Query do
             goal_args: nil
 
   @doc """
-  Starts a new, empty query against `source` -- impl_spec.md §7's
+  Starts a new, empty query against `source` -- its own
   Layer 1, the composable functional counterpart to writing `SELECT
   <source> { ... }` as text. Every other function below takes the
   query it returns (or one already built up by another of them) as its
@@ -558,7 +557,7 @@ defmodule Scry.Core.Query do
   itself already has (a predicate is the same `predicate()` shape
   `Scry.Core.parse/1` already produces, a field path is the same
   `[String.t()]`, ...) rather than guessing at a friendlier surface
-  syntax -- that ergonomic layer is impl_spec.md §7's own Layer 2 (a
+  syntax -- that ergonomic layer is its own Layer 2 (a
   macro DSL built *on top of* these, not implemented yet), which this
   layer is the deliberately more mechanical foundation for.
   """
@@ -580,7 +579,7 @@ defmodule Scry.Core.Query do
   The `HAVING`-clause counterpart to `where/2` -- adds one predicate to
   `query`'s own `havings`, meaningful only alongside `group_by/2` (or
   the implicit whole-result group a query with no `group_by/2` call at
-  all still gets, lang_spec.md §5.2), same as text `HAVING`.
+  all still gets), same as text `HAVING`.
   """
   @spec having(t(), predicate()) :: t()
   def having(%__MODULE__{} = query, predicate),
@@ -595,7 +594,7 @@ defmodule Scry.Core.Query do
   between "one two-segment nested path" and "two top-level fields," so
   this module doesn't try to guess). Replaces any prior `group_by/2`
   call rather than accumulating across calls the way `where/2`
-  accumulates predicates -- lang_spec.md §5.2's own `GROUP BY <field>[,
+  accumulates predicates -- `GROUP BY <field>[,
   ...]` is one clause naming several fields, not several clauses.
   """
   @spec group_by(t(), [[String.t()]]) :: t()
@@ -603,8 +602,8 @@ defmodule Scry.Core.Query do
     do: %{query | group_bys: paths, group_mode: :plain}
 
   @doc """
-  `group_by/2`, with `group_mode: :rollup` (lang_spec.md §5.2's own
-  `GROUP BY ... ROLLUP`, hierarchical subtotal rows in addition to the
+  `group_by/2`, with `group_mode: :rollup` (`GROUP BY ... ROLLUP`,
+  hierarchical subtotal rows in addition to the
   fully-grouped ones -- e.g. `ROLLUP(region, quarter)` also produces a
   per-`region` subtotal and a grand total, `region`/`quarter` both
   projecting `nil` on the rows they're rolled up away from).
@@ -624,7 +623,7 @@ defmodule Scry.Core.Query do
 
   @doc """
   Sets (not accumulates) `query`'s own `distinct` flag -- `true` unless
-  `bool` is passed explicitly, matching lang_spec.md §5.2's own bare
+  `bool` is passed explicitly, matching the bare
   `DISTINCT` (no argument) header modifier.
   """
   @spec distinct(t(), boolean()) :: t()
@@ -636,11 +635,11 @@ defmodule Scry.Core.Query do
   Sets (not accumulates) `query`'s own `order_bys` to `order_bys` --
   `{key, direction}` pairs matching `t()`'s own type exactly, the same
   "one clause, several keys" shape `group_by/2` has, since `ORDER BY`
-  is a single clause with multiple keys too (lang_spec.md §5.2). `key`
+  is a single clause with multiple keys too. `key`
   is any `expr()` (a plain field path is `{:field, path}`, matching
   `select/2`'s own body items and every other `expr()` position) --
-  not restricted to a bare field the way it once was, since lang_spec.md
-  §8.5's own `ORDER BY relevance() DESC` needs a call here too.
+  not restricted to a bare field the way it once was, since
+  `ORDER BY relevance() DESC` needs a call here too.
   """
   @spec order_by(t(), [{expr(), :asc | :desc}]) :: t()
   def order_by(%__MODULE__{} = query, order_bys) when is_list(order_bys),
@@ -665,7 +664,7 @@ defmodule Scry.Core.Query do
   def select(%__MODULE__{} = query, shape) when is_list(shape), do: %{query | select: shape}
 
   @doc """
-  impl_spec.md §7's own Layer 2 -- the macro DSL sugaring over every
+  Its own Layer 2 -- the macro DSL sugaring over every
   function above, modeled on `Ecto.Query`'s own `from` (`Scry.Core.
   Query.From`, and its own `Scry.Core.Query.Escape`, have the full
   design and its two real divergences from Ecto's own model: Scry has
@@ -690,17 +689,17 @@ defmodule Scry.Core.Query do
               )
           }
 
-  -- impl_spec.md §7's own worked example, translated directly (nesting
+  -- a worked example, translated directly (nesting
   a `from` inside a `select:` shape is how a nested `SELECT { }` body
   with correlation to its own enclosing query is expressed; no special
   nested-block syntax needed, ordinary Elixir nesting already has the
-  right shape). **One real correction to that section's own prose**,
+  right shape). **One real correction to that example's own prose**,
   found by actually compiling this, not assumed: the nested `from`
   needs the explicit parens shown above -- a no-parens call as a
   container literal's own value is ambiguous to Elixir's parser (does
   a `where:` two lines down belong to the inner `from` or the outer
   `select:` map?), so `orders: from o in "orders", where: ...` alone,
-  as that section's own prose literally shows it, doesn't actually
+  as that example's own prose literally shows it, doesn't actually
   compile.
 
   Expands entirely at compile time into a pipeline of the plain
@@ -714,10 +713,10 @@ defmodule Scry.Core.Query do
 
   Window functions (`over/2`, `Scry.Core.Query.Escape`'s own moduledoc
   has the full syntax): `over(row_number(), partition_by: [u.dept],
-  order_by: [desc: u.salary])`, matching lang_spec.md §11's own worked
+  order_by: [desc: u.salary])`, matching a worked
   example exactly.
 
-  `select:` also accepts a list, mirroring lang_spec.md §9's own
+  `select:` also accepts a list, mirroring the
   `<body-item> ::= <field> | <alias>: <field> | <alias>: <expression> |
   ... | nested SELECT` directly -- a bare item must be a field path
   (`u.name`), an aliased one is an ordinary keyword-list entry (`total:
@@ -732,7 +731,7 @@ defmodule Scry.Core.Query do
 
   The map form (`select: %{...}`) is unchanged and still the more
   ergonomic choice whenever every item has (or needs) an alias -- the
-  list form exists for the cases lang_spec.md §9 allows that a map's
+  list form exists for the cases the grammar allows that a map's
   mandatory keys cannot express, an unaliased field chief among them.
   """
   defmacro from(binding, opts \\ []) do

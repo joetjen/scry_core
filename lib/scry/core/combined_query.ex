@@ -1,6 +1,6 @@
 defmodule Scry.Core.CombinedQuery do
   @moduledoc """
-  `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` (lang_spec.md §5.4, "Top-level,
+  `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` ("Top-level,
   joining two complete `select` blocks") -- a real, separate result type
   from `Scry.Core.Query.t()`, not a field bolted onto it. A chain of 3+
   combinators (`A UNION B EXCEPT C`) is a binary tree, and `EXCEPT`/
@@ -30,7 +30,7 @@ defmodule Scry.Core.CombinedQuery do
   also as a `WITH`/`WITH RECURSIVE` binding's own value (`with_decl`
   references `combined_select` too, not plain `select`) -- never inside
   a nested `SELECT` body item (`body_item` still references plain
-  `select`). `WITH RECURSIVE` (lang_spec.md §5.4.1) is the one real
+  `select`). `WITH RECURSIVE` is the one real
   reason a `WITH` binding needed to be combinable at all: the recursive
   case is defined *as* a `UNION`/`UNION ALL` of a base case and a
   recursive case referencing the binding's own name, so `with_bindings`'

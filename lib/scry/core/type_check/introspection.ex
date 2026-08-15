@@ -1,6 +1,6 @@
 defmodule Scry.Core.TypeCheck.Introspection do
   @moduledoc """
-  The introspection-assisted half of lang_spec.md §7's compile-time type
+  The introspection-assisted half of the compile-time type
   system -- needs a live connection, so unlike `Scry.Core.TypeCheck`
   itself, this is never run automatically inside `Scry.Core.parse/1`'s
   own pipeline. A caller invokes `check_with_introspection/3` explicitly

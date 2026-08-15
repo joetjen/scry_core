@@ -104,13 +104,13 @@ defmodule Scry.Core.ExecutorTest do
 
   # For json(<field>): metadata is an ordinary String field, not
   # declared as any kind of Json type -- exactly the "escape hatch"
-  # case lang_spec.md §7 describes.
+  # case this escape hatch describes.
   @tickets [
     %{"id" => 1, "metadata" => ~s({"color":"red","tags":["urgent","new"]})},
     %{"id" => 2, "metadata" => ~s({"color":"blue","tags":["sale"]})}
   ]
 
-  # For dxn(<field>)/dxnb(<field>) (lang_spec.md §5.8/§7) -- `payload`
+  # For dxn(<field>)/dxnb(<field>) -- `payload`
   # is an ordinary String field, not declared `DXN`/`DXNB` at all, the
   # identical "escape hatch" shape @tickets already establishes for
   # `json(<field>)`, one row `.dxn` text, one `.dxnb` binary. Real
@@ -135,7 +135,7 @@ defmodule Scry.Core.ExecutorTest do
   # this the same way a JSON author controls their own key casing; this
   # fixture uses genuine string keys specifically so the dot-path
   # examples below are reachable, the same "ordinary dot-path already
-  # works" case lang_spec §7 itself describes for `JSON`.
+  # works" case already applies for `JSON`.
   @dxn_notes [
     %{
       "id" => 1,
@@ -158,7 +158,7 @@ defmodule Scry.Core.ExecutorTest do
 
   # For `in`-with-a-computed-list: `metadata` is a genuine nested map
   # here (unlike @tickets' own JSON-encoded *string*), the direct
-  # lang_spec.md §7 shape -- `metadata.tags` is already a list-valued
+  # shape -- `metadata.tags` is already a list-valued
   # subfield, no `json()` unwrapping needed. Card 2 has no "urgent" tag
   # at all (tests the negative case); card 3's own `tags` is an empty
   # list (tests membership against a genuinely empty computed list,
@@ -183,7 +183,7 @@ defmodule Scry.Core.ExecutorTest do
     %{"id" => 8, "v" => 9}
   ]
 
-  # For window functions -- lang_spec.md §11's own worked example shape
+  # For window functions -- the worked example shape
   # (`department`/`salary`). Bob and Carol are deliberately tied at the
   # same salary within "eng" (tests `rank()`'s own tie-awareness against
   # `row_number()`'s own strict sequence); Bob appears *before* Carol in
@@ -198,7 +198,7 @@ defmodule Scry.Core.ExecutorTest do
     %{"name" => "Eve", "department" => "sales", "salary" => 110}
   ]
 
-  # lang_spec.md §5.2's own ROLLUP/CUBE vocabulary (region/quarter). Two
+  # The ROLLUP/CUBE vocabulary (region/quarter). Two
   # regions x two quarters, every combination present, so a subtotal at
   # any level always has more than one member row to sum -- a single-
   # member subtotal wouldn't tell "the aggregate really spans the
@@ -210,7 +210,7 @@ defmodule Scry.Core.ExecutorTest do
     %{"region" => "west", "quarter" => "q2", "amount" => 50}
   ]
 
-  # For set comparison (lang_spec §5.9, ⊂/⊆/⊃/⊇) -- `tags` is
+  # For set comparison (⊂/⊆/⊃/⊇) -- `tags` is
   # list-valued, the shape every set-comparison operator needs. `post_a`
   # is a genuine proper subset of `["urgent", "new", "sale"]`; `post_b`
   # ties it exactly (subset-or-equal only); `post_c` shares no elements
@@ -221,13 +221,13 @@ defmodule Scry.Core.ExecutorTest do
     %{"id" => 3, "tags" => ["archived"]}
   ]
 
-  # For `WITH RECURSIVE` (lang_spec.md §5.4.1) -- the canonical
+  # For `WITH RECURSIVE` -- the canonical
   # hierarchical-walk shape: a self-referencing tree via `manager_id`,
   # deep enough (3 levels below the CEO) that a fixpoint stopping after
   # only one recursive step would still visibly under-count. The CEO's
   # own `manager_id` is `nil` -- deliberately, so every recursive-WITH
   # test below must guard nullable comparisons itself, same as any
-  # other query would have to (lang_spec's own null-safety rule).
+  # other query would have to (the null-safety rule).
   @org_chart [
     %{"id" => 1, "name" => "CEO", "manager_id" => nil},
     %{"id" => 2, "name" => "VP Eng", "manager_id" => 1},
@@ -735,7 +735,7 @@ defmodule Scry.Core.ExecutorTest do
     assert Enum.map(rows, & &1["id"]) |> Enum.sort() == [1, 2]
   end
 
-  test "negating a set comparison via NOT (...), lang_spec §5.9's own stated idiom" do
+  test "negating a set comparison via NOT (...), the stated idiom" do
     query = %Query{
       source: ["articles"],
       wheres: [{:not, {:cmp, :subset_eq, ["tags"], ["urgent", "new", "sale"]}}],
@@ -1120,7 +1120,7 @@ defmodule Scry.Core.ExecutorTest do
     assert_raise ArgumentError, ~r/exponent must be an integer/, fn -> run(query) end
   end
 
-  test "bitwise & and | on integer fields, lang_spec §5.10" do
+  test "bitwise & and | on integer fields" do
     query = %Query{
       source: ["line_items"],
       select: [{:computed, "masked", {:bitwise, :band, {:field, ["quantity"]}, 6}}]
@@ -1149,7 +1149,7 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  test "unary minus and unary bitwise-not, lang_spec §5's own precedence-table tier 1" do
+  test "unary minus and unary bitwise-not, precedence-table tier 1" do
     query = %Query{
       source: ["line_items"],
       select: [{:computed, "negated", {:unary, :neg, {:field, ["quantity"]}}}]
@@ -1359,7 +1359,7 @@ defmodule Scry.Core.ExecutorTest do
       assert rows == [%{"customer_id" => 1, "count" => 2}]
     end
 
-    test "HAVING alias + arithmetic together -- lang_spec.md §8.2's own worked shape" do
+    test "HAVING alias + arithmetic together -- the worked shape" do
       # error_rate/total_rate, both computed aliases, combined via
       # division on HAVING's own left-hand side -- the exact combination
       # the worked example's own "error_rate / total_rate > 0.05" needs,
@@ -1460,7 +1460,7 @@ defmodule Scry.Core.ExecutorTest do
       assert rows == [%{"service" => "a", "error_sum" => nil}]
     end
 
-    test "lang_spec.md §8.2's own worked shape: HAVING references a scoped alias combined with arithmetic" do
+    test "the worked shape: HAVING references a scoped alias combined with arithmetic" do
       # error_rate is scoped to 5xx rows via its own trailing WHERE;
       # total_rate is unscoped -- HAVING's own "error_rate / total_rate"
       # must see the *same* scoping the SELECT projection uses for
@@ -1562,9 +1562,9 @@ defmodule Scry.Core.ExecutorTest do
       assert_raise ArgumentError, ~r/unknown or unsupported function/, fn -> run(query) end
     end
 
-    test "an EP2 namespaced call (lang_spec §2) with no real handler registered raises the identical clear error an unqualified unknown name already gets" do
+    test "an EP2 namespaced call with no real handler registered raises the identical clear error an unqualified unknown name already gets" do
       # No tier-4 extension exists anywhere in this ecosystem yet
-      # (impl_spec.md §2's own "opt-in, most applications never need
+      # ("opt-in, most applications never need
       # one") -- so every qualified name is, today, honestly
       # unregistered, the same as a plain unknown one. `{:call, name,
       # args}` doesn't distinguish a qualified name from an unqualified
@@ -1603,7 +1603,7 @@ defmodule Scry.Core.ExecutorTest do
       assert_raise ArgumentError, ~r/only valid inside GROUP BY\/HAVING/, fn -> run(query) end
     end
 
-    test "a nested, un-grouped SELECT with aggregate fields is a flat aggregate per outer row (lang_spec §11)" do
+    test "a nested, un-grouped SELECT with aggregate fields is a flat aggregate per outer row" do
       query = %Query{
         source: ["customers"],
         order_bys: [{["id"], :asc}],
@@ -1672,7 +1672,7 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "null-safety (lang_spec.md §7)" do
+  describe "null-safety" do
     @nullable_users [
       %{"name" => "Alice", "age" => 30},
       %{"name" => "Bob", "age" => nil},
@@ -1722,7 +1722,7 @@ defmodule Scry.Core.ExecutorTest do
       assert Enum.sort(rows) == Enum.sort([%{"name" => "Alice"}, %{"name" => "Carol"}])
     end
 
-    test "AND-guarded flow-sensitive narrowing avoids the hard error -- lang_spec.md's own worked example" do
+    test "AND-guarded flow-sensitive narrowing avoids the hard error -- the worked example" do
       query = %Query{
         source: ["nullable_users"],
         wheres: [
@@ -1737,7 +1737,7 @@ defmodule Scry.Core.ExecutorTest do
       assert Enum.sort(rows) == Enum.sort([%{"name" => "Alice"}, %{"name" => "Carol"}])
     end
 
-    test "OR short-circuit avoids the hard error -- lang_spec.md's own worked example" do
+    test "OR short-circuit avoids the hard error -- the worked example" do
       query = %Query{
         source: ["nullable_users"],
         wheres: [{:or, {:cmp, :eq, ["age"], nil}, {:cmp, :gt, ["age"], 20}}],
@@ -1949,7 +1949,7 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "GROUP BY ... ROLLUP / CUBE (lang_spec.md §5.2)" do
+  describe "GROUP BY ... ROLLUP / CUBE" do
     @rollup_select [
       {:field, ["region"]},
       {:field, ["quarter"]},
@@ -2307,9 +2307,9 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "WITH RECURSIVE (SQL:1999 fixpoint semantics, lang_spec.md §5.4.1)" do
+  describe "WITH RECURSIVE (SQL:1999 fixpoint semantics)" do
     # @org_chart's own manager_id is nullable (the CEO's is nil) --
-    # lang_spec's own null-safety rule makes an unguarded `manager_id =
+    # the null-safety rule makes an unguarded `manager_id =
     # 1` a hard error the moment *any* row in the source has a nil
     # there, not just the matching rows, so every base case below
     # guards it explicitly first.
@@ -2710,7 +2710,7 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "extended standard aggregates (stddev/var/percentile, lang_spec.md §5.8)" do
+  describe "extended standard aggregates (stddev/var/percentile)" do
     test "var_pop/stddev_pop over the whole set, no explicit GROUP BY" do
       query = %Query{
         source: ["measurements"],
@@ -2910,7 +2910,7 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "rate(<duration>) aggregate (lang_spec.md §5.8/§8.2)" do
+  describe "rate(<duration>) aggregate" do
     test "count(rows) * duration / elapsed, GROUP BY-scoped, via a DateTime timestamp field" do
       query = %Query{
         source: ["rate_events"],
@@ -3085,8 +3085,8 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "json(<field>).path (lang_spec.md §5.8/§7)" do
-    test "WHERE json(<field>).path = ... -- the lang_spec.md §7 worked example" do
+  describe "json(<field>).path" do
+    test "WHERE json(<field>).path = ... -- the worked example" do
       query = %Query{
         source: ["tickets"],
         wheres: [
@@ -3177,8 +3177,8 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "dxn(<field>)/dxnb(<field>) (lang_spec.md §5.8/§7) -- Dextrin's own escape hatches, symmetric with json(<field>)" do
-    test "WHERE dxn(<field>).path = ... -- the identical shape lang_spec.md §7's own json(<field>) worked example uses" do
+  describe "dxn(<field>)/dxnb(<field>) -- Dextrin's own escape hatches, symmetric with json(<field>)" do
+    test "WHERE dxn(<field>).path = ... -- the identical shape the json(<field>) worked example uses" do
       query = %Query{
         source: ["dxn_notes"],
         wheres: [
@@ -3284,8 +3284,8 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "in against a computed list (lang_spec.md §7)" do
-    test "a literal on the left against a plain field path -- the lang_spec.md §7 worked example" do
+  describe "in against a computed list" do
+    test "a literal on the left against a plain field path -- the worked example" do
       query = %Query{
         source: ["cards"],
         wheres: [{:in, {:literal, "urgent"}, {:field, ["metadata", "tags"]}}],
@@ -3372,8 +3372,8 @@ defmodule Scry.Core.ExecutorTest do
     end
   end
 
-  describe "window functions (lang_spec.md §5.5/§5.8)" do
-    test "the lang_spec.md §11 worked example -- row_number() OVER PARTITION BY ... ORDER BY ... DESC" do
+  describe "window functions" do
+    test "the worked example -- row_number() OVER PARTITION BY ... ORDER BY ... DESC" do
       query = %Query{
         source: ["employees"],
         select: [

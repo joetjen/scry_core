@@ -18,8 +18,7 @@ defmodule Scry.Core.QueryTool do
 
   Auto-detecting what's installed and composing/dispatching dynamically
   at task-invocation time was **tried once already, for grammar
-  composition specifically, and explicitly abandoned** (impl_spec.md
-  §4/§8): any module touching `Ichor.*` (the grammar-composition
+  composition specifically, and explicitly abandoned**: any module touching `Ichor.*` (the grammar-composition
   toolchain) has to live somewhere Mix compiles unconditionally, which
   broke `scry_core`-as-a-dependency compilation for a consumer with no
   interest in grammar composition at all. The restated policy since:

@@ -44,7 +44,7 @@ defmodule Scry.Core.Query.Escape do
   silent misinterpretation.
 
   **`^var` is a *named* deferred parameter, not Ecto's own positional
-  one** -- `impl_spec.md` §7's own divergence table says the pin is
+  one** -- its own divergence table says the pin is
   meant to carry `$name`'s own role forward exactly ("same injection-
   safety property... for free"), not Ecto's separate value-now/cast-
   later indirection (which Scry doesn't need: a native-builder call
@@ -197,7 +197,7 @@ defmodule Scry.Core.Query.Escape do
   `Scry.Core.Query.group_by/2` expects `[String.t()]`, not a wrapped
   `{:field, ...}` expr()). `order_by:` used to be restricted the same
   way; it now accepts a full `expr()` instead (see
-  `escape_order_by_entries/3` below), since lang_spec.md §8.5's own
+  `escape_order_by_entries/3` below), since
   `ORDER BY relevance() DESC` needs a call there, not just a field.
   """
   @spec escape_path(Macro.t(), vars(), Macro.Env.t()) :: Macro.t()
@@ -245,7 +245,7 @@ defmodule Scry.Core.Query.Escape do
   # escape_predicate_lhs/3's own -- the exact same recognition + arg-
   # escaping logic either way, `predicate()`'s own `lhs` widening to
   # `{:call, ...}` specifically to let `HAVING sum(total) > 200`
-  # (lang_spec §11's own worked example) parse at all.
+  # (a worked example) parse at all.
   defp escape_call!(name, args, vars, env) do
     unless to_string(name) in @call_names do
       raise ArgumentError,
@@ -297,7 +297,7 @@ defmodule Scry.Core.Query.Escape do
   defp escape_in_values(ast, vars, env), do: escape_expr(ast, vars, env)
 
   # ---------------------------------------------------------------------
-  # cond -> {:when, clauses, else_expr}. lang_spec's own ELSE is
+  # cond -> {:when, clauses, else_expr}. The ELSE clause is
   # mandatory, enforced here at compile time (a non-`true` final clause
   # is a clear error) rather than left to Elixir's own `cond`, which
   # merely crashes at runtime with no matching clause.
@@ -324,7 +324,7 @@ defmodule Scry.Core.Query.Escape do
 
       _ ->
         raise ArgumentError,
-              "a Scry `cond` must end with a `true ->` clause (lang_spec.md's own WHEN...ELSE " <>
+              "a Scry `cond` must end with a `true ->` clause (WHEN...ELSE " <>
                 "is mandatory, not optional) preceded by at least one real WHEN clause"
     end
   end
@@ -334,7 +334,7 @@ defmodule Scry.Core.Query.Escape do
   # -> {:window, call, partition_by, order_bys, frame}. `over` isn't a
   # real Scry function name (not in @call_names) -- a DSL-level marker
   # this module recognizes specially, the same way `cond` is, since
-  # lang_spec's own text syntax (`<call> OVER PARTITION BY ... ORDER BY
+  # the text syntax (`<call> OVER PARTITION BY ... ORDER BY
   # ... ROWS BETWEEN ... AND ...`) has no natural Elixir infix
   # equivalent to mirror directly. `call` itself is escaped through the
   # ordinary escape_call!/4 -- any of the recognized names, not

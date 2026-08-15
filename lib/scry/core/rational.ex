@@ -1,6 +1,6 @@
 defmodule Scry.Core.Rational do
   @moduledoc """
-  Exact rationals, per lang_spec.md §4 ("Numbers: exact rationals by
+  Exact rationals ("Numbers: exact rationals by
   default" -- a Lisp/Scheme-style numeric tower, not IEEE-754
   float-by-default). Only what a *literal* needs to construct: `new/2`
   (auto-reduced via GCD, a denominator of `1` collapsing to a plain
@@ -10,7 +10,7 @@ defmodule Scry.Core.Rational do
   the comparison path).
 
   `add/2`/`sub/2`/`mul/2`/`div/2`/`pow/2` close the four arithmetic
-  operators lang_spec.md §5.10 lists (`+ - * /`, plus `**` for integer
+  operators (`+ - * /`, plus `**` for integer
   exponents) over the rationals -- every one of them builds on `new/2`'s
   own construct-and-reduce, so the closure and collapse-to-integer
   properties `new/2` already documents apply automatically to every
@@ -24,14 +24,14 @@ defmodule Scry.Core.Rational do
   -- `3/2` genuinely isn't an integer, so it always needs `new/2`'s own
   reduction to decide what the result actually is.
 
-  **Inexact (float) coexistence (lang_spec.md §4).** `to_float/1`/
+  **Inexact (float) coexistence.** `to_float/1`/
   `from_float/1` are the two conversion directions -- `from_float/1` via
   `Float.ratio/1` (stdlib), the exact rational value of an IEEE-754
   double, always exists and always bounded (a fixed-width mantissa has a
-  fixed-size exact rational form), per lang_spec's own "conversion on
+  fixed-size exact rational form), per the "conversion on
   ingest" framing. `add/2`/`sub/2`/`mul/2`/`div/2`/`pow/2` each gain a
   leading clause for "either operand is already a native `float()`" --
-  lang_spec's own **contagion** rule, *"mixing exact and inexact in one
+  the **contagion** rule, *"mixing exact and inexact in one
   operation yields inexact"*: the *other* operand converts to a float
   too (`to_float/1`), the whole operation happens in ordinary Kernel
   float arithmetic, and the result is a plain `float()`, never routed
@@ -44,14 +44,14 @@ defmodule Scry.Core.Rational do
   strictly more correct than comparing two lossy floats would be.
 
   Still deliberately incomplete: `sqrt`'s own per-input exactness
-  recovery (lang_spec.md §4: exact only when both parts of a reduced
+  recovery (exact only when both parts of a reduced
   `p/q` are perfect squares, inexact otherwise) isn't here -- nothing in
   this codebase evaluates `sqrt` yet, so there's nothing real to build
   that against. That's future work, not an oversight.
   """
 
-  # `div/2` is this module's own exact-rational division (lang_spec
-  # §5.10), not `Kernel.div/2`'s integer division -- excepted here so
+  # `div/2` is this module's own exact-rational division,
+  # not `Kernel.div/2`'s integer division -- excepted here so
   # the two don't conflict; every internal use of *integer* division
   # (`new/2`'s own reduction step) calls `Kernel.div/2` explicitly.
   import Kernel, except: [div: 2]
@@ -63,7 +63,7 @@ defmodule Scry.Core.Rational do
 
   @doc """
   Builds the reduced exact-rational value of `numerator / denominator`
-  -- auto-reduced via GCD (lang_spec.md §4), sign normalized onto the
+  -- auto-reduced via GCD, sign normalized onto the
   numerator, and collapsed to a plain `integer()` when the reduced
   denominator is `1` (also §4: "a denominator of `1` collapses to a
   plain integer"). Raises `ArithmeticError` for a zero denominator,
@@ -88,8 +88,8 @@ defmodule Scry.Core.Rational do
   end
 
   @doc """
-  The exact rational value of a native `float()` (lang_spec.md §4:
-  "conversion on ingest") -- `Float.ratio/1` (stdlib) always succeeds,
+  The exact rational value of a native `float()` ("conversion on
+  ingest") -- `Float.ratio/1` (stdlib) always succeeds,
   always bounded, since an IEEE-754 double's fixed-width mantissa has a
   fixed-size exact rational form.
   """
@@ -132,7 +132,7 @@ defmodule Scry.Core.Rational do
   @doc """
   Addition. Exact and closed over the rationals for exact inputs
   (`an/ad + bn/bd = (an*bd + bn*ad) / (ad*bd)`) -- but contagion
-  (lang_spec.md §4, this module's own moduledoc) applies the moment
+  (this module's own moduledoc) applies the moment
   either operand is already an inexact `float()`: the result is a plain
   `float()` then, not routed through `new/2`.
   """
@@ -183,7 +183,7 @@ defmodule Scry.Core.Rational do
   end
 
   @doc """
-  Division (lang_spec.md §5.10: "`/` = exact rational division") -- same
+  Division ("`/` = exact rational division") -- same
   contagion rule as `add/2`. Raises `ArithmeticError` for a zero
   divisor, via the same `new/2` zero-denominator guard every other exact
   construction path already goes through (a zero float divisor instead
@@ -209,7 +209,7 @@ defmodule Scry.Core.Rational do
 
   @doc """
   Exponentiation with an **integer** exponent, positive, negative, or
-  zero (lang_spec.md §5.10: "`**`(integer exponent)... closed over the
+  zero ("`**`(integer exponent)... closed over the
   rationals" -- the rationals aren't closed under an arbitrary rational
   exponent, e.g. `sqrt`, which is exactly why the exponent is
   constrained to integers here, not a limitation of this function

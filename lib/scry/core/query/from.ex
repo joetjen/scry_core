@@ -18,7 +18,7 @@ defmodule Scry.Core.Query.From do
   no special-casing needed either way.
 
   **Nested `from`** (a `select:` map value that's itself a `from` call
-  -- `impl_spec.md` §7's own worked example, `select: %{orders: from o
+  -- a worked example, `select: %{orders: from o
   in "orders", where: o.user_id == u.id, ...}}`) recurses into `build/4`
   again, passing this level's own `vars` (`Scry.Core.Query.Escape`'s own
   `vars()`) rewritten so *this* level's own bound variable stops being
@@ -148,7 +148,7 @@ defmodule Scry.Core.Query.From do
   end
 
   # A list-shaped `select:`'s own per-item dispatch -- mirrors
-  # lang_spec.md §9's own `<body-item> ::= <field> | <alias>: <field> |
+  # the `<body-item> ::= <field> | <alias>: <field> |
   # <alias>: <expression> | ... | nested SELECT`. A bare nested `from`
   # needs no key validation the way the map form's `select_item/5`
   # does above -- there's no map key the caller could have gotten

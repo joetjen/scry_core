@@ -1,6 +1,6 @@
 defmodule Scry.Core.Grammar.BodyListSep do
   @moduledoc """
-  `priv/grammar.aether`'s own `body_list_sep` rule -- lang_spec.md §6:
+  `priv/grammar.aether`'s own `body_list_sep` rule --
   comma required between two body items sharing a physical line,
   optional (a line break suffices) when each is on its own line.
 

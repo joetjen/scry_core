@@ -1,6 +1,6 @@
 defmodule Scry.Core.GrammarCompose do
   @moduledoc """
-  Merges core's grammar with a kind fragment's, per impl_spec.md §4 --
+  Merges core's grammar with a kind fragment's --
   the pre-processing step Ichor has no native equivalent for, sitting
   between independently parsing each `.aether` source (both succeed on
   their own; core's EP1/EP2 extension points are dangling `RuleRef`s by
@@ -34,13 +34,13 @@ defmodule Scry.Core.GrammarCompose do
       `@skip` (same class of eager check as `@keywords`/`@refine`), but
       that copy is never meant to *diverge* from core's -- it's
       discarded in favor of core's own at merge time. Any other name
-      defined by both is a genuine collision (lang_spec.md §2's
+      defined by both is a genuine collision (the
       grammar-composition-time keyword-collision rule) and raises.
 
   A third, more fundamental requirement, found while working out how
   `select_ep1a` should actually behave once more than one kind is
   loaded: **an extension point is not "exactly one fragment may define
-  this rule."** lang_spec.md §5.2 already says as much for real --
+  this rule."** That already holds for real --
   `last` (time-series) and `deep` (document) both nominate the same
   "before WHERE" position, and nothing stops a build from loading both
   kinds at once, each contributing its own alternative there. Treating

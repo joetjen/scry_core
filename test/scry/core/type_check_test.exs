@@ -143,7 +143,7 @@ defmodule Scry.Core.TypeCheckTest do
       assert :ok = TypeCheck.check(query, type_decls)
     end
 
-    test "goal_args (a call-shaped source, lang_spec §8.4) against a non-logic kind is a hard error" do
+    test "goal_args (a call-shaped source) against a non-logic kind is a hard error" do
       type_decls = %{"ancestor" => %{name: "ancestor", kind: "graph", fields: []}}
       query = %Query{source: ["ancestor"], select: [], goal_args: [{:field, ["X"]}, "bob"]}
 
@@ -585,9 +585,9 @@ defmodule Scry.Core.TypeCheckTest do
     end
 
     test "no cross-side type-consistency checking exists for a CombinedQuery (regression)" do
-      # lang_spec.md never specifies this as a requirement -- two
+      # Never specified as a requirement -- two
       # incompatible declared shapes on either side of a UNION is not
-      # (and should not become, absent a documented spec requirement) an
+      # (and should not become, absent a documented requirement) an
       # error this module raises.
       type_decls = %{
         "a" => %{name: "a", kind: nil, fields: [{"id", {:named, "Int", nil}}]},

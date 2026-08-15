@@ -2,13 +2,13 @@ defmodule Scry.Core.FragmentResolver do
   @moduledoc """
   Expands `{:spread, name}` placeholders (`Scry.Core.Actions`' own
   `handle_rule(:spread, ...)`) into the named `FRAGMENT`'s own body-item
-  list, in place -- the desugaring lang_spec §5.11/§9's `...<fragment-
-  name>` describes ("GraphQL-style", per that section's own framing).
+  list, in place -- the desugaring that `...<fragment-name>` performs
+  ("GraphQL-style").
   Invoked once, by `Scry.Core.Actions`' own `handle_rule(:document, ...)`,
   after both the top-level `select` and every `FRAGMENT` declaration have
   already been evaluated into real terms -- not by `handle_rule(:spread,
   ...)` itself, since a spread may reference a `FRAGMENT` declared later
-  in the same document (lang_spec gives no ordering requirement between
+  in the same document (there's no ordering requirement between
   a `FRAGMENT` and its uses), which a single bottom-up pass over the
   parse tree can't see ahead of.
 
@@ -43,7 +43,7 @@ defmodule Scry.Core.FragmentResolver do
   is, recursively.
 
   A document's own top-level result may be a `%Scry.Core.CombinedQuery{}`
-  instead of a plain `%Query{}` (lang_spec §5.4's `UNION`/`INTERSECT`/
+  instead of a plain `%Query{}` (`UNION`/`INTERSECT`/
   `EXCEPT`, `Scry.Core.CombinedQuery`'s own moduledoc) -- `resolve/2`'s
   own second clause recurses into both `left`/`right` (each independently
   either shape), so a `FRAGMENT` spread works identically on *either*

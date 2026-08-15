@@ -7,11 +7,11 @@
 ; editing anything below, run `mix run priv/gen/generate_compiled_grammar.exs`
 ; and re-run the test suite; never hand-edit the generated file itself.
 ;
-; Covers a deliberately bounded slice of lang_spec.md so the core/variant
-; composition architecture (impl_spec.md §2/§4) can be proven against a
+; Covers a deliberately bounded slice of the language so the core/variant
+; composition architecture can be proven against a
 ; real parser before the full language is written out. Phase 1 has:
 ;
-;   - `#` line comments and `;` block comments (lang_spec §3) -- the
+;   - `#` line comments and `;` block comments -- the
 ;     latter genuinely is a context-free, not regular, construct
 ;     (consuming its own matching `}` via `{`/`}` depth counting), so it
 ;     cannot be a plain lexer-level token the way `#`/SPACE are; it
@@ -22,8 +22,8 @@
 ;     (`` `select` ``, §3)
 ;   - double- and single-quoted strings with real escape handling
 ;     (`\" \' \\ \n \t \uXXXX`, §4), triple-quoted multiline strings
-;     (verbatim content, no indentation stripping -- lang_spec §4 says
-;     nothing more specific, see MULTILINE_STRING's own comment for the
+;     (verbatim content, no indentation stripping -- nothing
+;     more specific is said, see MULTILINE_STRING's own comment for the
 ;     reasoning), integers, decimals, `2/3`-shaped rational literals,
 ;     radix integers (`0x`/`0o`/`0b`), list literals (`[...]`, usable
 ;     anywhere a literal is, not just inside `in [...]`), atom literals
@@ -37,7 +37,7 @@
 ;     paired with the `~` match operator,
 ;     nil/true/false (§4), duration/byte-size literals (`DURATION`/
 ;     `BYTE_SIZE`'s own comments have the concrete unit vocabulary
-;     chosen, mirrored in lang_spec.md itself) -- the rest of the
+;     chosen) -- the rest of the
 ;     exact-rational tower's own remaining gap is `inexact`/float
 ;     coexistence specifically (see Scry.Core.Rational's own moduledoc);
 ;     arithmetic *expressions* are implemented (§5.10, `expression`'s
@@ -62,7 +62,7 @@
 ;     registry) does not. §8's five standard variants (graph/time-series/
 ;     document/logic/search) remain entirely unimplemented -- no kind
 ;     fragment exists in this codebase yet to compose in.
-;   - one EP1(a) extension point (`select_ep1a`, lang_spec §2), proving
+;   - one EP1(a) extension point (`select_ep1a`), proving
 ;     the union-of-simultaneous-kind-contributions composition pattern
 ;     the whole design actually needs (not "core references a rule it
 ;     never defines" -- core supplies a real always-fails default, see
@@ -70,7 +70,7 @@
 ;     matter)
 ;
 ; Every deferral above is a real gap, not a design decision -- each one
-; needs its own pass. See impl_spec.md §8 for how this file's own
+; needs its own pass. This file's own
 ; composition gets tested (Scry.Core.GrammarCompose + its test suite).
 
 @grammar "scry_core"
@@ -83,7 +83,7 @@
 COMMENT := "#" (!"\n" .)*
 TRIVIA  := (SPACE | COMMENT)*
 
-; `;` block comments (lang_spec §3) -- Scry.Core.Grammar.BlockCommentLexeme's
+; `;` block comments -- Scry.Core.Grammar.BlockCommentLexeme's
 ; own moduledoc has the full mechanics (Aether's `@native`/`CustomLexeme`
 ; escape hatch, verified via scratch grammar first, the same way `SIGIL`'s
 ; own "any delimiter" support was). Genuinely a context-free construct
@@ -98,7 +98,7 @@ TRIVIA  := (SPACE | COMMENT)*
 ; expression" -- a constraint this file's own `SIGIL` change didn't run
 ; into, since `SIGIL` is only ever referenced from a *rule* (`literal`),
 ; never from inside `TRIVIA` itself). Wired in at the *rule* level
-; instead, exactly where lang_spec's own "valid only immediately before
+; instead, exactly where the "valid only immediately before
 ; a block-opening keyword" wording already points -- see `document`'s
 ; own comment for the `*_or_comment` wrapper-rule shape this uses,
 ; verified against `Grammar.VM` specifically (the interpreted backend
@@ -121,8 +121,8 @@ BLOCK_COMMENT := @native("Scry.Core.Grammar.BlockCommentLexeme", "scan")
 ; decision to that module instead, which downcases first.
 ;
 ; No `-` in the trailing character class (nor in ESCAPED_IDENT/ATOM/
-; PARAM below, which originally copied this same class) -- lang_spec
-; §3's own "Identifiers" section says only "Bare by default (`name`,
+; PARAM below, which originally copied this same class) -- the
+; "Identifiers" section says only "Bare by default (`name`,
 ; `orders.total`)", never mentions hyphens as valid identifier
 ; characters at all. Allowing them was an unjustified overreach from
 ; this file's own first draft, found while scoping arithmetic
@@ -143,18 +143,18 @@ IDENT := [[:alpha:]_][[:alnum:]_]*
           KW_ROLLUP, KW_CUBE,
           KW_SUBSET, KW_SUPERSET, KW_OF, KW_EQUAL, KW_TO, KW_RECURSIVE)
 
-; A field name that happens to collide with a keyword (lang_spec §3:
-; "Escaped with backtick only on keyword collision") -- a wholly
+; A field name that happens to collide with a keyword
+; ("Escaped with backtick only on keyword collision") -- a wholly
 ; separate token from IDENT, not something IDENT itself can produce no
 ; matter what it matches, so it's never subject to `@refine` above:
 ; backtick-escaped text is *always* a plain identifier, regardless of
 ; whether the text between the backticks happens to also be spelled
-; like a keyword. `select`/`` `SELECT` ``/`` `Select` `` (any case, per
-; lang_spec §3's own "collision check is case-insensitive too") are all
+; like a keyword. `select`/`` `SELECT` ``/`` `Select` `` (any case, since
+; the "collision check is case-insensitive too") are all
 ; the identifier "select" this way, never KW_SELECT.
 ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_]* "`"
 
-; Colon-*prefixed* (lang_spec §5.3: "`:active` is colon-prefixed;
+; Colon-*prefixed* ("`:active` is colon-prefixed;
 ; `subtotal:` is colon-suffixed" -- the latter, an alias/named
 ; body-item marker, is a separate, still-deferred construct, and
 ; doesn't collide with this). Never subject to `@refine` -- a
@@ -162,7 +162,7 @@ ESCAPED_IDENT := "`" [[:alpha:]_][[:alnum:]_]* "`"
 ; ESCAPED_IDENT immediately above.
 ATOM := ":" [[:alpha:]_][[:alnum:]_]*
 
-; External parameter (lang_spec §5.7/§9): a value supplied out-of-band
+; External parameter: a value supplied out-of-band
 ; at submission time via a separate variables payload, never
 ; string-interpolated into query text -- a real injection-safety
 ; property, not style. `$` doesn't collide with anything else declared
@@ -197,10 +197,9 @@ RADIX   := "0" [xX] HEX+
          | "0" [oO] [0-7]+
          | "0" [bB] [01]+
 
-; Duration/byte-size literals (lang_spec §4 -- the table gives worked
+; Duration/byte-size literals (worked
 ; examples, `1h`/`5m`/`10MB`/`10MiB`, not a full unit enumeration; this
-; is the concrete vocabulary chosen to fill that gap, mirrored in
-; lang_spec.md itself so the two stay in sync). Both collapse into the
+; is the concrete vocabulary chosen to fill that gap). Both collapse into the
 ; ordinary exact-rational tower exactly like `RADIX` already does
 ; (`Scry.Core.Actions`' own `handle_token` multiplies the magnitude by
 ; the unit's own canonical value via `Scry.Core.Rational.mul/2`) -- a
@@ -232,7 +231,7 @@ RADIX   := "0" [xX] HEX+
 ; No `w` (week) -- deliberately excluded, not an oversight: unlike every
 ; other unit here, "a week" is not an unambiguous fixed duration without
 ; a calendar (7 exact days vs. a locale's own week-start convention),
-; and inventing an answer to a question lang_spec doesn't ask is exactly
+; and inventing an answer to a question nothing asks is exactly
 ; the kind of "design for a hypothetical requirement" this codebase
 ; otherwise avoids.
 DURATION := DIGIT+ ("." DIGIT+)?
@@ -242,7 +241,7 @@ BYTE_SIZE := DIGIT+ ("." DIGIT+)?
              ("KiB"cs | "MiB"cs | "GiB"cs | "TiB"cs | "PiB"cs
              | "KB"cs | "MB"cs | "GB"cs | "TB"cs | "PB"cs | "B"cs)
 
-; ISO 8601 (lang_spec §4's own example: `2026-01-01T14:00:00Z`) --
+; ISO 8601 (a worked example: `2026-01-01T14:00:00Z`) --
 ; lexically permissive on purpose, not a full calendar-aware match
 ; (real ISO 8601 has more shapes than are worth spelling out char by
 ; char here: fractional seconds, a numeric UTC offset instead of `Z`,
@@ -260,7 +259,7 @@ DATE := DIGIT DIGIT DIGIT DIGIT "-" DIGIT DIGIT "-" DIGIT DIGIT
           ("Z" | [+-] DIGIT DIGIT ":" DIGIT DIGIT)?
         )?
 
-; Two delimiters (lang_spec §4: "pick to avoid escaping" -- a string
+; Two delimiters ("pick to avoid escaping" -- a string
 ; containing a `"` can be written `'...'` instead), both honoring
 ; ESCAPE at every position before falling back to "any character other
 ; than this string's own delimiter". `\"` previously had no special
@@ -272,8 +271,8 @@ DATE := DIGIT DIGIT DIGIT DIGIT "-" DIGIT DIGIT "-" DIGIT DIGIT
 STRING := "\"" (ESCAPE | !"\"" .)* "\""
         | "'" (ESCAPE | !"'" .)* "'"
 
-; lang_spec §4 lists `"""..."""` alongside the two single-quote-style
-; delimiters but says nothing more about it -- no example, no stated
+; `"""..."""` is allowed alongside the two single-quote-style
+; delimiters, but nothing more is said about it -- no example, no stated
 ; escape/indentation-stripping behavior. Absent that, this is the most
 ; conservative reading available: content is captured verbatim between
 ; the delimiters (embedded newlines included, no leading-whitespace
@@ -286,7 +285,7 @@ STRING := "\"" (ESCAPE | !"\"" .)* "\""
 ; whatever STRING alone could match starting from the same `"`.
 MULTILINE_STRING := "\"\"\"" (ESCAPE | !"\"\"\"" .)* "\"\"\""
 
-; \" \' \\ \n \t \uXXXX -- lang_spec §4's own escape list, exactly.
+; \" \' \\ \n \t \uXXXX -- the escape list, exactly.
 ; An unrecognized `\<char>` is deliberately not rejected: ordered PEG
 ; choice just falls through to STRING's own "any character" fallback
 ; above, treating the backslash as a literal character on its own.
@@ -294,7 +293,7 @@ MULTILINE_STRING := "\"\"\"" (ESCAPE | !"\"\"\"" .)* "\"\"\""
 ; propagation this phase doesn't have.
 ESCAPE := "\\" ("\"" | "'" | "\\" | "n" | "t" | "u" HEX HEX HEX HEX)
 
-; `@tag<delim>...<delim>` (lang_spec §3/§4) is specified with "any
+; `@tag<delim>...<delim>` is specified with "any
 ; delimiter" -- genuinely not expressible as a plain Aether token
 ; pattern for an *arbitrary*, parse-time-chosen delimiter character:
 ; requiring the same character back at the close is a backreference,
@@ -322,7 +321,7 @@ LT     := "<"
 GT     := ">"
 MATCH  := "~"
 
-; Set comparison (lang_spec §5.9, ISO 80000-2) -- the symbol spelling.
+; Set comparison (ISO 80000-2) -- the symbol spelling.
 ; Each also has a word-form alternative (`subset_of_op` etc., near
 ; `comp_op` below) built from ordinary keyword tokens, not a second
 ; token here; none of these four characters is used anywhere else in
@@ -341,12 +340,12 @@ DOT    := "."
 COLON  := ":"
 
 ; `TYPE`'s own union (`String | Int`) and nullable (`?Int`) markers
-; (lang_spec §7) -- neither character is used anywhere else in this
+; -- neither character is used anywhere else in this
 ; grammar, no maximal-munch/ordering conflict with any existing token.
 PIPE     := "|"
 QUESTION := "?"
 
-; Arithmetic (lang_spec §5.10, §9's "Computed fields"). `POW` (`**`)
+; Arithmetic ("Computed fields"). `POW` (`**`)
 ; declared before `STAR` (`*`) for readability only -- maximal munch
 ; already picks `POW` over two separate `STAR` matches at the same
 ; position regardless of declaration order, the same way `LE`/`GT`
@@ -358,18 +357,18 @@ POW   := "**"
 LPAREN := "("
 RPAREN := ")"
 
-; Bitwise (lang_spec §5.10, precedence tier 5 for the binary forms,
+; Bitwise (precedence tier 5 for the binary forms,
 ; tier 1 for unary `!`) -- `AMP`/`BANG` are new tokens; `PIPE` (above,
 ; type-union `|`) is reused as-is for bitwise OR too, since it's the
 ; identical character and the two uses never collide (a type position
 ; and an expression position are never the same parse location). No
 ; `&=`/`|=`/`!=` tokens exist anywhere in this grammar, so `&`/`|`/`!`
 ; are unambiguous against `and`/`or`/`not`'s own keyword spellings and
-; against `NOT_EQ` ("not=") -- lang_spec's own stated reasoning.
+; against `NOT_EQ` ("not=") -- by design.
 AMP  := "&"
 BANG := "!"
 
-; Fragment spread (lang_spec §5.11/§9): `...<fragment-name>` inside a
+; Fragment spread: `...<fragment-name>` inside a
 ; body list. Three literal dots, strictly longer than any single `DOT`
 ; match at the same position -- maximal munch prefers this token the
 ; same way `POW` beats two separate `STAR` matches above, so no
@@ -392,7 +391,7 @@ NEVER := []
 
 ; The real root now (`@root document` above) -- a query text is zero or
 ; more top-level `FRAGMENT` declarations followed by exactly one `select`
-; (lang_spec §6/§9: `WITH`/`TYPE` are the other two top-level
+; (`WITH`/`TYPE` are the other two top-level
 ; block-openers §6 names, still deferred, not needed for `FRAGMENT` to
 ; work). `fragment_decl*` bare and unrenamed, same established reason
 ; every other repeated/optional rule reference in this file is left
@@ -432,8 +431,8 @@ NEVER := []
 ; in this file is always followed by more input from its own caller,
 ; never genuinely at the end of the stream.
 ;
-; The comma-optional-on-newline half of `body_list`'s own gap (lang_spec
-; §6: "optional -- a line break suffices -- when each item is on its own
+; The comma-optional-on-newline half of `body_list`'s own gap
+; ("optional -- a line break suffices -- when each item is on its own
 ; line") *is* fixed here, but not the way the earlier version of this
 ; comment predicted. A dedicated `NEWLINE` token pulled out of skip-trivia
 ; turns out to be a dead end: `Grammar.VM.Tokenizer`'s own tokenizer is a
@@ -511,8 +510,8 @@ NEVER := []
 ; survives it, not just the non-leaking case the first, insufficient
 ; design happened to pass.
 ; `fragment_decl*` before `with_decl*` -- a fixed relative order between
-; the two declaration kinds, not something lang_spec mandates one way or
-; the other (its own §9 never shows them mixed). Simpler than a unified
+; the two declaration kinds, not something mandated one way or
+; the other (nothing shows them mixed). Simpler than a unified
 ; `top_level_decl := fragment_decl | with_decl` choice rule would be (no
 ; tag-based dispatch needed to tell a fragment declaration's own
 ; `{name, body_items}` result apart from a with-declaration's `{name,
@@ -528,18 +527,18 @@ NEVER := []
 ; finding only ever applies to `?`/`*`/`+`-quantified references, never
 ; a plain single one like this.
 ;
-; `type_decl*` first, before `fragment_decl*`/`with_decl*` -- lang_spec
-; §7's own framing ("standalone artifacts, closer to DDL, never inline
+; `type_decl*` first, before `fragment_decl*`/`with_decl*` -- the
+; framing ("standalone artifacts, closer to DDL, never inline
 ; in a query") makes `TYPE` the most foundational, schema-level
 ; declaration kind, so it goes first, the same "a fixed relative order
-; between declaration kinds, not something lang_spec mandates one way
+; between declaration kinds, not something mandated one way
 ; or the other" reasoning `fragment_decl*`/`with_decl*`'s own ordering
 ; already has (their own comment nearby). `Scry.Core.Actions`' own
 ; `document` handler stores every parsed `type_decl` in a `name =>
 ; type_decl` map on the resulting query/combined query, the same shape
 ; `with_bindings` already has -- but, deliberately, *only* stored, never
 ; read by anything else in this codebase yet (no schema-registry hook,
-; no type-checking, no null-safety narrowing -- lang_spec §7's full
+; no type-checking, no null-safety narrowing -- the full
 ; type system is a real, separate, much larger undertaking than parsing
 ; the declaration shape). This is the exact same "grammar accepts it,
 ; nothing consumes it yet" posture `body_item_ep1 := NEVER`/`:variant`
@@ -547,7 +546,7 @@ NEVER := []
 ; contributing one yet.
 ;
 ; `*_or_comment*`, not bare `type_decl*`/etc -- `;` block comments
-; (lang_spec §3, `BLOCK_COMMENT`'s own comment above) are valid
+; (`BLOCK_COMMENT`'s own comment above) are valid
 ; "immediately before a block-opening keyword," which a real
 ; declaration and a comment *replacing* one are mutually exclusive
 ; alternatives at any given position (a matched `BLOCK_COMMENT` already
@@ -572,7 +571,7 @@ type_or_comment := type_decl | BLOCK_COMMENT
 fragment_or_comment := fragment_decl | BLOCK_COMMENT
 with_or_comment := with_decl | BLOCK_COMMENT
 
-; `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` (lang_spec §5.4, "Top-level,
+; `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` ("Top-level,
 ; joining two complete select blocks"). Bare, unrenamed
 ; `combinator_tail*` (renaming a repeated rule reference produces a
 ; spurious extra raw-text capture -- confirmed to bite here too, the
@@ -593,7 +592,7 @@ with_or_comment := with_decl | BLOCK_COMMENT
 ; Combinators apply only here, at the very top of a document -- neither
 ; `with_decl` (still plain `select`) nor `body_item`'s own nested
 ; `select` reference were widened to `combined_select`. `WITH RECURSIVE`
-; (lang_spec §5.4.1) is the one concrete case where a `WITH` binding
+; is the one concrete case where a `WITH` binding
 ; would need to be combinable, and it's an explicitly separate, later
 ; increment (its own fixpoint-iteration logic, plus the graph variant's
 ; `VIA`, per its own worked example); revisit this boundary then, not
@@ -622,22 +621,22 @@ combinator_tail := union:KW_UNION all:KW_ALL? right:select
                   | intersect:KW_INTERSECT right:select
                   | except:KW_EXCEPT right:select
 
-; `<body-item> ...` (lang_spec §6's own template) reuses `body_list`
+; `<body-item> ...` (the template) reuses `body_list`
 ; directly -- a FRAGMENT's body is exactly as expressive as a SELECT's
 ; own (it can itself nest a SELECT, or spread another FRAGMENT), so no
 ; separate body grammar is needed here.
 fragment_decl := KW_FRAGMENT name:field_name LBRACE body:body_list RBRACE
 
-; `WITH <name> = SELECT ...` (lang_spec §9: "named reusable sub-query,
+; `WITH <name> = SELECT ...` ("named reusable sub-query,
 ; SQL CTE equivalent" -- vs. `FRAGMENT`'s reusable *shape*, this is
 ; reusable *data*). Reuses `combined_select` for the bound value (not
 ; plain `select`) -- a `WITH` binding is a real, fully-formed query
 ; (its own `where`/`group by`/`having`/etc. all apply exactly as they
-; would standalone), and `WITH RECURSIVE` (lang_spec §5.4.1) needs
+; would standalone), and `WITH RECURSIVE` needs
 ; `UNION`/`UNION ALL` to mean anything at all, the recursive case being
 ; defined *as* a union with a base case -- an ordinary, non-recursive
 ; `WITH` binding may use a combinator too now, for the identical reason
-; the document-level `combined_select` already can (nothing in lang_spec
+; the document-level `combined_select` already can (nothing
 ; restricts combinators to top-level document position specifically;
 ; `combined_select`'s own single-operand collapse means every existing
 ; `WITH x = SELECT ...` binding, no combinator used, is entirely
@@ -651,7 +650,7 @@ fragment_decl := KW_FRAGMENT name:field_name LBRACE body:body_list RBRACE
 ; `with_bindings` field to keep in sync.
 with_decl := KW_WITH recursive:KW_RECURSIVE? name:field_name EQ query:combined_select
 
-; `TYPE <name> [: <kind>] { <field>: <type> ... }` (lang_spec §7). Field
+; `TYPE <name> [: <kind>] { <field>: <type> ... }`. Field
 ; separator is unconditionally `COMMA` -- the same pre-existing,
 ; already-documented "comma optional on newline" gap `body_list`'s own
 ; comment has (found while investigating this feature specifically: a
@@ -664,8 +663,8 @@ type_kind := COLON kind:IDENT
 type_field_list := head:type_field (COMMA tail:type_field)*
 type_field := name:field_name COLON expr:type_expr
 
-; `<type> ::= <base-type> | ?<base-type> | <type> | <type>` (lang_spec
-; §7's own EBNF, verbatim). Union binds loosest -- `type_expr` is the
+; `<type> ::= <base-type> | ?<base-type> | <type> | <type>` (this
+; type's own EBNF, verbatim). Union binds loosest -- `type_expr` is the
 ; top-level entry point, `union_tail*` bare/unrenamed (the same
 ; established "renaming a repeated rule reference produces a spurious
 ; capture" finding `additive_tail*`/`combinator_tail*` already prove,
@@ -678,7 +677,7 @@ type_field := name:field_name COLON expr:type_expr
 type_expr := head:type_operand union_tail*
 union_tail := PIPE operand:type_operand
 
-; `?` is prefix (lang_spec §3: "reserves postfix position for a
+; `?` is prefix ("reserves postfix position for a
 ; possible future conditional-access operator"), binding to the
 ; *immediately following* base-type only, not a trailing union chain --
 ; `?Int | String` means `(?Int) | String`, i.e. `Int | Nil | String`,
@@ -712,19 +711,19 @@ base_type := shape:shape_type | list:list_type | name:IDENT type_param?
 ; have elsewhere in this file.
 type_param := LT inner:type_expr GT
 
-; `Json<{ color: String, size: ?Int }>` (lang_spec §7's own worked
+; `Json<{ color: String, size: ?Int }>` (a worked
 ; example) -- an inline, anonymous shape, reusing `type_field_list`
 ; directly rather than requiring a separately-declared `TYPE` for every
 ; nested structure.
 shape_type := LBRACE fields:type_field_list RBRACE
 
-; `Json<[Type]>` (lang_spec §7) -- not gated to appearing only inside a
+; `Json<[Type]>` -- not gated to appearing only inside a
 ; `Json<...>` parameter at the grammar level, the same permissive
 ; posture `base_type`'s own comment already has; a general list-of-type
 ; shape, usable anywhere a type is expected.
 list_type := LBRACK inner:type_expr RBRACK
 
-; Modifiers appear in lang_spec.md §5.2/§6's own fixed order, mirroring
+; Modifiers appear in a fixed order, mirroring
 ; evaluation order front to back: an EP1(a) modifier (narrows/reshapes
 ; the source) runs first, then where (filters), group by (groups),
 ; having (filters groups), distinct (dedupes the projection), order by
@@ -732,7 +731,7 @@ list_type := LBRACK inner:type_expr RBRACK
 ; different from the six before it: none of them describe a step *this*
 ; query itself takes -- it's a flag the *enclosing* query reads, after
 ; this one's entire pipeline has already finished, once this select is
-; used as a nested body item (lang_spec §6, "Correlation and joins").
+; used as a nested body item ("Correlation and joins").
 ; Last in the chain for that reason (nothing before this query's own
 ; closing `}` can know its final row count), not because it's "evaluated
 ; last" as a step of its own the way the other six are.
@@ -754,7 +753,7 @@ select := KW_SELECT source:path goal_args? select_ep1a?
           order_by_clause? limit_clause? required_clause?
           LBRACE body:body_list RBRACE
 
-; lang_spec §8.4's `logic` variant, a call-shaped source (`SELECT
+; The `logic` variant, a call-shaped source (`SELECT
 ; ancestor(X, "bob") WHERE ...`). Plain core grammar, not gated to
 ; `logic` here -- `Scry.Core.Query`'s own moduledoc (the `goal_args`
 ; field) has the full "grammar exists, category check decides legality"
@@ -766,7 +765,7 @@ select := KW_SELECT source:path goal_args? select_ep1a?
 ; `Scry.Core.Query`'s own comment).
 goal_args := LPAREN call_args? RPAREN
 
-; core's EP1(a) header-modifier extension point (lang_spec §2, §5.2).
+; core's EP1(a) header-modifier extension point.
 ; Unlike the language spec's own text, this is *not* "exactly one kind
 ; may ever fill this" -- §5.2 itself has `last` (time-series) and
 ; `deep` (document) both nominating the same position, and a build can
@@ -801,8 +800,8 @@ select_ep1a := NEVER
 
 where_clause := KW_WHERE cond:predicate
 
-; lang_spec §5.2's three `GROUP BY` shapes -- plain, `ROLLUP(...)`,
-; `CUBE(...)`. Like every other keyword here (lang_spec §3), `rollup`/
+; Three `GROUP BY` shapes -- plain, `ROLLUP(...)`,
+; `CUBE(...)`. Like every other keyword here, `rollup`/
 ; `cube` become real reserved words once added to IDENT's own @refine
 ; list above -- a field genuinely named `rollup`/`cube` needs the same
 ; backtick escape (ESCAPED_IDENT) any other keyword-colliding field
@@ -838,7 +837,7 @@ order_item_list := head:order_item (COMMA tail:order_item)*
 ;
 ; `key:expression`, not `field:path` -- widened from a bare field path
 ; to the same general `expr()` shape a `{:computed, ...}` body item's
-; own value already is (lang_spec §8.5's own `ORDER BY relevance()
+; own value already is (`ORDER BY relevance()
 ; DESC` needs a call here, not just a field; `ORDER BY price * quantity
 ; DESC`, for any kind, falls out for free from the same widening, not a
 ; second special case). A bare field reference through `expression` ->
@@ -877,12 +876,12 @@ negation    := neg:KW_NOT? expr:comparison
 ; `literal`'s own alternatives starts with a quote/digit/`[`/`:`/`@`/a
 ; refined `KW_*` token, never a plain `IDENT`/`ESCAPED_IDENT` the way
 ; `path` always does, so there's no PEG ambiguity between the two
-; `right*` alternatives, no ordering sensitivity either (lang_spec §5.9:
-; "Every comparison's right-hand side may be another field path, not
+; `right*` alternatives, no ordering sensitivity either ("Every
+; comparison's right-hand side may be another field path, not
 ; only a literal" -- `WHERE price > cost` compares two fields of the
 ; same row; this is also the mechanism a nested SELECT uses to
 ; correlate to an enclosing row, Scry.Core.Executor's own moduledoc).
-; `left:predicate_lhs`, not `left:path` -- lang_spec §5.8's own worked
+; `left:predicate_lhs`, not `left:path` -- a worked
 ; `HAVING sum(total) > 200` needs a function call on a comparison's
 ; *left*-hand side, which `path` alone can never be. `predicate_lhs`
 ; (below) is `call_with_path | call | path`, so a bare field comparison
@@ -892,16 +891,16 @@ negation    := neg:KW_NOT? expr:comparison
 ; `right`'s own `literal | right_field:path` widening this session
 ; already did -- the right-hand side is *not* widened to accept a call
 ; too (`HAVING sum(a) > avg(b)`, a call on *both* sides, stays
-; unsupported); the one concrete need (lang_spec §11's own worked
-; example) is call-on-the-left-only. `call_with_path` (lang_spec §5.8's
-; own `json(<field>)` worked example, `WHERE json(metadata).color =
+; unsupported); the one concrete need (a worked
+; example) is call-on-the-left-only. `call_with_path` (the
+; `json(<field>)` worked example, `WHERE json(metadata).color =
 ; "red"`) is what makes a call's own *result* reachable via an ordinary
 ; dot-path afterward -- see `call_with_path`'s own comment near `call`
 ; below for the fuller reasoning.
 ; `in`'s own right-hand side also accepts a *computed* list -- a plain
 ; field path, a bare call, or a call narrowed by a dot-path -- not just
 ; a bracketed list literal. Found while testing `json(<field>).path`
-; (this file's own `call_with_path` comment): lang_spec §7's own worked
+; (this file's own `call_with_path` comment): a worked
 ; example, `WHERE "urgent" in metadata.tags`, plus the analogous
 ; `WHERE "urgent" in json(metadata).tags` for a JSON-typed field,
 ; neither parsed at all before this -- `items:list` only ever matched a
@@ -926,14 +925,14 @@ negation    := neg:KW_NOT? expr:comparison
 ; expected to resolve to the whole list) -- see its own moduledoc.
 ;
 ; `left:in_lhs`, not `left:predicate_lhs`, on all four `in` alternatives
-; specifically -- lang_spec §7's own worked example (quoted verbatim
+; specifically -- the worked example (quoted verbatim
 ; above) has a *literal* on `in`'s own left, `"urgent" in metadata.tags`,
 ; not a field/call; `predicate_lhs` alone can never produce that.
 ; `in_lhs` (below) is `predicate_lhs`'s own three shapes plus a fourth,
 ; `literal` -- deliberately scoped to `in` alone, not applied to `=`/`>`/
 ; etc.'s own `left:predicate_lhs` above, since no worked example needs a
 ; literal on *those* operators' left side (`"x" = status` has no real
-; use lang_spec calls for; `HAVING sum(total) > 200` is the one that
+; use case calling for it; `HAVING sum(total) > 200` is the one that
 ; matters there, already covered). `literal`'s own `list` alternative
 ; (`[1, 2] in ...`) is real overlap risk here: both a plain field path
 ; and a literal list literal are, once resolved, an ordinary Elixir
@@ -985,8 +984,8 @@ comparison_ep1e := NEVER
 ; already states for `query.variant` and a `:variant` body item, now
 ; extended to cover this new leaf shape too.
 
-; Arithmetic/bitwise on a comparison's own left-hand side (lang_spec
-; §8.2's own worked `HAVING` example, `error_rate / total_rate > 0.05`)
+; Arithmetic/bitwise on a comparison's own left-hand side (a
+; worked `HAVING` example, `error_rate / total_rate > 0.05`)
 ; -- a real gap `qualified_call_with_path | ... | path` alone can never
 ; close, none of those five alternatives ever consume an operator.
 ; Deliberately NOT `predicate_lhs := expression` outright (the widest
@@ -1019,7 +1018,7 @@ comparison_ep1e := NEVER
 ; A leading unary (`HAVING -count(id) > 0`, no operator *after* it)
 ; still doesn't parse -- `head:mult_tail` etc. all require a tail
 ; *following* the base, and a bare unary-prefixed primary has none;
-; deliberately left unsupported (not lang_spec's own worked example,
+; deliberately left unsupported (not part of any worked example,
 ; no concrete need found), same "stated, demand-driven scope limit,
 ; not an oversight" posture EP2's own named-argument gap already took.
 ;
@@ -1053,7 +1052,7 @@ predicate_lhs := bitwise_lhs | additive_lhs | mult_lhs
 in_lhs := lhs_expr:qualified_call_with_path | lhs_expr:qualified_call
         | lhs_expr:call_with_path | lhs_expr:call | lhs_expr:path | lhs_literal:literal
 
-; Set comparison's own four operators (lang_spec §5.9) each have two
+; Set comparison's own four operators each have two
 ; spellings -- a symbol token (declared with the other operator tokens
 ; above) and a word-form phrase built from ordinary keyword tokens.
 ; `subset_or_eq_op`/`superset_or_eq_op` are tried before the shorter
@@ -1087,7 +1086,7 @@ list := LBRACK items:literal_list? RBRACK
 ; the SLASH-containing alternative -- ordinary backtracking makes this
 ; safe (see priv/grammar.aether's own `body_item` comment for the same
 ; convention elsewhere). Deliberately plain-INTEGER-only on both sides
-; (not DECIMAL) -- lang_spec.md §4's own example is `2/3`, not a
+; (not DECIMAL) -- a worked example is `2/3`, not a
 ; division of two arbitrary exact rationals, which would need real
 ; division, not just `Scry.Core.Rational.new/2`'s construct-and-reduce.
 ;
@@ -1105,7 +1104,7 @@ path := head:field_name (DOT tail:field_name)*
 
 field_name := IDENT | ESCAPED_IDENT
 
-; Arithmetic/bitwise expressions (lang_spec §5.10, §9's "Computed
+; Arithmetic/bitwise expressions ("Computed
 ; fields") -- standard precedence climbing, low to high, matching the
 ; operator precedence table's own tiers 1-5 exactly: `expression`
 ; (tier 5, `& |`) < `additive` (tier 4, `+ -`) < `multiplicative`
@@ -1154,7 +1153,7 @@ mult_tail := op:(STAR | SLASH) right:power
 ; against a scratch grammar, not assumed from the shape alone.
 power := base:unary (POW exp:power)?
 
-; Unary bitwise-NOT (`!`) / unary minus (`-`) -- lang_spec §5's own
+; Unary bitwise-NOT (`!`) / unary minus (`-`) -- the
 ; precedence table lists both together as tier 1, the tightest-binding
 ; tier, above `**` -- so `unary` sits directly below `power`'s own
 ; `base:`, not above it, and recurses into itself (not `power`) so a
@@ -1174,7 +1173,7 @@ unary := op:(BANG | MINUS) operand:unary | primary
 ; `call_with_path`/`call`'s own alternatives and falls through, in
 ; order, consuming nothing extra; a `call` with no following `DOT`
 ; falls through from `call_with_path` to plain `call` the exact same
-; way. `sum`/`count`/etc. (lang_spec §5.8) are deliberately *not*
+; way. `sum`/`count`/etc. are deliberately *not*
 ; reclassified keywords -- a bare `sum` with no parens must keep parsing
 ; as an ordinary field path (e.g. a real field literally named "sum"),
 ; only `IDENT LPAREN ... RPAREN` triggers `call`/`call_with_path` at
@@ -1189,14 +1188,14 @@ unary := op:(BANG | MINUS) operand:unary | primary
 ; scratch grammar together with every other shape in this comment
 ; block. `window_call` and `call_with_path` are mutually exclusive on
 ; any given input (a window function's own `OVER` attaches directly to
-; the call, never combined with a trailing `.path` -- lang_spec §5.5's
-; own grammar row shows no such combination), so their relative order
+; the call, never combined with a trailing `.path` -- the
+; grammar row shows no such combination), so their relative order
 ; doesn't matter for correctness, only readability.
 primary := literal | window_call | qualified_call_with_path | qualified_call | call_with_path
          | call | path | when_expr
          | LPAREN inner:expression RPAREN
 
-; lang_spec §5.8's fixed built-in-function surface -- "anything else
+; The fixed built-in-function surface -- "anything else
 ; called as `identifier(args)` is either an EP2 namespaced extension
 ; call, or (against a `logic`-kind source) `logic`'s EP2 bare call" --
 ; so this rule accepts *any* identifier followed by parenthesized args,
@@ -1209,8 +1208,8 @@ primary := literal | window_call | qualified_call_with_path | qualified_call | c
 ; elsewhere in this file.
 ;
 ; `call_args` is *optional* now (bare, unrenamed -- not `args:
-; call_args?`) -- lang_spec §5.8's `row_number()`/`rank()` (§5.5,
-; window functions) are genuinely zero-argument, the first real need
+; call_args?`) -- `row_number()`/`rank()` (window
+; functions) are genuinely zero-argument, the first real need
 ; for this. Bare, not renamed, for the same reason documented at
 ; length on `list`'s own `items:literal_list?` above: renaming an
 ; *optional* rule reference produces a spurious second, raw-text
@@ -1222,7 +1221,7 @@ primary := literal | window_call | qualified_call_with_path | qualified_call | c
 ; absent -> `[]`), not a value it happens to call `args`.
 call := name:IDENT LPAREN call_args? RPAREN
 
-; EP2 namespaced calls (lang_spec §2): `<namespace>.<name>(<args>)`,
+; EP2 namespaced calls: `<namespace>.<name>(<args>)`,
 ; the always-qualified spelling every EP2 call has, loaded variant or
 ; not (§2's own "the qualified form always remains valid too, loaded
 ; or not"). A real, confirmed grammar gap found by a spec-traceability
@@ -1253,7 +1252,7 @@ call := name:IDENT LPAREN call_args? RPAREN
 ; grammar already applies elsewhere, not an oversight. `Scry.Core.
 ; Actions`' own handler folds `namespace`/`name` into the identical
 ; `{:call, "namespace.name", args}` shape a plain `call` already
-; produces (impl_spec.md §4's own framing: "the same namespace... with
+; produces (the framing: "the same namespace... with
 ; its own namespace stripped" for the auto-imported, unqualified
 ; spelling -- a qualified name is the *same* construct, not a
 ; structurally different one), so every existing `{:call, name, args}`
@@ -1276,7 +1275,7 @@ qualified_call := namespace:IDENT DOT name:IDENT LPAREN call_args? RPAREN
 ; produced the base value it's wrapping.
 qualified_call_with_path := call:qualified_call DOT path:path
 
-; `json(<field>)` (lang_spec §5.8/§7: "reinterprets a String field for
+; `json(<field>)` ("reinterprets a String field for
 ; one qualified use -- `WHERE json(metadata).color = "red"`") is the one
 ; real motivating case for this -- a call's own *result* narrowed by an
 ; ordinary dot-path afterward. Not gated to the name "json" specifically
@@ -1290,7 +1289,7 @@ qualified_call_with_path := call:qualified_call DOT path:path
 ; to plain `path` when there's no call at all).
 call_with_path := call:call DOT path:path
 
-; `count(distinct …)` (lang_spec §5.8: "Distinct-value count") -- `DISTINCT`
+; `count(distinct …)` ("Distinct-value count") -- `DISTINCT`
 ; is allowed syntactically as a prefix on *any* call argument here, not
 ; just `count`'s own single one, the same "grammar stays permissive,
 ; execution rejects misuse with a clear error" posture `call` itself
@@ -1307,7 +1306,7 @@ call_with_path := call:call DOT path:path
 call_args := head:call_arg (COMMA tail:call_arg)*
 call_arg := distinct:KW_DISTINCT expr:expression | expression
 
-; Window functions (lang_spec §5.5: "`<fn>() OVER [PARTITION BY
+; Window functions ("`<fn>() OVER [PARTITION BY
 ; <field>,...] [ORDER BY <field> [desc|asc],...] [ROWS BETWEEN <bound>
 ; AND <bound>]`"). `OVER` marks a call as a window function -- reachable
 ; from `primary` (above), so it's syntactically permitted on *any*
@@ -1316,13 +1315,13 @@ call_arg := distinct:KW_DISTINCT expr:expression | expression
 ; function used with `OVER`, or a window-only function like
 ; `row_number` used *without* it, both raise a clear error at execution
 ; time -- `Scry.Core.Executor`'s own concern). No parens around
-; `over_spec` itself -- lang_spec's own worked examples never show any
+; `over_spec` itself -- the worked examples never show any
 ; (`row_number() OVER PARTITION BY department ORDER BY salary DESC`),
 ; unlike SQL's `OVER (...)`.
 window_call := call:call KW_OVER over:over_spec
 
-; All three pieces optional and in this fixed order (lang_spec's own
-; `[PARTITION BY ...] [ORDER BY ...] [ROWS BETWEEN ...]`), the same
+; All three pieces optional and in this fixed order
+; (`[PARTITION BY ...] [ORDER BY ...] [ROWS BETWEEN ...]`), the same
 ; "fixed modifier order, each independently optional" convention
 ; `select`'s own header-modifier chain above already established.
 ; Bare/unrenamed for the usual reason (`list`'s own `items:
@@ -1342,14 +1341,14 @@ partition_clause := KW_PARTITION KW_BY fields:field_list
 ; syntactically and semantically the same construct, just used in two
 ; different positions.
 ;
-; lang_spec §5.5: "omitting `rows between` always means the whole
+; "Omitting `rows between` always means the whole
 ; partition, regardless of whether `order by` is present... Ranking
 ; functions (`row_number()`, `rank()`) ignore frame entirely." Reuses
 ; the existing `KW_AND`/`KW_BY` tokens directly -- no new keyword
 ; needed for either.
 frame_clause := KW_ROWS KW_BETWEEN start:frame_bound KW_AND stop:frame_bound
 
-; lang_spec §5.5: "bound ∈ `UNBOUNDED PRECEDING`, `<n> PRECEDING`,
+; "bound ∈ `UNBOUNDED PRECEDING`, `<n> PRECEDING`,
 ; `CURRENT ROW`, `<n> FOLLOWING`, `UNBOUNDED FOLLOWING`". `KW_UNBOUNDED`/
 ; `n:INTEGER` share one alternative each for PRECEDING/FOLLOWING
 ; (`prec_or_foll:(KW_PRECEDING | KW_FOLLOWING)`, a named *token* choice
@@ -1364,14 +1363,14 @@ frame_bound := KW_UNBOUNDED prec_or_foll:(KW_PRECEDING | KW_FOLLOWING)
              | n:INTEGER prec_or_foll:(KW_PRECEDING | KW_FOLLOWING)
              | KW_CURRENT KW_ROW
 
-; Conditional expression (lang_spec §5.6, §9): "Inline, not a block."
+; Conditional expression: "Inline, not a block."
 ; Just another `primary` alternative, not a separate top-level-only
-; construct -- lang_spec §9's own framing ("any body item may be an
+; construct -- the framing ("any body item may be an
 ; arbitrary expression") makes a WHEN/THEN/ELSE conceptually the same
 ; kind of thing as any other expression, so it composes the same way
 ; (nests inside arithmetic, parentheses, another WHEN's own branches).
 ; `when_clause+` (one-or-more, not `*`) puts "at least one WHEN...THEN"
-; directly in the grammar itself, matching lang_spec §5.6's own text,
+; directly in the grammar itself, matching the established text,
 ; rather than a separate check later. `ELSE` is mandatory the same way
 ; -- no `?`, no default. Bare (unrenamed) `when_clause+`, the same
 ; established reason every other repeated rule reference in this file
@@ -1392,9 +1391,9 @@ when_clause := KW_WHEN cond:predicate KW_THEN then_expr:expression
 ; ordinary PEG recursion, same rule referencing itself indirectly
 ; through body_list), a kind-contributed construct (EP1(b)/(c)/(d)
 ; body-item shapes -- a block-opening construct, a scoped pseudo-field,
-; or a bare value pseudo-field; lang_spec §2's impl_spec companion), a
-; fragment spread (lang_spec §5.11/§9: `...<fragment-name>`), or a plain
-; field path, optionally suffixed `IF $<param>` (lang_spec §5.3/§9:
+; or a bare value pseudo-field), a
+; fragment spread (`...<fragment-name>`), or a plain
+; field path, optionally suffixed `IF $<param>` (
 ; conditional field inclusion, GraphQL `@include`/`@skip` equivalent) --
 ; tried in that order (most specific leading token first, generic
 ; fallback last; PEG's first-match-wins doesn't actually need the
@@ -1425,11 +1424,11 @@ spread := SPREAD name:field_name
 ; `IDENT("subtotal")` + `ATOM(":price")` instead, since maximal munch
 ; always prefers ATOM's longer match over a bare COLON whenever `:` is
 ; immediately followed by an identifier character. `subtotal: price`
-; (the worked example's own spacing, lang_spec §9) parses correctly.
+; (the worked example's own spacing) parses correctly.
 ; Not something fixable at the grammar level -- it's the lexer having
 ; already committed to the wrong token before the parser ever runs.
 ; `where_clause?` on the *aliased/computed* alternative only, not the
-; plain-field one below it -- lang_spec §8.2's own worked example
+; plain-field one below it -- a worked example
 ; (`error_rate: rate(30s) WHERE status ~ @r/^5/`, the "honest flag"
 ; caveat's second half) scopes which rows contribute to *this one*
 ; computed field's own aggregate, a concept a bare `<field>` (no
@@ -1445,9 +1444,9 @@ spread := SPREAD name:field_name
 field_body_item := alias:field_name COLON expr:expression where_clause?
                   | field:path if_clause?
 
-; Always `$<param>` specifically (lang_spec §5.3: "`<field> IF
-; $<param>`"), not a general expression -- lang_spec's own body-item
-; grammar (§6) lists `IF` only on a plain `<field>`, never on
+; Always `$<param>` specifically ("`<field> IF
+; $<param>`"), not a general expression -- the body-item
+; grammar lists `IF` only on a plain `<field>`, never on
 ; `<alias>: <expression>`, even now that a general expression grammar
 ; exists.
 if_clause := KW_IF param:PARAM
@@ -1461,7 +1460,7 @@ if_clause := KW_IF param:PARAM
 ; contribute simultaneously.
 body_item_ep1 := NEVER
 
-; A real, found-not-yet-fixed gap against lang_spec §6's own comma rule
+; A real, found-not-yet-fixed gap against the comma rule
 ; ("required when two items share a physical line, optional -- a line
 ; break suffices -- when each item is on its own line"): `COMMA` is
 ; unconditionally required here, on every line break or not -- this
@@ -1476,7 +1475,7 @@ body_item_ep1 := NEVER
 ; comment used to also describe -- trailing trivia after a top-level
 ; query's own final `RBRACE` not being consumed -- is fixed now, by
 ; `document`'s own trailing `TRIVIA?`.
-; Trailing `COMMA?` -- lang_spec §6's own "trailing comma permitted",
+; Trailing `COMMA?` -- "trailing comma permitted",
 ; deliberately handled with plain default splicing (unlike the
 ; mid-list separator below) since there's no same-line-vs-newline
 ; distinction to make once the list is already ending: a trailing comma
@@ -1501,8 +1500,8 @@ body_list := head:body_item ~body_list_tail trailing_comma:COMMA?
 body_list_tail := (~body_list_sep tail:body_item ~body_list_tail)?
 
 ; Comma required when two items share a physical line, optional (a line
-; break suffices) when each is on its own line, lang_spec §6's own
-; wording -- validated in `Scry.Core.Actions`' own `body_list_sep`
+; break suffices) when each is on its own line --
+; validated in `Scry.Core.Actions`' own `body_list_sep`
 ; handler, not expressible as a hard grammar-level rejection (a
 ; same-line, no-comma gap has to parse structurally, the same as every
 ; other shape here, so the error can carry a clear message instead of

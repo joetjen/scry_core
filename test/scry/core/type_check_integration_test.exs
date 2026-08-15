@@ -32,7 +32,7 @@ defmodule Scry.Core.TypeCheckIntegrationTest do
                Core.parse(~s[TYPE users { age: ?Int } SELECT users WHERE age > 30 { id }])
     end
 
-    test "guarding first, per lang_spec's own worked example, parses cleanly" do
+    test "guarding first, per the worked example, parses cleanly" do
       assert {:ok, %Scry.Core.Query{}} =
                Core.parse(
                  ~s[TYPE users { age: ?Int } SELECT users WHERE NOT age = nil AND age > 30 { id }]

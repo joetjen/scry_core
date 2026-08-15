@@ -1,7 +1,7 @@
 defmodule Scry.Core.Actions do
   @moduledoc """
   Turns `priv/grammar.aether`'s parse tree into `%Scry.Core.Query{}` --
-  the shared target both Scry front ends converge on (impl_spec.md §7).
+  the shared target both Scry front ends converge on.
   Covers only what that grammar's current Phase 1 subset can produce;
   see its own header for what's deferred.
 
@@ -12,7 +12,7 @@ defmodule Scry.Core.Actions do
   `select_ep1a`/`body_item_ep1` evaluates to gets tagged `:variant` and
   left unexamined (`Query.body_item/0`; `query.variant.select_ep1a` for
   the header-modifier position) -- a deliberate stand-in for real
-  composed-Actions dispatch (impl_spec.md §4: "Scry's own composed
+  composed-Actions dispatch ("Scry's own composed
   Ichor.Actions module is assembled the same way the grammar is"), not
   yet implemented because there is no second real kind to compose
   against yet.
@@ -59,13 +59,13 @@ defmodule Scry.Core.Actions do
   def handle_token(:ATOM, text, _ctx), do: {:ok, {:atom, String.slice(text, 1..-1//1)}}
 
   # A placeholder, not a value -- `{:param, name}` carries no more than
-  # the name itself at parse time. lang_spec §5.7/§9: resolved against a
+  # the name itself at parse time. Resolved against a
   # real value supplied separately at *execution* time
   # (Scry.Core.Executor), never string-interpolated into query text.
   def handle_token(:PARAM, text, _ctx), do: {:ok, {:param, String.slice(text, 1..-1//1)}}
 
   # Strips the delimiter (either quote char, both one byte -- ASCII `"`
-  # or `'`) and resolves escapes over what's left. lang_spec.md §4's own
+  # or `'`) and resolves escapes over what's left. Its own
   # list, exactly: \" \' \\ \n \t \uXXXX -- an unrecognized \<char> was
   # already let through unresolved by priv/grammar.aether's own STRING
   # token (a deliberate leniency, see its comment there), so `unescape/1`
@@ -107,7 +107,7 @@ defmodule Scry.Core.Actions do
   # moduledoc has the "why this needed `@native`" reasoning) -- the
   # delimiter is read from the matched text itself (the byte right after
   # the tag), not assumed to be `/`. `r` is the one concrete tag
-  # lang_spec.md §4 actually specifies; any other is a real, reportable
+  # actually specified; any other is a real, reportable
   # error rather than a silent no-op or a guess at unspecified semantics.
   # `Regex.compile/1`'s own `{:error, {message, index}}` is already a
   # valid `handle_token/3` error shape, passed through unchanged -- same
@@ -130,7 +130,7 @@ defmodule Scry.Core.Actions do
   end
 
   # "3.14" -> Rational.new(314, 100) -- reduces to 157/50, matching
-  # lang_spec.md §4's own worked example exactly, since decimal literals
+  # a worked example exactly, since decimal literals
   # are defined to parse directly to their exact rational value, never
   # an IEEE-754 approximation.
   def handle_token(:DECIMAL, text, _ctx) do
@@ -140,8 +140,8 @@ defmodule Scry.Core.Actions do
     {:ok, Rational.new(numerator, denominator)}
   end
 
-  # Radix literals "enter the ordinary exact-rational tower" (lang_spec
-  # §4) as plain integers, not a distinct type -- 0x1F is exactly 31.
+  # Radix literals "enter the ordinary exact-rational tower"
+  # as plain integers, not a distinct type -- 0x1F is exactly 31.
   def handle_token(:RADIX, <<"0", base_letter::binary-size(1), digits::binary>>, _ctx) do
     base =
       case String.downcase(base_letter) do
@@ -153,7 +153,7 @@ defmodule Scry.Core.Actions do
     {:ok, String.to_integer(digits, base)}
   end
 
-  # Duration/byte-size literals (lang_spec §4; the exact unit vocabulary
+  # Duration/byte-size literals (the exact unit vocabulary
   # -- `priv/grammar.aether`'s own `DURATION`/`BYTE_SIZE` comment has the
   # reasoning) "enter the ordinary exact-rational tower" the same way
   # `RADIX` already does above -- `500ms` is exactly `1/2` (seconds), not
@@ -210,7 +210,7 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # `goal_args := LPAREN call_args? RPAREN` (lang_spec §8.4's call-shaped
+  # `goal_args := LPAREN call_args? RPAREN` (the call-shaped
   # `logic` source) -- bare `call_args?`, not `args:call_args?`, and
   # `captures.call_args` read the same way `call`'s own handler already
   # does, for the identical reason `priv/grammar.aether`'s own comment
@@ -247,13 +247,13 @@ defmodule Scry.Core.Actions do
   end
 
   # field_body_item's own handler already returns the fully-tagged
-  # {:field, path} or {:field, path, condition} shape (lang_spec §5.3's
+  # {:field, path} or {:field, path, condition} shape (the
   # IF suffix), so no extra wrapping is needed here either -- same
   # reasoning as select's own clause above.
   def handle_rule(:body_item, %{field_body_item: cap}, ctx), do: cap.eval.(ctx)
 
   # spread's own handler already returns the fully-tagged {:spread, name}
-  # placeholder (lang_spec §5.11/§9) -- same reasoning as every other
+  # placeholder -- same reasoning as every other
   # body_item alternative above, no extra wrapping needed.
   def handle_rule(:body_item, %{spread: cap}, ctx), do: cap.eval.(ctx)
 
@@ -269,7 +269,7 @@ defmodule Scry.Core.Actions do
 
   # A plain `{name, body_items}` pair, not a %Query{} or any other
   # tagged shape -- a FRAGMENT is a reusable *body list*, never executed
-  # or projected on its own (lang_spec §9: "reusable shape, vs. `with`'s
+  # or projected on its own ("reusable shape, vs. `with`'s
   # reusable data"). `document`'s own handler collects every one of
   # these into the name => body_items map Scry.Core.FragmentResolver
   # needs; nothing about a fragment_decl's own shape survives past that.
@@ -301,8 +301,8 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # `TYPE <name> [: <kind>] { <field>: <type> ... }` (lang_spec §7,
-  # priv/grammar.aether's own `type_decl` comment has the full "parsed,
+  # `TYPE <name> [: <kind>] { <field>: <type> ... }` (
+  # `priv/grammar.aether`'s own `type_decl` comment has the full "parsed,
   # not yet consumed" scope reasoning). Returns `{name, type_decl}`, the
   # same `{name, value}` shape `fragment_decl`/`with_decl` above already
   # return -- `document`'s own handler folds every one into a
@@ -633,8 +633,8 @@ defmodule Scry.Core.Actions do
 
   def handle_rule(:power, %{base: base_cap}, ctx), do: base_cap.eval.(ctx)
 
-  # Unary bitwise-NOT (`!`)/unary minus (`-`), lang_spec §5's own
-  # precedence-table tier 1 -- `op`/`operand` present vs. absent are two
+  # Unary bitwise-NOT (`!`)/unary minus (`-`), precedence-table
+  # tier 1 -- `op`/`operand` present vs. absent are two
   # genuinely different capture sets (`%{op:, operand:}` vs. the bare
   # `%{primary: cap}` passthrough just below), the same clause-order
   # disambiguation `power`'s own two clauses just above already use.
@@ -671,7 +671,7 @@ defmodule Scry.Core.Actions do
   # base, path} shape -- same reasoning as call's own clause just above.
   def handle_rule(:primary, %{call_with_path: cap}, ctx), do: cap.eval.(ctx)
 
-  # lang_spec §5.8's built-in functions (sum/avg/count/min/max/etc,
+  # The built-in functions (sum/avg/count/min/max/etc,
   # this phase's real set) -- Scry.Core.QueryOps.eval_aggregate/6 decides
   # which `name`s it actually knows how to run, not this module (same
   # split as body_item_ep1's own {:variant, value}, a construct the
@@ -689,13 +689,13 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # EP2 namespaced call (lang_spec §2, `priv/grammar.aether`'s own
+  # EP2 namespaced call (`priv/grammar.aether`'s own
   # `qualified_call` comment has the full "why this needs its own rule,
   # not a renaming of `call_with_path`" reasoning). Folds `namespace`/
   # `name` into the identical `{:call, "namespace.name", args}` shape a
   # plain `call` already produces, joined with a literal `.` -- the
   # same string an *unqualified*, auto-imported spelling would resolve
-  # to once auto-import resolution is real (impl_spec.md §4's own "core
+  # to once auto-import resolution is real ("core
   # built-ins first, then each loaded kind's own auto-imported names"),
   # so a future auto-import pass has exactly one string shape to
   # recognize either way, not two.
@@ -728,7 +728,7 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # `json(<field>).path...` (lang_spec §5.8/§7) -- `call`'s own handler
+  # `json(<field>).path...` -- `call`'s own handler
   # already returns the fully-tagged `{:call, name, args}` shape, so this
   # just wraps it with the trailing path, the same `{:field, path}`
   # already wraps a bare `path` for the identical concept (a path naming
@@ -741,7 +741,7 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # `count(distinct …)` (lang_spec §5.8) -- `call_arg`'s own second
+  # `count(distinct …)` -- `call_arg`'s own second
   # alternative (bare `expression`, no `DISTINCT`) needs no clause here
   # at all, the same default single-capture passthrough `field_name :=
   # IDENT | ESCAPED_IDENT` already relies on; only the `DISTINCT`-
@@ -750,7 +750,7 @@ defmodule Scry.Core.Actions do
     with {:ok, expr, ctx} <- expr_cap.eval.(ctx), do: {:ok, {:distinct, expr}, ctx}
   end
 
-  # Window functions (lang_spec §5.5, priv/grammar.aether's own
+  # Window functions (priv/grammar.aether's own
   # `window_call`/`over_spec` comments). `call`'s own handler above
   # already returns the fully-tagged `{:call, name, args}` shape.
   def handle_rule(:window_call, %{call: call_cap, over: over_cap}, ctx) do
@@ -870,7 +870,7 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # lang_spec §6: comma required when two items share a physical line,
+  # Comma required when two items share a physical line,
   # optional (a line break suffices) when each is on its own line.
   # `status` is `Scry.Core.Grammar.BodyListSep.match/4`'s own
   # classification ("ok"/"missing_comma") of a forward+backward token
@@ -887,8 +887,7 @@ defmodule Scry.Core.Actions do
       else
         {:error,
          Ichor.Error.new(
-           message:
-             "comma required between two body items on the same physical line (lang_spec.md §6)",
+           message: "comma required between two body items on the same physical line",
            stage: :action
          )}
       end
@@ -897,7 +896,7 @@ defmodule Scry.Core.Actions do
 
   def handle_rule(:where_clause, %{cond: cond_cap}, ctx), do: cond_cap.eval.(ctx)
 
-  # `group_by_clause`'s own three alternatives (lang_spec §5.2) each
+  # `group_by_clause`'s own three alternatives each
   # tag their result `{:plain | :rollup | :cube, fields}` -- `select`'s
   # own handler below destructures this into `Query.t()`'s separate
   # `group_bys`/`group_mode` fields. `group_by_rollup`/`group_by_cube`
@@ -985,7 +984,7 @@ defmodule Scry.Core.Actions do
     end
   end
 
-  # Set comparison's own word-form spellings (lang_spec §5.9: "subset
+  # Set comparison's own word-form spellings ("subset
   # of"/"subset or equal to"/"superset of"/"superset or equal to") --
   # each rule ignores its own captured `marker` token (whichever of
   # `KW_SUBSET`/`KW_SUPERSET` matched carries no information beyond
@@ -994,7 +993,7 @@ defmodule Scry.Core.Actions do
   # `SUPERSET_EQ`) already produces, so `comparison`'s own handlers
   # (below) and `op_from_text/1` need no separate word-form branch --
   # both spellings of a given operator are indistinguishable past this
-  # point, exactly as lang_spec intends ("⊆"/"subset or equal to" name
+  # point, exactly as intended ("⊆"/"subset or equal to" name
   # the same operator, not two).
   def handle_rule(:subset_of_op, %{marker: _marker}, ctx), do: {:ok, "⊂", ctx}
   def handle_rule(:subset_or_eq_op, %{marker: _marker}, ctx), do: {:ok, "⊆", ctx}
@@ -1166,8 +1165,8 @@ defmodule Scry.Core.Actions do
 
   # Canonical base unit: bytes. Decimal (SI, powers of 1000) and binary
   # (IEC 60027-2, powers of 1024) are two genuinely different scales for
-  # the same-looking prefix letter (`M`/`G`/etc.) -- lang_spec.md §4's
-  # own worked example (`10MB` vs `10MiB`) is exactly this distinction,
+  # the same-looking prefix letter (`M`/`G`/etc.) -- a
+  # worked example (`10MB` vs `10MiB`) is exactly this distinction,
   # not a typo or a redundant alternative.
   defp byte_size_unit_bytes("B"), do: 1
   defp byte_size_unit_bytes("KB"), do: 1_000

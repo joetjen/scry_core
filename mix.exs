@@ -92,7 +92,7 @@ defmodule Scry.Core.MixProject do
       {:ichor_runtime, "~> 0.2"},
       {:ichor, "~> 0.2", only: [:dev, :test], runtime: false},
 
-      # `DXN`/`DXNB` (lang_spec.md §7) name Dextrin's own Data eXchange
+      # `DXN`/`DXNB` name Dextrin's own Data eXchange
       # Notation format -- a real, unscoped runtime dependency, not
       # only: [:dev, :test], since `dxn(<field>)`/`dxnb(<field>)`
       # (§5.8's own escape-hatch casts) call `Dextrin.decode/2`/

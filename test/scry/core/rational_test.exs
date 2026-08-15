@@ -11,7 +11,7 @@ defmodule Scry.Core.RationalTest do
       assert Rational.new(0, 5) === 0
     end
 
-    test "matches lang_spec.md's own worked example: 3.14 == 157/50" do
+    test "matches the worked example: 3.14 == 157/50" do
       assert Rational.new(314, 100) == Rational.new(157, 50)
       assert %Rational{numerator: 157, denominator: 50} = Rational.new(314, 100)
     end
@@ -197,8 +197,8 @@ defmodule Scry.Core.RationalTest do
       # 3.14 has no exact decimal/binary-fraction equivalent -- this is
       # the double's own exact bit-pattern value, not the "intended"
       # 157/50 a DECIMAL literal's own handle_token would produce (a
-      # different, unrelated conversion path -- lang_spec.md §4's own
-      # "decimal literals parse directly to exact rationals" applies to
+      # different, unrelated conversion path -- the
+      # "decimal literals parse directly to exact rationals" rule applies to
       # *literal* text, not to converting an already-inexact float).
       assert %Rational{} = Rational.from_float(3.14)
     end

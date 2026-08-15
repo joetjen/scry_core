@@ -19,7 +19,7 @@ defmodule Scry.Core.Grammar do
 
   Why the production path is a *manually-run* generator script, not an
   automatic Mix compiler (`compilers: [...]`) auto-detecting the build's
-  own dependency tree the way impl_spec.md §4 originally sketched: any
+  own dependency tree the way originally sketched: any
   module that calls `Ichor.*` (parsing, analysis, codegen) has to live
   somewhere Mix compiles it, and *any* file under a package's own
   `elixirc_paths` -- a `Mix.Task.Compiler` included, since it has to be
@@ -81,7 +81,7 @@ defmodule Scry.Core.Grammar do
   Analysis`"), since analysis expects every `RuleRef` to already
   resolve, which an EP1/EP2 extension point deliberately doesn't until
   a kind's own fragment is merged in. A `scry_<kind>` package composing
-  against core (`impl_spec.md` §4) calls this instead of `compile/0`,
+  against core calls this instead of `compile/0`,
   merges in its own parsed-but-unanalyzed fragment, and only then runs
   `Grammar.Analysis` on the merged result -- `compile/0` below is
   exactly that same read-then-parse step, plus analysis, for the

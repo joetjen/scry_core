@@ -1,7 +1,7 @@
 defmodule Scry.Core.QueryTest do
   @moduledoc """
-  `Scry.Core.Query`'s own composable functional builder API (impl_spec.md
-  §7's Layer 1) -- builds a query entirely in Elixir, then confirms it
+  `Scry.Core.Query`'s own composable functional builder API (its
+  own Layer 1) -- builds a query entirely in Elixir, then confirms it
   executes identically to the equivalent hand-written struct, and (for
   the constructs that also parse) identically to the equivalent query
   text through `Scry.Core.parse/1` -- the same "both front ends converge

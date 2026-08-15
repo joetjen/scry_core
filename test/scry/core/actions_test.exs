@@ -11,7 +11,7 @@ defmodule Scry.Core.ActionsTest do
     # default, not a dangling reference, so a zero-kind build still
     # compiles). None of these core-only tests exercise the extension
     # point for real, since no real kind fragment exists yet to merge
-    # in properly (impl_spec.md §4).
+    # in properly.
     {:ok, analyzed} = Scry.Core.Grammar.compile()
     %{grammar: analyzed}
   end
@@ -48,13 +48,13 @@ defmodule Scry.Core.ActionsTest do
            ]
   end
 
-  describe "goal_args -- a call-shaped source (lang_spec.md §8.4)" do
+  describe "goal_args -- a call-shaped source" do
     test "an ordinary SELECT leaves goal_args nil", %{grammar: g} do
       assert {:ok, %Query{} = q} = run(g, "SELECT users { name }")
       assert q.goal_args == nil
     end
 
-    test "the lang_spec.md §8.4 worked example", %{grammar: g} do
+    test "the worked example", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(g, "SELECT ancestor(X, \"bob\") WHERE age(X) > 30 { X }")
 
@@ -75,7 +75,7 @@ defmodule Scry.Core.ActionsTest do
     end
   end
 
-  describe "body-item separator (lang_spec.md §6)" do
+  describe "body-item separator" do
     test "comma required when two items share a physical line", %{grammar: g} do
       assert {:error, error} = run(g, "SELECT users { name email }")
       assert error.message =~ "comma required"
@@ -363,8 +363,8 @@ defmodule Scry.Core.ActionsTest do
     # there's no such thing as an aggregate expression in the grammar at
     # all yet (priv/grammar.aether's own header), so this only proves
     # the clause itself parses and reaches Query.havings, not the
-    # "having requires an aggregate" compile-time check lang_spec.md §5.2
-    # describes (also not implemented yet, same reason).
+    # "having requires an aggregate" compile-time check
+    # (also not implemented yet, same reason).
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders HAVING total > 100 { id }))
     assert q.havings == [{:cmp, :gt, ["total"], 100}]
   end
@@ -642,7 +642,7 @@ line two""" { name }))
   # resource, differs even then), confirmed empirically after these
   # tests failed on a first pass despite the two sides printing
   # identically. Real for Executor too, in principle, but not a fix it
-  # needs: `~` is the only operator lang_spec.md §5.9 pairs with a
+  # needs: `~` is the only operator that pairs with a
   # regex, and it dispatches straight to `Regex.match?/2`, never `==`.
 
   test "a regex sigil literal, matched against a field with ~", %{grammar: g} do
@@ -687,7 +687,7 @@ line two""" { name }))
     assert [{:cmp, :match, ["path"], %Regex{source: "a|b"}}] = q.wheres
   end
 
-  test "set comparison, symbol spellings, lang_spec §5.9 (ISO 80000-2)", %{grammar: g} do
+  test "set comparison, symbol spellings (ISO 80000-2)", %{grammar: g} do
     assert {:ok, %Query{} = q1} = run(g, ~s(SELECT t WHERE tags ⊂ allowed { id }))
     assert [{:cmp, :subset, ["tags"], {:field, ["allowed"]}}] = q1.wheres
 
@@ -725,7 +725,7 @@ line two""" { name }))
     assert [{:cmp, :subset_eq, ["tags"], ["a", "b", "c"]}] = q.wheres
   end
 
-  test "negating a set comparison via not (...), lang_spec §5.9's own stated idiom", %{
+  test "negating a set comparison via not (...), the stated idiom", %{
     grammar: g
   } do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT t WHERE NOT tags ⊆ allowed { id }))
@@ -778,7 +778,7 @@ line two""" { name }))
     assert {:error, _} = run(g, ~s(SELECT users { some-field }))
   end
 
-  test "a computed field: alias: expression, the worked example from lang_spec.md §9", %{
+  test "a computed field: alias: expression, the worked example", %{
     grammar: g
   } do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT orders { subtotal: price * quantity }))
@@ -808,7 +808,7 @@ line two""" { name }))
     assert q.select == [{:computed, "x", {:arith, :pow, 2, {:arith, :pow, 3, 2}}}]
   end
 
-  test "bitwise & and | parse, lang_spec §5.10", %{grammar: g} do
+  test "bitwise & and | parse", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: flags & mask }))
 
     assert q.select == [
@@ -851,7 +851,7 @@ line two""" { name }))
            ]
   end
 
-  test "unary minus and unary bitwise-not parse, lang_spec §5's own precedence-table tier 1", %{
+  test "unary minus and unary bitwise-not parse, precedence-table tier 1", %{
     grammar: g
   } do
     assert {:ok, %Query{} = q} = run(g, ~s(SELECT t { x: -price }))
@@ -953,7 +953,7 @@ line two""" { name }))
   test "WHEN/THEN/ELSE composes with arithmetic (nested inside a parenthesized expression)", %{
     grammar: g
   } do
-    # No "END" keyword -- lang_spec §5.6's own grammar has none; the
+    # No "END" keyword -- the grammar has none; the
     # closing paren (from the *outer* parenthesized-expression
     # alternative) is what naturally terminates ELSE's own expression,
     # since nothing after "1"/"2" extends the additive/multiplicative
@@ -974,7 +974,7 @@ line two""" { name }))
     assert q.select == [{:field, ["name"]}]
   end
 
-  test "FRAGMENT + ...spread, the worked example from lang_spec.md §9", %{grammar: g} do
+  test "FRAGMENT + ...spread, the worked example", %{grammar: g} do
     assert {:ok, %Query{} = q} =
              run(
                g,
@@ -1067,7 +1067,7 @@ line two""" { name }))
     assert q.select == [{:computed, "total", {:call, "sum", [{:field, ["price"]}]}}]
   end
 
-  describe "a computed field's own trailing WHERE (lang_spec.md §8.2)" do
+  describe "a computed field's own trailing WHERE" do
     test "a trailing WHERE widens {:computed, alias, expr} to a 4-tuple", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(
@@ -1105,7 +1105,7 @@ line two""" { name }))
                {:and, {:cmp, :ge, ["status"], 500}, {:cmp, :not_eq, ["region"], "test"}}
     end
 
-    test "lang_spec.md §8.2's own worked shape parses in full", %{grammar: g} do
+    test "the worked shape parses in full", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(
                  g,
@@ -1127,7 +1127,7 @@ line two""" { name }))
     assert q.havings == [{:cmp, :gt, {:call, "sum", [{:field, ["total"]}]}, 200}]
   end
 
-  describe "arithmetic on a comparison's own left-hand side (lang_spec.md §8.2)" do
+  describe "arithmetic on a comparison's own left-hand side" do
     test "a mult-tier expression (a / b) as HAVING's own left-hand side", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(
@@ -1219,7 +1219,7 @@ line two""" { name }))
     assert q.wheres == [{:cmp, :gt, {:call, "count", [{:field, ["id"]}]}, 1}]
   end
 
-  test "an EP2 namespaced call (lang_spec §2), qualified, as a computed field", %{grammar: g} do
+  test "an EP2 namespaced call, qualified, as a computed field", %{grammar: g} do
     assert {:ok, %Query{} = q} = run(g, ~s[SELECT metrics { v: time_series.smoothed(5) }])
 
     assert q.select == [
@@ -1236,7 +1236,7 @@ line two""" { name }))
     assert [{:computed, "v", {:call, "ns.sum", ^args}}] = q2.select
   end
 
-  test "an EP2 namespaced call, zero args (lang_spec §8.5's own relevance() shape, qualified)", %{
+  test "an EP2 namespaced call, zero args (the relevance() shape, qualified)", %{
     grammar: g
   } do
     assert {:ok, %Query{} = q} = run(g, ~s[SELECT articles { score: search.relevance() }])
@@ -1279,7 +1279,7 @@ line two""" { name }))
     assert q.havings == [{:in, {:call, "count", [{:field, ["id"]}]}, [1, 2]}]
   end
 
-  test "a WITH declaration binds a name to a full query, the lang_spec.md §9 worked example",
+  test "a WITH declaration binds a name to a full query, the worked example",
        %{grammar: g} do
     assert {:ok, %Query{} = q} =
              run(
@@ -1445,7 +1445,7 @@ line two""" { name }))
   } do
     # `with_decl` references `combined_select`, not plain `select`, so
     # this is no longer a scope-boundary error -- `WITH RECURSIVE`
-    # (lang_spec.md §5.4.1) is the reason a `WITH` binding needed to be
+    # is the reason a `WITH` binding needed to be
     # combinable at all, but nothing restricts an *ordinary* `WITH` from
     # using the same grammar position now that it exists. A nested
     # `SELECT` body item is still restricted (`body_item` still
@@ -1498,7 +1498,7 @@ line two""" { name }))
     assert q.select == [{:computed, "x", {:call, "sum", [{:distinct, {:field, ["price"]}}]}}]
   end
 
-  test "json(<field>).path parses to {:dot, {:call, \"json\", args}, path}, the lang_spec.md §7 worked example",
+  test "json(<field>).path parses to {:dot, {:call, \"json\", args}, path}, the worked example",
        %{grammar: g} do
     assert {:ok, %Query{} = q} =
              run(g, ~s[SELECT orders WHERE json(metadata).color = "red" { id }])
@@ -1533,7 +1533,7 @@ line two""" { name }))
     assert q.select == [{:computed, "x", {:dot, {:call, "sum", [{:field, ["price"]}]}, ["foo"]}}]
   end
 
-  test "in accepts a literal on the left and a plain field path as a computed list, the lang_spec.md §7 worked example",
+  test "in accepts a literal on the left and a plain field path as a computed list, the worked example",
        %{grammar: g} do
     assert {:ok, %Query{} = q} =
              run(g, ~s[SELECT orders WHERE "urgent" in metadata.tags { id }])
@@ -1585,7 +1585,7 @@ line two""" { name }))
     assert q.wheres == [{:in, {:literal, "active"}, ["active", "pending"]}]
   end
 
-  describe "window functions (lang_spec.md §5.5)" do
+  describe "window functions" do
     test "row_number()/rank() parse with zero arguments", %{grammar: g} do
       assert {:ok, %Query{} = q} = run(g, ~s[SELECT orders { n: row_number() OVER }])
       assert q.select == [{:computed, "n", {:window, {:call, "row_number", []}, [], [], nil}}]
@@ -1599,7 +1599,7 @@ line two""" { name }))
       assert q.select == [{:computed, "n", {:call, "row_number", []}}]
     end
 
-    test "the lang_spec.md §11 worked example, PARTITION BY and ORDER BY together", %{
+    test "the worked example, PARTITION BY and ORDER BY together", %{
       grammar: g
     } do
       assert {:ok, %Query{} = q} =
@@ -1698,7 +1698,7 @@ line two""" { name }))
     end
   end
 
-  describe "TYPE declarations (lang_spec.md §7) -- parsed shape; consumption is Scry.Core.TypeCheck's own job" do
+  describe "TYPE declarations -- parsed shape; consumption is Scry.Core.TypeCheck's own job" do
     test "a plain, non-nullable type", %{grammar: g} do
       assert {:ok, %Query{} = q} = run(g, ~s(TYPE Employee { id: Int } SELECT users { id }))
 
@@ -1730,7 +1730,7 @@ line two""" { name }))
       assert q.type_decls["Employee"].kind == "relational"
     end
 
-    test "a union type, the lang_spec.md §7 worked example", %{grammar: g} do
+    test "a union type, the worked example", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(g, ~s(TYPE Event { field: String | Int } SELECT users { id }))
 
@@ -1749,7 +1749,7 @@ line two""" { name }))
              ]
     end
 
-    test "JSON<{...}>, the lang_spec.md §7 worked example for an inline shape", %{grammar: g} do
+    test "JSON<{...}>, the worked example for an inline shape", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(
                  g,
@@ -1825,7 +1825,7 @@ line two""" { name }))
 
     test "a type name colliding with an existing keyword needs backtick-escaping, same as any field name",
          %{grammar: g} do
-      # lang_spec §3: "Escaped with backtick only on keyword collision" --
+      # "Escaped with backtick only on keyword collision" --
       # "order" is already KW_ORDER (ORDER BY), reclassified globally by
       # Scry.Core.Grammar.KeywordRefiner regardless of grammar position,
       # so a bare `TYPE Order { ... }` doesn't parse; this is expected,
@@ -1847,7 +1847,7 @@ line two""" { name }))
     end
   end
 
-  describe "; block comments (lang_spec.md §3)" do
+  describe "; block comments" do
     test "comments out an entire alternate SELECT before the real one", %{grammar: g} do
       assert {:ok, %Query{} = q} =
                run(g, "; SELECT orders { total }\nSELECT users { id }")

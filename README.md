@@ -1,15 +1,12 @@
 # scry_core
 
-The core grammar/compiler library for [Scry](https://github.com/joetjen/scry) —
+The core grammar/compiler library for Scry —
 lexical structure, literals, core keyword/operator reference, core block
 structure, type system, and the EP1/EP2 extension-point declarations every
 kind library (`scry_relational`, `scry_graph`, `scry_time_series`, ...)
-composes against. No backend kind of its own — see `scry`'s
-[`lang_spec.md`](https://github.com/joetjen/scry/blob/main/lang_spec.md) §2
-and `impl_spec.md` §1–§2 for the full design.
+composes against. No backend kind of its own.
 
-Source: <https://github.com/joetjen/scry_core>. Specs live in the separate
-[`scry`](https://github.com/joetjen/scry) repository.
+Source: <https://github.com/joetjen/scry_core>.
 
 ## Installation
 

@@ -1,6 +1,6 @@
 defmodule Scry.Core.Grammar.BlockCommentLexeme do
   @moduledoc """
-  `;` block comments (lang_spec.md §3: "Valid only immediately before a
+  `;` block comments ("Valid only immediately before a
   block-opening keyword (`select`, `via`, `with`, `fragment`, `type`, or
   an EP1(b)-contributed keyword); consumes through its own matching `}`
   via `{`/`}` depth counting. Unterminated block comment is a compile
@@ -58,7 +58,7 @@ defmodule Scry.Core.Grammar.BlockCommentLexeme do
   rest == input`), `:fail` when `;` isn't immediately (modulo trivia)
   followed by a recognized keyword, or when no matching `}` is ever
   found (surfaces as an ordinary lexer-stage parse error further up the
-  pipeline -- lang_spec's own "unterminated block comment is a compile
+  pipeline -- an "unterminated block comment is a compile
   error").
   """
   @spec scan(binary(), term(), map()) :: {:ok, binary(), binary(), nil} | :fail

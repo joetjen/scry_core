@@ -1,7 +1,7 @@
 defmodule Scry.Core.WithCycleCheck do
   @moduledoc """
   Static cycle detection over a document's own `WITH` bindings
-  (`Scry.Core.Query.t/0`'s own `with_bindings`, lang_spec.md §9), invoked
+  (`Scry.Core.Query.t/0`'s own `with_bindings`), invoked
   once from `Scry.Core.Actions`' own `handle_rule(:document, ...)` before
   `Scry.Core.parse/1` ever returns.
 
@@ -23,7 +23,7 @@ defmodule Scry.Core.WithCycleCheck do
   `Scry.Core.FragmentResolver`'s own cycle check already established for
   fragment spreads.
 
-  **`WITH RECURSIVE` (lang_spec.md §5.4.1) is the one deliberate
+  **`WITH RECURSIVE` is the one deliberate
   exception**: a binding whose own value is `{:recursive, query}` is
   allowed to reference *itself* directly (that's the entire point --
   `Scry.Core.QueryOps.resolve_source/5` runs a real, terminating

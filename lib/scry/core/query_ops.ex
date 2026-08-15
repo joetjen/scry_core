@@ -36,7 +36,7 @@ defmodule Scry.Core.QueryOps do
   See `CHANGELOG.md` for the full history of what each piece of this
   toolkit was built to do -- the "engine trust model" framing is new,
   but the per-row/per-group semantics themselves (`GROUP BY`/`ROLLUP`/
-  `CUBE`, every lang_spec.md §5.8 aggregate, window functions, casts,
+  `CUBE`, every aggregate, window functions, casts,
   `WHEN`, `json(...)`, `count(distinct ...)`, null-safety) are
   unchanged from `Scry.Core.Executor`'s own prior implementation,
   extracted here verbatim.
@@ -69,11 +69,11 @@ defmodule Scry.Core.QueryOps do
 
   @doc """
   Every core built-in function name (`@aggregate_names ++ @cast_names`)
-  -- the names lang_spec.md §2's own EP2 auto-import ordering means
+  -- the names EP2's own auto-import ordering means
   when it says "core's own built-ins always win first, a variant can
   never shadow a core name." Public specifically so a kind package that
   needs this same list for its own, unrelated purpose (`scry_logic`'s
-  own wildcard-relation-call fallback, lang_spec.md §8.4: any bare
+  own wildcard-relation-call fallback: any bare
   `name(args)` this list doesn't recognize is tried as a relation call)
   can call this directly instead of hand-duplicating it -- found and
   fixed the hard way, `scry_logic`'s own copy had already drifted stale
@@ -183,7 +183,7 @@ defmodule Scry.Core.QueryOps do
   *correlation* to a non-immediate ancestor does not); and correlation
   is only detected in a nested query's own `wheres`, specifically a
   comparison's right-hand side (`{:field, [ancestor, field]}`,
-  lang_spec's own worked example shape) -- not `select`/`order_bys`,
+  a worked example shape) -- not `select`/`order_bys`,
   and not a two-or-more-segment path under the ancestor. Both are real
   gaps versus the old interpreter's full scope-chain, kept narrow on
   purpose rather than reproducing that entire mechanism here.
@@ -191,7 +191,7 @@ defmodule Scry.Core.QueryOps do
   @spec run_document(term(), Query.t() | CombinedQuery.t(), params(), module()) ::
           {:ok, Enumerable.t()} | {:error, term()}
   def run_document(conn, query_or_combined, params, engine_module) do
-    # `with_bindings` (lang_spec.md §9's `WITH`) only ever lives on the
+    # `with_bindings` (the `WITH` binding map) only ever lives on the
     # top-level `%Query{}`/`%CombinedQuery{}` a whole document parses
     # to -- a nested `%Query{}` embedded in `select` has its own field
     # default to `%{}`, never populated by the parser (confirmed
@@ -332,14 +332,14 @@ defmodule Scry.Core.QueryOps do
   # A query whose own `source` is exactly `[name]` for a declared
   # `WITH` binding has no real engine-side existence at all -- it's
   # resolved by running the bound query (fresh, every time, no
-  # caching -- lang_spec.md §9's own documented cost tradeoff,
+  # caching -- a documented cost tradeoff,
   # unchanged) and treating its own result rows as `query`'s own
   # source, via `run_flat/3` (there's no engine left to delegate the
   # rest of `query` to once its source is already-materialized rows).
   # Any other source is a real one -- handed to `engine_module.
   # execute/3` whole, unmodified.
   #
-  # `{:recursive, combined}` (lang_spec §5.4.1's own `WITH RECURSIVE`)
+  # `{:recursive, combined}` (`WITH RECURSIVE`)
   # and `{:materialized, rows}` (a transient, iteration-local override
   # `run_recursive_fixpoint/6` installs while evaluating a recursive
   # term against the *previous* step's own rows, never present in a
@@ -385,8 +385,8 @@ defmodule Scry.Core.QueryOps do
   defp resolve_source(conn, query, params, engine_module, _with_bindings),
     do: engine_module.execute(conn, query, params)
 
-  # `WITH RECURSIVE name = base UNION[ ALL] recursive_term` (lang_spec
-  # §5.4.1) -- real SQL:1999 fixpoint iteration, not a bounded
+  # `WITH RECURSIVE name = base UNION[ ALL] recursive_term` --
+  # real SQL:1999 fixpoint iteration, not a bounded
   # approximation. `base` runs exactly once; `recursive_term` then
   # re-runs repeatedly, each time against only the *previous* step's
   # own newly-produced rows (semi-naive evaluation -- re-checking
@@ -394,14 +394,14 @@ defmodule Scry.Core.QueryOps do
   # needlessly quadratic), until a step contributes nothing.
   #
   # `union`'s own dedup is what makes this terminate over cyclic data
-  # at all (lang_spec's own stated reasoning) -- `new_rows` is always
+  # at all -- `new_rows` is always
   # `next_rows` minus whatever's already in the running accumulator.
   # `union_all` never dedupes, matching `combine_rows/3`'s own existing
   # semantics -- termination there is entirely the query author's own
-  # responsibility (lang_spec: "use union all only if termination is
+  # responsibility ("use union all only if termination is
   # otherwise guaranteed, e.g. a hops bound"), so `@max_recursive_with_iterations`
   # below exists purely as an engineering safety net against a genuine
-  # runaway, not as part of lang_spec's own semantics.
+  # runaway, not as part of the construct's own defined semantics.
   @max_recursive_with_iterations 10_000
 
   defp run_recursive_fixpoint(
@@ -966,7 +966,7 @@ defmodule Scry.Core.QueryOps do
   end
 
   # Covers `{:computed, alias, expr, predicate}` (a per-item scoping
-  # `WHERE`, lang_spec.md §8.2) too, via simple arity mismatch against
+  # `WHERE`) too, via simple arity mismatch against
   # the two 3-tuple clauses above -- no clause of its own needed. The
   # streaming/incremental fold (`accumulate_chunk/5`, `update_agg/6`)
   # has no way to apply a *per-body-item* filter before folding a row
@@ -1262,7 +1262,7 @@ defmodule Scry.Core.QueryOps do
 
   defp raise_aggregate_nil_error(call_text) do
     raise ArgumentError,
-          "aggregate #{call_text} encountered a nil value -- lang_spec.md's own " <>
+          "aggregate #{call_text} encountered a nil value -- " <>
             "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
             "nil-skipping); filter it out explicitly first"
   end
@@ -1470,8 +1470,8 @@ defmodule Scry.Core.QueryOps do
   defp body_item_has_aggregate_call?({:computed, _alias, expr}),
     do: expr_has_aggregate_call?(expr)
 
-  # A 4-tuple computed item (a per-item scoping `WHERE` attached,
-  # lang_spec.md §8.2) is routed to the aggregate path exactly when its
+  # A 4-tuple computed item (a per-item scoping `WHERE` attached)
+  # is routed to the aggregate path exactly when its
   # own `expr` genuinely has an aggregate call, the identical rule the
   # 3-tuple clause just above already applies -- *not* unconditionally
   # true just because a trailing `WHERE` is present. A trailing `WHERE`
@@ -1569,7 +1569,7 @@ defmodule Scry.Core.QueryOps do
   # field path every caller before this widening already built (`Scry.
   # Core.Query.t()`'s own moduledoc explains why that shape stays valid
   # forever, not just during a migration window) or a full `expr()`
-  # (lang_spec.md §8.5's own `ORDER BY relevance() DESC`, `priv/grammar
+  # (`ORDER BY relevance() DESC`, `priv/grammar
   # .aether`'s own `order_item` comment) -- resolved via `resolve_rhs/4`
   # like any other expression position. The two are unambiguous: a bare
   # key is always `[String.t(), ...]` (every segment a string), which no
@@ -1663,7 +1663,7 @@ defmodule Scry.Core.QueryOps do
        when name in @aggregate_names do
     raise ArgumentError,
           "#{name}(...) is an aggregate function -- only valid inside GROUP BY/HAVING or a " <>
-            "flat-aggregate SELECT (lang_spec.md §5.2/§5.8), not an ordinary per-row predicate"
+            "flat-aggregate SELECT, not an ordinary per-row predicate"
   end
 
   defp resolve_predicate_lhs({:call, name, args}, row, scope, params) do
@@ -1696,12 +1696,12 @@ defmodule Scry.Core.QueryOps do
 
   defp resolve_predicate_lhs({:literal, value}, _row, _scope, _params), do: value
 
-  # Set comparison (lang_spec §5.9, ISO 80000-2): `⊂`/`⊃` are *proper*
+  # Set comparison (ISO 80000-2): `⊂`/`⊃` are *proper*
   # subset/superset (the analogous relationship `<` has to `<=`, applied
   # one level up) -- a set compared against itself is neither its own
   # proper subset nor its own proper superset, only its own subset-or-
   # equal/superset-or-equal. Structural, the same "compound values
-  # compare by content, not identity" rule lang_spec §3's own `=`
+  # compare by content, not identity" rule `=`
   # already states for lists -- `MapSet.new/1` before comparing means
   # duplicate/reordered elements on either side never affect the
   # result, matching a genuine mathematical set's own semantics rather
@@ -1726,7 +1726,7 @@ defmodule Scry.Core.QueryOps do
 
   defp compare(op, a, b) when op in [:subset, :subset_eq, :superset, :superset_eq] do
     raise ArgumentError,
-          "#{op} requires two list operands (lang_spec.md §5.9's own set-comparison " <>
+          "#{op} requires two list operands (the set-comparison " <>
             "operators) -- got #{inspect(a)} and #{inspect(b)}"
   end
 
@@ -1735,7 +1735,7 @@ defmodule Scry.Core.QueryOps do
   defp raise_null_safety_error do
     raise ArgumentError,
           "comparing a nullable field against a typed value encountered a nil value -- " <>
-            "lang_spec.md's own null-safety rule (\"comparing a nullable field directly " <>
+            "the null-safety rule (\"comparing a nullable field directly " <>
             "against a typed value is a hard error\") -- guard it first (e.g. " <>
             "WHERE NOT (field = nil) AND field > ...), or compare against nil explicitly " <>
             "(WHERE field = nil) to check nullness instead"
@@ -1817,7 +1817,7 @@ defmodule Scry.Core.QueryOps do
   defp resolve_rhs({:call, name, _args}, _row, _scope, _params) when name in @aggregate_names do
     raise ArgumentError,
           "#{name}(...) is an aggregate function -- only valid inside GROUP BY/HAVING or a " <>
-            "flat-aggregate SELECT (lang_spec.md §5.2/§5.8), not an ordinary per-row expression"
+            "flat-aggregate SELECT, not an ordinary per-row expression"
   end
 
   defp resolve_rhs({:call, name, args}, row, scope, params) do
@@ -1840,7 +1840,7 @@ defmodule Scry.Core.QueryOps do
   defp arith(:div, a, b), do: Rational.div(a, b)
   defp arith(:pow, a, b), do: Rational.pow(a, b)
 
-  # lang_spec §5.10's own bitwise AND/OR -- integer-only, unlike
+  # Bitwise AND/OR -- integer-only, unlike
   # `arith/3` just above: `Scry.Core.Rational`'s own numeric tower has
   # no bitwise closure at all (a bitwise operation on a genuine
   # fraction, or on a float, has no defined meaning), so an operand
@@ -1857,7 +1857,7 @@ defmodule Scry.Core.QueryOps do
           "bitwise #{op} requires two integer operands, got #{inspect(a)} and #{inspect(b)}"
   end
 
-  # Unary minus/unary bitwise-NOT (lang_spec §5's own precedence-table
+  # Unary minus/unary bitwise-NOT (precedence-table
   # tier 1). `:neg` closes over the same numeric tower `arith/3`'s own
   # `:sub` already does (`Rational.sub(0, a)` -- there's no dedicated
   # `Rational.negate/1`, and building one just to skip one subtraction
@@ -2061,7 +2061,7 @@ defmodule Scry.Core.QueryOps do
 
     if Enum.any?(values, &is_nil/1) do
       raise ArgumentError,
-            "aggregate count(distinct ...) encountered a nil value -- lang_spec.md's own " <>
+            "aggregate count(distinct ...) encountered a nil value -- " <>
               "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
               "nil-skipping); filter it out explicitly first"
     end
@@ -2092,7 +2092,7 @@ defmodule Scry.Core.QueryOps do
 
     if Enum.any?(values, &is_nil/1) do
       raise ArgumentError,
-            "aggregate percentile(...) encountered a nil value -- lang_spec.md's own " <>
+            "aggregate percentile(...) encountered a nil value -- " <>
               "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
               "nil-skipping); filter it out explicitly first"
     end
@@ -2105,7 +2105,7 @@ defmodule Scry.Core.QueryOps do
           "aggregate percentile/2 expects exactly two arguments (value, p), got #{length(args)}"
   end
 
-  # rate(<duration>) -- lang_spec.md §5.8/§8.2: an events-per-time-unit
+  # rate(<duration>) -- an events-per-time-unit
   # aggregate (LogQL's own rate() flavor, not PromQL's counter-reset-
   # compensated slope) -- count(rows in scope) normalized to a per-
   # <duration> figure using the group's own min/max value of whatever
@@ -2122,7 +2122,7 @@ defmodule Scry.Core.QueryOps do
   defp eval_aggregate("rate", [_duration_arg], _member_rows, _scope, _params, nil) do
     raise ArgumentError,
           "rate(...) needs a LAST <duration> OF <field> clause somewhere in this query to " <>
-            "know which timestamp field to measure elapsed time against (lang_spec.md §8.2) " <>
+            "know which timestamp field to measure elapsed time against " <>
             "-- this query has none"
   end
 
@@ -2134,7 +2134,7 @@ defmodule Scry.Core.QueryOps do
     if Enum.any?(timestamps, &is_nil/1) do
       raise ArgumentError,
             "aggregate rate(...) encountered a nil value in its own LAST ... OF " <>
-              "#{inspect(time_field)} timestamp field -- lang_spec.md's own \"Aggregates " <>
+              "#{inspect(time_field)} timestamp field -- \"Aggregates " <>
               "over nullable fields hard-error the same way\" (no silent nil-skipping); " <>
               "filter it out explicitly first"
     end
@@ -2163,7 +2163,7 @@ defmodule Scry.Core.QueryOps do
 
     if Enum.any?(values, &is_nil/1) do
       raise ArgumentError,
-            "aggregate #{name}(...) encountered a nil value -- lang_spec.md's own " <>
+            "aggregate #{name}(...) encountered a nil value -- " <>
               "\"Aggregates over nullable fields hard-error the same way\" (no silent " <>
               "nil-skipping); filter it out explicitly first"
     end
@@ -2318,7 +2318,7 @@ defmodule Scry.Core.QueryOps do
     raise ArgumentError, "json(...) only applies to a String value, got: #{inspect(other)}"
   end
 
-  # `dxn(<field>)`/`dxnb(<field>)` -- lang_spec §7's own escape hatches
+  # `dxn(<field>)`/`dxnb(<field>)` -- escape hatches
   # for `DXN`/`DXNB`ish fields not declared that type at all, symmetric
   # with `json(<field>)` in every respect above (real siblings of each
   # other, not `json` with a different name bolted on): reinterprets a
@@ -2326,7 +2326,7 @@ defmodule Scry.Core.QueryOps do
   # same "not this type at all" error shape. `Dextrin.decode/2` (`.dxn`
   # text) and `Dextrin.decode_binary/2` (`.dxnb`, CBOR-based binary)
   # are the one real difference between the two -- text vs. binary
-  # encoding of the identical value space, lang_spec's own stated "the
+  # encoding of the identical value space, the stated "the
   # *only* difference between the two type names."
   #
   # Both default to `Dextrin`'s own `trusted: true` (a DXN `keyword`
@@ -2405,7 +2405,7 @@ defmodule Scry.Core.QueryOps do
   defp project_item({:computed, alias_name, expr}, row, params),
     do: {:ok, alias_name, resolve_rhs(expr, row, [], params)}
 
-  # A computed field's own trailing `WHERE` (lang_spec.md §8.2's own
+  # A computed field's own trailing `WHERE` (a
   # worked example, `Scry.Core.Query`'s own moduledoc has the full
   # "why this shape" reasoning) scopes which rows contribute to *this
   # one item's own aggregate* -- meaningless in a flat, non-aggregate
@@ -2448,8 +2448,8 @@ defmodule Scry.Core.QueryOps do
     end
   end
 
-  # `HAVING` referencing a computed field's own alias (lang_spec.md
-  # §8.2's own worked example, `HAVING error_rate / total_rate > 0.05`
+  # `HAVING` referencing a computed field's own alias (a
+  # worked example, `HAVING error_rate / total_rate > 0.05`
   # against a `SELECT` body that itself defines `error_rate`/
   # `total_rate` as `{:computed, ...}` items) -- a real gap `resolve_
   # group_lhs/rhs`'s existing `{:field, path}`/bare-`path` clauses can
@@ -2489,8 +2489,8 @@ defmodule Scry.Core.QueryOps do
         {:computed, alias_name, expr} ->
           [{alias_name, expr}]
 
-        # A 4-tuple alias (its own per-item scoping `WHERE`, lang_spec.md
-        # §8.2) substitutes to a `{:scoped, predicate, expr}` marker, not
+        # A 4-tuple alias (its own per-item scoping `WHERE`)
+        # substitutes to a `{:scoped, predicate, expr}` marker, not
         # `expr` alone -- `HAVING error_rate > 0.05` referencing an
         # `error_rate: rate(30s) WHERE status ~ @r/^5/` alias must see
         # the *same* row-scoping the `SELECT` projection of `error_rate`
@@ -2569,7 +2569,7 @@ defmodule Scry.Core.QueryOps do
   # `sum(total)`'s own inner field reference into `sum(sum(total))`).
   # A call left entirely untouched, args included, is the correct,
   # conservative behavior regardless of whether it's an aggregate or an
-  # ordinary cast -- lang_spec's own worked example never needs an
+  # ordinary cast -- the worked example never needs an
   # alias resolved *inside* a call's own arguments, only as a bare
   # comparison/arithmetic operand.
   defp rewrite_having_expr({:call, _name, _args} = call, _alias_exprs), do: call
@@ -2610,7 +2610,7 @@ defmodule Scry.Core.QueryOps do
     {:ok, alias_name, resolve_group_rhs(expr, member_rows, scope, params, time_field)}
   end
 
-  # A computed field's own trailing `WHERE` (lang_spec.md §8.2, `Scry.
+  # A computed field's own trailing `WHERE` (`Scry.
   # Core.Query`'s own moduledoc) -- filters `member_rows` down to only
   # the ones satisfying `predicate` *before* resolving `expr` against
   # what survives, scoping an aggregate call inside `expr` to just
@@ -2636,7 +2636,7 @@ defmodule Scry.Core.QueryOps do
   defp project_group_item(item, _member_rows, _rolled_up, _scope, _params, _time_field),
     do: {:error, {:unsupported_grouped_body_item, item}}
 
-  # ---- Window functions (lang_spec.md §5.5/§5.8) --------------------------
+  # ---- Window functions --------------------------
 
   defp collect_and_rewrite_window_calls(select) do
     {rewritten, {_next_index, windows}} = Enum.map_reduce(select, {0, []}, &rewrite_body_item/2)
@@ -2648,8 +2648,8 @@ defmodule Scry.Core.QueryOps do
     {{:computed, alias_name, rewritten_expr}, acc}
   end
 
-  # A 4-tuple computed item (its own per-item scoping `WHERE`,
-  # lang_spec.md §8.2) is deliberately *not* threaded through
+  # A 4-tuple computed item (its own per-item scoping `WHERE`)
+  # is deliberately *not* threaded through
   # `rewrite_expr/2` the way a 3-tuple item is just above -- combining
   # a window function's own `OVER (...)` row-ordering/framing with a
   # *second*, independent row-scoping mechanism on the same item would

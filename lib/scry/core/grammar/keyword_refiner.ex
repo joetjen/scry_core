@@ -1,12 +1,11 @@
 defmodule Scry.Core.Grammar.KeywordRefiner do
   @moduledoc """
   Case-insensitive reclassification for core's structural keywords
-  (lang_spec.md §3: "Keywords are case-insensitive"). Aether's own
+  ("Keywords are case-insensitive"). Aether's own
   `@keywords` sugar does an exact, case-sensitive match against the
   token's raw text (`Grammar.Lexer.apply_refiner/3`) -- `@case_insensitive`
   does not extend to it, confirmed empirically while building
-  priv/grammar.aether (see impl_spec.md's Ichor-investigation history for
-  the general pattern this follows). This is `@refine`'s escape hatch:
+  priv/grammar.aether. This is `@refine`'s escape hatch:
   the same table `@keywords` would otherwise take, looked up against the
   downcased text instead of the raw one.
   """
