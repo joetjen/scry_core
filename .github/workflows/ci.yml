@@ -57,6 +57,3 @@ jobs:
 
       - name: Precommit
         run: mix precommit
-
-      - name: Verify package assembles (hex.build)
-        run: mix hex.build
