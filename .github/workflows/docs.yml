@@ -20,6 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout dextrin (path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: joetjen/dextrin
+          path: ../dextrin
+
       - name: Set up Elixir
         id: beam
         uses: erlef/setup-beam@v1
